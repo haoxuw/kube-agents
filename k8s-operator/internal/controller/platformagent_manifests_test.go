@@ -209,6 +209,7 @@ func TestBuildDeployment(t *testing.T) {
 	if envMap["CUSTOM_VAR"].Value != "new-custom-value" {
 		t.Errorf("expected CUSTOM_VAR new-custom-value, got %s", envMap["CUSTOM_VAR"].Value)
 	}
+
 	if envMap["AGENT_BROWSER_ARGS"].Value != "--no-sandbox --disable-gpu" {
 		t.Errorf("expected AGENT_BROWSER_ARGS --no-sandbox --disable-gpu, got %s", envMap["AGENT_BROWSER_ARGS"].Value)
 	}
