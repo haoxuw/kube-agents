@@ -151,9 +151,26 @@ class CommandExecutorTest(unittest.TestCase):
         self.assertEqual(str(Path(self.temp_dir.name) / "home"), executor.environment["HOME"])
 
     def test_bootstrap_prepares_profile_for_later_commands(self):
-        executor = self.executor()
-        executor.bootstrap("printf ready > \"$HOME/bootstrap-state\"")
+        import os
+
+        previous = os.environ.get("GKE_PROJECT_ID")
+        os.environ["GKE_PROJECT_ID"] = "bootstrap-project"
+        try:
+            executor = self.executor()
+            executor.bootstrap(
+                'printf "%s" "$GKE_PROJECT_ID" > "$HOME/bootstrap-state"'
+            )
+        finally:
+            if previous is None:
+                del os.environ["GKE_PROJECT_ID"]
+            else:
+                os.environ["GKE_PROJECT_ID"] = previous
         self.assertTrue((Path(self.temp_dir.name) / "home" / "bootstrap-state").exists())
+        self.assertEqual(
+            "bootstrap-project",
+            (Path(self.temp_dir.name) / "home" / "bootstrap-state").read_text(),
+        )
+        self.assertNotIn("GKE_PROJECT_ID", executor.environment)
 
     def test_bootstrap_failure_does_not_return_command_output(self):
         with self.assertRaisesRegex(RuntimeError, "exit code 9") as raised:

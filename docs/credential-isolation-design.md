@@ -206,8 +206,11 @@ only command output, never a mounted Git credential file.
 
 The operator always creates the sandbox and Envoy credential sidecar together
 in the existing `<agent>-gateway` Deployment and retains the existing
-`<agent>-data` PVC. This upgrades the workload in place without stranding agent
-state. It deletes operator-owned resources from the abandoned two-Pod design:
+`<agent>-data` PVC. Before the sandbox starts, a managed init container removes
+legacy gcloud, GitHub, Git, Kubernetes, AWS, Azure, Docker, npm, and Python
+credential files from that PVC. This preserves agent state without carrying
+credentials forward from an older deployment. It deletes operator-owned
+resources from the abandoned two-Pod design:
 
 - `<agent>-credential-proxy` Deployment;
 - `<agent>-credential-proxy` Service;

@@ -311,6 +311,9 @@ func buildDeployment(agent *agentv1alpha1.PlatformAgent, configHash, fluentBitHa
 	if agent.Spec.Harness != nil && agent.Spec.Harness.Hermes != nil && agent.Spec.Harness.Hermes.AgentHome != "" {
 		homeDir = agent.Spec.Harness.Hermes.AgentHome
 	}
+	// The data PVC survives upgrades. Remove credential files written by older,
+	// credentialed deployments before the agent sandbox can mount the PVC.
+	initContainers = append([]corev1.Container{buildSandboxCredentialCleanup(image, pullPolicy)}, initContainers...)
 
 	dashboardVal := "0"
 	if agent.Spec.Harness != nil && agent.Spec.Harness.Hermes != nil && agent.Spec.Harness.Hermes.DashboardEnabled != nil {
@@ -563,6 +566,35 @@ func buildDeployment(agent *agentv1alpha1.PlatformAgent, configHash, fluentBitHa
 	}
 }
 
+func buildSandboxCredentialCleanup(image string, pullPolicy corev1.PullPolicy) corev1.Container {
+	return corev1.Container{
+		Name:            "sandbox-credential-cleanup",
+		Image:           image,
+		ImagePullPolicy: pullPolicy,
+		Command:         []string{"sh", "-ec"},
+		Args: []string{`rm -rf -- \
+  /workspace/home/.config/gcloud \
+  /workspace/home/.config/gh \
+  /workspace/home/.aws/credentials \
+  /workspace/home/.aws/cli/cache \
+  /workspace/home/.aws/sso/cache \
+  /workspace/home/.azure \
+  /workspace/home/.docker/config.json \
+  /workspace/home/.git-credentials \
+  /workspace/home/.hermes/.env \
+  /workspace/home/.kube/config \
+  /workspace/home/.netrc \
+  /workspace/home/.npmrc \
+  /workspace/home/.pypirc`},
+		VolumeMounts: []corev1.VolumeMount{{Name: "platform-agent-data-vol", MountPath: "/workspace"}},
+		SecurityContext: &corev1.SecurityContext{
+			AllowPrivilegeEscalation: ptr.To(false),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+	}
+}
+
 func buildCredentialProxyPolicyConfigMap(agent *agentv1alpha1.PlatformAgent) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
@@ -592,11 +624,13 @@ func buildCredentialProxySidecar(agent *agentv1alpha1.PlatformAgent, homeDir str
 		Command:         []string{"/usr/local/bin/envoy-credential-sidecar"},
 		Env:             envVars,
 		Ports: []corev1.ContainerPort{
-			{Name: "credential-proxy", ContainerPort: credentialProxyPort},
+			{Name: "cred-proxy", ContainerPort: credentialProxyPort},
 			{Name: "api", ContainerPort: 8643},
 		},
 		ReadinessProbe: &corev1.Probe{
-			ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Host: "127.0.0.1", Path: "/healthz", Port: intstr.FromString("credential-proxy")}},
+			ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{
+				"curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8765/healthz",
+			}}},
 			InitialDelaySeconds: 2,
 			PeriodSeconds:       5,
 		},

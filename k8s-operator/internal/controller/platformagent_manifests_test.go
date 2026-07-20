@@ -296,10 +296,18 @@ func TestBuildDeployment(t *testing.T) {
 		}
 	}
 
-	if len(dep.Spec.Template.Spec.InitContainers) != 2 {
-		t.Errorf("expected 2 init containers, got %d", len(dep.Spec.Template.Spec.InitContainers))
+	if len(dep.Spec.Template.Spec.InitContainers) != 3 {
+		t.Errorf("expected managed cleanup plus 2 configured init containers, got %d", len(dep.Spec.Template.Spec.InitContainers))
 	} else {
-		initC1 := dep.Spec.Template.Spec.InitContainers[0]
+		cleanup := dep.Spec.Template.Spec.InitContainers[0]
+		if cleanup.Name != "sandbox-credential-cleanup" {
+			t.Errorf("expected managed credential cleanup first, got %s", cleanup.Name)
+		}
+		if len(cleanup.VolumeMounts) != 1 || cleanup.VolumeMounts[0].Name != "platform-agent-data-vol" {
+			t.Errorf("expected cleanup to mount the agent data PVC")
+		}
+
+		initC1 := dep.Spec.Template.Spec.InitContainers[1]
 		if initC1.Name != "init-git" {
 			t.Errorf("expected first init container name init-git, got %s", initC1.Name)
 		}
@@ -307,7 +315,7 @@ func TestBuildDeployment(t *testing.T) {
 			t.Errorf("expected first init container image git-image:latest, got %s", initC1.Image)
 		}
 
-		initC2 := dep.Spec.Template.Spec.InitContainers[1]
+		initC2 := dep.Spec.Template.Spec.InitContainers[2]
 		if initC2.Name != "init-bootstrap" {
 			t.Errorf("expected second init container name init-bootstrap, got %s", initC2.Name)
 		}

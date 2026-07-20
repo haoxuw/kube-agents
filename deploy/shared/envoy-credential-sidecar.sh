@@ -13,7 +13,7 @@ trap terminate EXIT INT TERM
 /opt/hermes/.venv/bin/python3 /opt/defaults/scripts/credential_proxy.py &
 runtime_pid=$!
 
-/usr/local/bin/envoy --config-path /etc/envoy/credential-proxy.yaml --log-level info &
+/usr/local/bin/envoy --config-path /etc/envoy/envoy-credential-proxy.yaml --log-level info &
 envoy_pid=$!
 
 wait -n "${runtime_pid}" "${envoy_pid}"

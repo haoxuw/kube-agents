@@ -1,8 +1,8 @@
 # check=skip=InvalidDefaultArgInFrom
+ARG HERMES_AGENT_TAG
 ARG ENVOY_VERSION=v1.38.0
 FROM envoyproxy/envoy:${ENVOY_VERSION} AS envoy-bin
 
-ARG HERMES_AGENT_TAG
 FROM nousresearch/hermes-agent:${HERMES_AGENT_TAG} AS agent-base
 
 USER root
@@ -156,7 +156,7 @@ FROM platform AS credential-proxy
 USER root
 
 COPY --from=envoy-bin /usr/local/bin/envoy /usr/local/bin/envoy
-COPY deploy/shared/envoy-credential-proxy.yaml /etc/envoy/credential-proxy.yaml
+COPY --chmod=0644 deploy/shared/envoy-credential-proxy.yaml /etc/envoy/envoy-credential-proxy.yaml
 COPY deploy/shared/envoy-credential-sidecar.sh /usr/local/bin/envoy-credential-sidecar
 
 RUN curl -sSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \

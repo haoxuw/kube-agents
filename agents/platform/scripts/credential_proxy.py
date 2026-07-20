@@ -477,10 +477,20 @@ class CommandExecutor:
         """Prepare the trusted shell profile without interpreting later commands."""
         if not command.strip():
             return
+        bootstrap_environment = self.environment.copy()
+        for name in (
+            "GKE_PROJECT_ID",
+            "GKE_CLUSTER_NAME",
+            "GKE_LOCATION",
+            "KUBE_CONTEXT_NAME",
+            "KUBE_DEFAULT_NAMESPACE",
+        ):
+            if name in os.environ:
+                bootstrap_environment[name] = os.environ[name]
         result = subprocess.run(
             ["/bin/bash", "--noprofile", "--norc", "-c", command],
             cwd=self.workspace_dir,
-            env=self.environment,
+            env=bootstrap_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
