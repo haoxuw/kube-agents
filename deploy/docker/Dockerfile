@@ -721,6 +721,22 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-result/apply_kanban_report_format.
     /opt/hermes/.venv/bin/python3 /tmp/kanban-result/verify_kanban_report_format.py && \
     rm -rf /tmp/kanban-result
 
+# Typed evidence and artifact records for delegated tasks (#804): a worker's
+# prose report is not evidence, so record_evidence/attach_artifact give it a
+# structured place to put what it executed and what it produced. The rows land
+# beside the task in kanban.db and the admin console's task projection carries
+# them verbatim. Registered behind the worker-only gate, so this block must
+# run after the kanban-worker-tools block above — the applier refuses
+# otherwise. See the module docstring in
+# deploy/docker/patches/kanban_evidence_tools.py.
+COPY --chmod=0644 deploy/docker/patches/kanban_evidence_tools.py /opt/hermes/tools/kanban_evidence_tools.py
+COPY deploy/docker/patches/apply_kanban_evidence_tools.py \
+     deploy/docker/patches/patchlib.py \
+     /tmp/kanban-evidence/
+RUN /opt/hermes/.venv/bin/python3 /tmp/kanban-evidence/apply_kanban_evidence_tools.py /opt/hermes && \
+    grep -q "_register_evidence_tools(registry, _check_kanban_worker_mode, tool_error)" /opt/hermes/tools/kanban_tools.py && \
+    rm -rf /tmp/kanban-evidence
+
 # Hotfix: three kanban scheduler faults, all measured on the cluster 2026-08-07,
 # all in `hermes_cli/kanban_db.py`. One patch, because three appliers rewriting
 # the same file could not see each other's anchors and their ordering lived in a
