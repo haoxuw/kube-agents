@@ -182,10 +182,13 @@ class ProjectionRoundTripTest(RecorderFixture):
                 {
                     "type": "advice_service_capacity",
                     "status": "completed",
-                    "apiMethod": "compute.beta.AdviceService.Capacity",
-                    "request": {"region": "us-central1"},
-                    "analysis": {"availableQuantity": 8},
-                    "executionRef": "exec-7",
+                    "details": {
+                        "apiMethod": "compute.beta.AdviceService.Capacity",
+                        "region": "us-central1",
+                        "request": {"region": "us-central1"},
+                        "analysis": {"availableQuantity": 8},
+                        "executionRef": "exec-7",
+                    },
                 }
             ],
         )

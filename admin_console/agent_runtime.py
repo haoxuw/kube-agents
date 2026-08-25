@@ -238,24 +238,36 @@ def tasks(session_id, limit):
             except sqlite3.OperationalError:
                 row["result"] = ""
             try:
-                row["evidence"] = [
-                    {
-                        "type": item["type"],
-                        "status": item["status"],
-                        "apiMethod": item["api_method"],
-                        "request": json.loads(item["request_json"] or "{}"),
-                        "analysis": json.loads(item["analysis_json"] or "{}"),
-                        "executionRef": item["execution_ref"],
-                    }
-                    for item in connection.execute(
-                        """
-                        SELECT type, status, api_method, request_json,
-                               analysis_json, execution_ref
-                        FROM task_evidence WHERE task_id = ? ORDER BY id
-                        """,
-                        (row["id"],),
+                row["evidence"] = []
+                for item in connection.execute(
+                    """
+                    SELECT type, status, api_method, request_json,
+                           analysis_json, execution_ref
+                    FROM task_evidence WHERE task_id = ? ORDER BY id
+                    """,
+                    (row["id"],),
+                ):
+                    request = json.loads(item["request_json"] or "{}")
+                    # The evidence contract nests provenance under `details`,
+                    # with the request's region surfaced beside it so
+                    # region-scoped evaluators need not re-parse the request.
+                    row["evidence"].append(
+                        {
+                            "type": item["type"],
+                            "status": item["status"],
+                            "details": {
+                                "apiMethod": item["api_method"],
+                                "region": str(request.get("region") or "")
+                                if isinstance(request, dict)
+                                else "",
+                                "request": request,
+                                "analysis": json.loads(
+                                    item["analysis_json"] or "{}"
+                                ),
+                                "executionRef": item["execution_ref"],
+                            },
+                        }
                     )
-                ]
             except (sqlite3.OperationalError, ValueError):
                 row["evidence"] = []
             try:
