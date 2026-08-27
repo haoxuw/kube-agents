@@ -883,6 +883,53 @@ class InteractionApiTest(unittest.TestCase):
             self.assertEqual(events[-1].event, "interaction.completed")
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_sqlite_store_round_trips_task_results_evidence_and_artifacts(self):
+        # The live portal persists every snapshot through this store; a
+        # serializer that enumerates task fields by hand silently strips the
+        # ones it does not name, which is exactly how a live run served empty
+        # evidence while its own event stream carried the full records.
+        evidence = (
+            {
+                "type": "quota_check",
+                "status": "completed",
+                "details": {"analysis": {"fits": False}},
+            },
+        )
+        artifacts = ({"type": "computeclass", "manifest": {"kind": "ComputeClass"}},)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "interactions.db"
+            store = SQLiteInteractionStore(path)
+            now = datetime.now(UTC)
+            store.create(
+                Interaction(
+                    interaction_id="ix_typed_records",
+                    agent_id="platform-agent",
+                    profile="default",
+                    session_id="portal_typed_records",
+                    input_text="Design the cluster",
+                    status=InteractionStatus.COMPLETED,
+                    created_at=now,
+                    updated_at=now,
+                    tasks=(
+                        TaskProjection(
+                            task_id="t_1",
+                            title="Design",
+                            assignee="platform",
+                            status="done",
+                            result="Full capacity report.",
+                            evidence=evidence,
+                            artifacts=artifacts,
+                        ),
+                    ),
+                )
+            )
+            persisted = SQLiteInteractionStore(path).get("ix_typed_records")
+
+        task = persisted.tasks[0]
+        self.assertEqual(task.result, "Full capacity report.")
+        self.assertEqual(task.evidence, evidence)
+        self.assertEqual(task.artifacts, artifacts)
+
     def test_sqlite_store_ignores_additive_fields_from_another_version(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "interactions.db"
