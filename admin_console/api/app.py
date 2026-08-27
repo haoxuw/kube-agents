@@ -41,6 +41,26 @@ def _error(code: str, message: str, *, retryable: bool = False) -> dict:
     return {"error": {"code": code, "message": message, "retryable": retryable}}
 
 
+#: Delegated design work routinely outlives the 15-minute default before its
+#: specialist closes the card; a launcher that knows its own deadline (the CUJ
+#: runner budgets via CUJ_TIMEOUT) can align the portal's settle window with
+#: it instead of timing out interactions whose worker is still on schedule.
+TASK_TIMEOUT_ENV = "KUBE_AGENTS_ADMIN_TASK_TIMEOUT"
+_DEFAULT_TASK_TIMEOUT = 900.0
+_MAX_TASK_TIMEOUT = 7200.0
+
+
+def _configured_task_timeout() -> float:
+    raw = os.environ.get(TASK_TIMEOUT_ENV, "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_TASK_TIMEOUT
+    if value <= 0:
+        return _DEFAULT_TASK_TIMEOUT
+    return min(value, _MAX_TASK_TIMEOUT)
+
+
 def _persisted_runtime_factory(account: str) -> RuntimeProviderFactory:
     def build() -> agent_runtime.AgentRuntimeProvider:
         connection = load_connection(account)
@@ -72,6 +92,7 @@ def create_app(
     service = service or ChatService(
         persisted_backend_factory(account),
         store=SQLiteInteractionStore(interaction_state_path()),
+        task_timeout=_configured_task_timeout(),
     )
     runtime_provider_factory = runtime_provider_factory or _persisted_runtime_factory(
         account

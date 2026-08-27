@@ -169,6 +169,13 @@ def isolated_portal(output: Path) -> Iterator[str]:
             "KUBE_AGENTS_ADMIN_USER": account,
             "KUBE_AGENTS_ADMIN_INTERACTION_STATE": str(output / "portal.db"),
             PORTAL_API_TOKEN_ENV: token,
+            # Align the portal's delegated-work settle window with the CUJ's
+            # own budget, so an on-schedule specialist is not timed out by a
+            # portal deadline shorter than the test's.
+            "KUBE_AGENTS_ADMIN_TASK_TIMEOUT": os.environ.get(
+                "CUJ_TIMEOUT", ""
+            ).strip()
+            or "1200",
         }
     )
     log = (output / "portal.log").open("w", encoding="utf-8")

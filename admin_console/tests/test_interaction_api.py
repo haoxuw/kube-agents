@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from admin_console.agent_chat import ChatRunResult, MAX_HISTORY_MESSAGES
 from admin_console.agent_runtime import AgentTaskUpdate, TaskUpdateResult
 from admin_console.api.authorization import portal_api_headers
-from admin_console.api.app import create_app
+from admin_console.api.app import _configured_task_timeout, create_app
 from admin_console.chat.service import FINAL_OUTPUT_LIMIT, ChatService
 from admin_console.chat.models import Interaction, InteractionStatus, TaskProjection
 from admin_console.chat.store import SQLiteInteractionStore
@@ -337,6 +337,23 @@ class InteractionApiTest(unittest.TestCase):
             len(composed), FINAL_OUTPUT_LIMIT + 200, "bound must hold"
         )
         self.assertIn("[Truncated:", composed)
+
+    def test_task_timeout_env_reaches_the_default_service(self):
+        # A launcher that knows its own deadline (the CUJ runner budgets via
+        # CUJ_TIMEOUT) must be able to align the portal's settle window with
+        # it; delegated design work routinely outlives the built-in default.
+        cases = [("1800", 1800.0), ("", 900.0), ("not-a-number", 900.0), ("-5", 900.0), ("999999", 7200.0)]
+        for raw, expected in cases:
+            with patch.dict(os.environ, {"KUBE_AGENTS_ADMIN_TASK_TIMEOUT": raw}):
+                app = create_app(
+                    ChatService(
+                        lambda: ScriptedBackend(),
+                        task_timeout=_configured_task_timeout(),
+                    )
+                )
+                self.assertEqual(
+                    app.state.chat_service._task_timeout, expected, raw
+                )
 
     def test_interaction_defaults_to_canonical_agent_and_chat_profile(self):
         backend = ScriptedBackend()
