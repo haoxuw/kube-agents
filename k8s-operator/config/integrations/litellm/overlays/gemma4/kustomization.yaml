@@ -40,6 +40,14 @@ patches:
                   cidr: 169.254.20.10/32
               - ipBlock:
                   cidr: 169.254.169.254/32
+              - ipBlock:
+                  cidr: 10.96.0.10/32
+              - ipBlock:
+                  cidr: 0.0.0.0/0
+                  except:
+                    - 10.0.0.0/8
+                    - 172.16.0.0/12
+                    - 192.168.0.0/16
           - ports:
               - port: 443
                 protocol: TCP
@@ -54,6 +62,14 @@ patches:
               - port: 80
                 protocol: TCP
             to:
+              - ipBlock:
+                  cidr: 169.254.169.254/32
+          - ports:
+              - port: 988
+                protocol: TCP
+            to:
+              - ipBlock:
+                  cidr: 169.254.169.252/32
               - ipBlock:
                   cidr: 169.254.169.254/32
           - ports:

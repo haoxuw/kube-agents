@@ -181,12 +181,14 @@ require-var = @test -n "$${$(1)}" || { echo "$(1) is not set. Export it; the ref
 IMAGES_JSON ?= $(CURDIR)/../images.json
 image_from_inventory = $(shell jq -r --arg n "$(1)" '.images[] | select(.name == $$n) | "\(.repository):\(.tag)"' "$(IMAGES_JSON)" 2>/dev/null)
 LITELLM_IMAGE ?= $(call image_from_inventory,litellm)
+VLLM_GEMMA_IMAGE ?= $(call image_from_inventory,pytorch-vllm-serve)
 GITHUB_MINTER_IMAGE ?= $(call image_from_inventory,github-token-minter-server)
 HINDSIGHT_API_IMAGE ?= $(call image_from_inventory,hindsight-api)
 HINDSIGHT_POSTGRES_IMAGE ?= $(call image_from_inventory,hindsight-postgresql)
 # The recipes read these through the shell (envsubst and require-var both want
 # them in the environment), which a plain make variable would not reach.
 export LITELLM_IMAGE
+export VLLM_GEMMA_IMAGE
 export GITHUB_MINTER_IMAGE
 export HINDSIGHT_API_IMAGE
 export HINDSIGHT_POSTGRES_IMAGE
@@ -203,6 +205,7 @@ deploy-litellm: kustomize ## Deploy LiteLLM integration.
 	@if [ "$$MODEL_PROVIDER" = "vertex_ai" ]; then \
 		$(KUSTOMIZE) build config/integrations/litellm/overlays/vertex_ai | envsubst '$(LITELLM_VERTEX_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	elif [ "$$MODEL_PROVIDER" = "gemma4" ] || [ "$$MODEL_PROVIDER" = "vllm" ]; then \
+		$(call require-var,VLLM_GEMMA_IMAGE,images.json) \
 		$(KUSTOMIZE) build config/integrations/vllm-gemma | envsubst '$$NAMESPACE $$MODEL_DEFAULT_NAME $$VLLM_GEMMA_IMAGE' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 		$(KUSTOMIZE) build config/integrations/litellm/overlays/gemma4 | envsubst '$(LITELLM_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	else \
