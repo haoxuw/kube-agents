@@ -289,6 +289,17 @@ def make_handlers(tool_error):
                 f"unknown artifact type {kind!r}; expected one of "
                 f"{sorted(ARTIFACT_TYPES)}"
             )
+        manifest = args.get("manifest")
+        # A manifest whose structured sections collapsed to scalars is not a
+        # deliverable — a live worker once attached {"metadata": 1, "spec": 1}
+        # before retrying correctly, and the broken copy shadowed the good one.
+        if isinstance(manifest, dict):
+            for section in ("metadata", "spec"):
+                if section in manifest and not isinstance(manifest[section], dict):
+                    return tool_error(
+                        f"manifest.{section} must be an object; pass the full "
+                        "parsed manifest, not a summary of it"
+                    )
         tid, err = _scoped_task_id(args.get("task_id"), tool_error)
         if err:
             return err

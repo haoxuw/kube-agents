@@ -131,6 +131,25 @@ class AttachArtifactTest(RecorderFixture):
         reply = self.attach({"type": "computeclass", "manifest": "kind: ComputeClass"})
         self.assertIn("must be an object", reply)
 
+    def test_rejects_manifest_whose_sections_collapsed_to_scalars(self) -> None:
+        # Observed live: {"metadata": 1, "spec": 1} attached before the worker
+        # retried with the real manifest; the broken copy must not be stored.
+        reply = self.attach(
+            {
+                "type": "computeclass",
+                "manifest": {"kind": "ComputeClass", "metadata": 1, "spec": 1},
+            }
+        )
+        self.assertIn("manifest.metadata must be an object", reply)
+        with sqlite3.connect(self.db_path) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertNotIn("task_artifacts", tables, "rejections must not write")
+
 
 class ProjectionRoundTripTest(RecorderFixture):
     """The recorder's rows must project through the admin console verbatim.
