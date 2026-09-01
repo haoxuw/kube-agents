@@ -73,7 +73,12 @@ class RecordEvidenceTest(RecorderFixture):
             {
                 "type": "advice_service_capacity",
                 "api_method": "compute.beta.AdviceService.Capacity",
-                "request": {"region": "us-central1", "size": 8},
+                "request": {
+                    "region": "us-central1",
+                    "acceleratorType": "nvidia-a100",
+                    "acceleratorCount": 32,
+                    "size": 8,
+                },
                 "analysis": {"availableQuantity": 8},
                 "execution_ref": "exec-7",
             }
@@ -83,6 +88,45 @@ class RecordEvidenceTest(RecorderFixture):
         self.assertEqual(row["task_id"], "t_1")
         self.assertEqual(row["status"], "completed")
         self.assertEqual(json.loads(row["analysis_json"]), {"availableQuantity": 8})
+
+    def test_completed_capacity_evidence_must_name_what_it_asked_for(self) -> None:
+        # Observed live: a worker recorded the right apiMethod with an empty
+        # request, leaving a claim no reader could check.
+        reply = self.record(
+            {
+                "type": "advice_service_capacity",
+                "api_method": "compute.beta.AdviceService.Capacity",
+                "request": {},
+                "analysis": {"availableQuantity": 8},
+            }
+        )
+        self.assertIn("must name region, acceleratorType, acceleratorCount", reply)
+        reply = self.record(
+            {
+                "type": "advice_service_capacity",
+                "api_method": "compute.beta.AdviceService.Capacity",
+                "request": {
+                    "region": "us-central1",
+                    "acceleratorType": "nvidia-a100",
+                    "acceleratorCount": 32,
+                },
+                "analysis": {"availableQuantity": 8},
+            }
+        )
+        self.assertNotIn("ERROR", reply)
+
+    def test_a_failed_probe_may_be_recorded_without_a_full_request(self) -> None:
+        # A probe that could not run has nothing to report but the attempt,
+        # and hiding it would be worse than recording it thinly.
+        reply = self.record(
+            {
+                "type": "advice_service_capacity",
+                "status": "failed",
+                "api_method": "compute.beta.AdviceService.Capacity",
+                "analysis": {"notes": "FLEX_START rejected by the SDK"},
+            }
+        )
+        self.assertNotIn("ERROR", reply)
 
     def test_rejects_types_outside_the_evidence_contract(self) -> None:
         reply = self.record({"type": "vibes", "analysis": {}})
@@ -104,12 +148,24 @@ class RecordEvidenceTest(RecorderFixture):
 
     def test_refuses_a_task_that_does_not_exist(self) -> None:
         os.environ["HERMES_KANBAN_TASK"] = "t_ghost"
-        reply = self.record({"type": "quota_check", "analysis": {}})
+        reply = self.record(
+            {
+                "type": "quota_check",
+                "request": {"region": "us-central1"},
+                "analysis": {},
+            }
+        )
         self.assertIn("does not exist", reply)
 
     def test_bounds_the_analysis_payload(self) -> None:
         oversized = {"zones": ["z" * 100] * 1000}
-        reply = self.record({"type": "quota_check", "analysis": oversized})
+        reply = self.record(
+            {
+                "type": "quota_check",
+                "request": {"region": "us-central1"},
+                "analysis": oversized,
+            }
+        )
         self.assertIn("exceeds", reply)
 
 
@@ -165,7 +221,11 @@ class ProjectionRoundTripTest(RecorderFixture):
             {
                 "type": "advice_service_capacity",
                 "api_method": "compute.beta.AdviceService.Capacity",
-                "request": {"region": "us-central1"},
+                "request": {
+                    "region": "us-central1",
+                    "acceleratorType": "nvidia-a100",
+                    "acceleratorCount": 32,
+                },
                 "analysis": {"availableQuantity": 8},
                 "execution_ref": "exec-7",
             }
@@ -204,7 +264,11 @@ class ProjectionRoundTripTest(RecorderFixture):
                     "details": {
                         "apiMethod": "compute.beta.AdviceService.Capacity",
                         "region": "us-central1",
-                        "request": {"region": "us-central1"},
+                        "request": {
+                            "acceleratorCount": 32,
+                            "acceleratorType": "nvidia-a100",
+                            "region": "us-central1",
+                        },
                         "analysis": {"availableQuantity": 8},
                         "executionRef": "exec-7",
                     },

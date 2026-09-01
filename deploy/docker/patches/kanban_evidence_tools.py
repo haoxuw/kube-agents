@@ -51,6 +51,15 @@ ARTIFACT_TYPES = frozenset(
 )
 EVIDENCE_STATUSES = frozenset({"completed", "failed"})
 
+#: What each completed evidence type must name in its request before the
+#: record means anything. An entry claiming a capacity probe without saying
+#: which shape, how many, or where cannot be checked by a reader or replayed
+#: by the next engineer, so the tool refuses it and the worker fills it in.
+REQUIRED_REQUEST_FIELDS = {
+    "advice_service_capacity": ("region", "acceleratorType", "acceleratorCount"),
+    "quota_check": ("region",),
+}
+
 #: One serialized request/analysis/manifest may not exceed this. Large enough
 #: for a full ComputeClass or a multi-zone capacity analysis, small enough
 #: that a runaway worker cannot turn the board into a blob store.
@@ -250,9 +259,20 @@ def make_handlers(tool_error):
         tid, err = _scoped_task_id(args.get("task_id"), tool_error)
         if err:
             return err
-        request_json, err = _bounded_json(
-            args.get("request") or {}, "request", tool_error
-        )
+        request = args.get("request") or {}
+        if status == "completed" and isinstance(request, dict):
+            missing = [
+                field
+                for field in REQUIRED_REQUEST_FIELDS.get(kind, ())
+                if not str(request.get(field) or "").strip()
+            ]
+            if missing:
+                return tool_error(
+                    f"{kind} evidence must name {', '.join(missing)} in its "
+                    "request — record what you actually asked the API for, "
+                    "so the finding can be checked and replayed"
+                )
+        request_json, err = _bounded_json(request, "request", tool_error)
         if err:
             return err
         analysis_json, err = _bounded_json(
