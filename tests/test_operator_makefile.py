@@ -75,6 +75,31 @@ class DeployContractTest(unittest.TestCase):
             "k8s-operator/scripts/ is gone; the recipe must not resolve there",
         )
 
+    def test_deploy_litellm_syntax_valid(self):
+        for provider in ("", "gemini", "vertex_ai", "gemma4", "vllm"):
+            with self.subTest(provider=provider):
+                args = ["make", "-n", "deploy-litellm", "KUSTOMIZE=/bin/true"]
+                if provider:
+                    args.append(f"MODEL_PROVIDER={provider}")
+                result = subprocess.run(
+                    args,
+                    cwd=_OPERATOR_DIR,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                syntax_check = subprocess.run(
+                    ["sh", "-n"],
+                    input=result.stdout,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(
+                    syntax_check.returncode,
+                    0,
+                    f"Shell syntax error in make deploy-litellm (provider={provider}):\n{syntax_check.stderr}",
+                )
+
 
 def _check_img(img, env=None):
     """Run the real check-img target (no cluster needed) and return the result."""

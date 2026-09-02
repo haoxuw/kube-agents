@@ -114,7 +114,7 @@ default_model_for_provider() {
 }
 
 is_valid_model_provider() {
-  [[ "${1:-}" =~ ^(gemini|vertex_ai|anthropic|openai|gemma4|vllm)$ ]]
+  [[ "${1:-}" =~ ^(gemini|vertex_ai|anthropic|openai)$ ]]
 }
 
 # The GCP IAM role bundles the install knows how to grant. Kubernetes RBAC is
