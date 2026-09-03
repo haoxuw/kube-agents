@@ -15,6 +15,7 @@ assert on that.
 """
 
 import pathlib
+import shutil
 import subprocess
 import unittest
 
@@ -98,6 +99,27 @@ class DeployContractTest(unittest.TestCase):
                     syntax_check.returncode,
                     0,
                     f"Shell syntax error in make deploy-litellm (provider={provider}):\n{syntax_check.stderr}",
+                )
+
+    def test_kustomize_build_vllm_and_gemma4_packages(self):
+        tool = shutil.which("kustomize")
+        cmd_prefix = [tool, "build"] if tool else [shutil.which("kubectl"), "kustomize"]
+        if not cmd_prefix[0]:
+            self.skipTest("neither kustomize nor kubectl is available in PATH")
+        for pkg in (
+            "config/integrations/vllm-gemma",
+            "config/integrations/litellm/overlays/gemma4",
+        ):
+            with self.subTest(package=pkg):
+                res = subprocess.run(
+                    cmd_prefix + [str(_OPERATOR_DIR / pkg)],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    res.returncode,
+                    0,
+                    f"kustomize build failed for {pkg}:\n{res.stderr}",
                 )
 
 
