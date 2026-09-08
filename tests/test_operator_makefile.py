@@ -78,7 +78,7 @@ class DeployContractTest(unittest.TestCase):
         )
 
     def test_deploy_litellm_syntax_valid(self):
-        for provider in ("", "gemini", "vertex_ai", "gemma4", "vllm"):
+        for provider in ("", "gemini", "vertex_ai", "custom", "openai_compatible"):
             with self.subTest(provider=provider):
                 args = ["make", "-n", "deploy-litellm", "KUSTOMIZE=/bin/true"]
                 if provider:
@@ -102,42 +102,27 @@ class DeployContractTest(unittest.TestCase):
                     f"Shell syntax error in make deploy-litellm (provider={provider}):\n{syntax_check.stderr}",
                 )
 
-    def test_kustomize_build_vllm_and_gemma4_packages(self):
+    def test_kustomize_build_custom_overlay(self):
         tool = shutil.which("kustomize")
         cmd_prefix = [tool, "build"] if tool else [shutil.which("kubectl"), "kustomize"]
         if not cmd_prefix[0]:
             self.skipTest("neither kustomize nor kubectl is available in PATH")
-        for pkg in (
-            "config/integrations/vllm-gemma",
-            "config/integrations/litellm/overlays/gemma4",
-        ):
-            with self.subTest(package=pkg):
-                res = subprocess.run(
-                    cmd_prefix + [str(_OPERATOR_DIR / pkg)],
-                    capture_output=True,
-                    text=True,
-                )
-                self.assertEqual(
-                    res.returncode,
-                    0,
-                    f"kustomize build failed for {pkg}:\n{res.stderr}",
-                )
-
-    def test_gpu_nodepool_targets_point_at_script(self):
-        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
-        self.assertTrue(script.is_file(), f"{script} must exist")
-        for target, subcommand in (
-            ("check-gpu-obtainability", "check-obtainability"),
-            ("create-gpu-nodepool", "create"),
-            ("delete-gpu-nodepool", "delete"),
-        ):
-            with self.subTest(target=target):
-                recipe = _make_n(target)
-                self.assertIn("scripts/gpu-nodepool.sh", recipe)
-                self.assertIn(subcommand, recipe)
+        pkg = "config/integrations/litellm/overlays/custom"
+        res = subprocess.run(
+            cmd_prefix + [str(_OPERATOR_DIR / pkg)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            res.returncode,
+            0,
+            f"kustomize build failed for {pkg}:\n{res.stderr}",
+        )
 
     def test_gpu_nodepool_script_validation_and_rejection(self):
-        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
+        repo_root = _OPERATOR_DIR.parent
+        script = repo_root / "examples" / "vllm-gemma" / "gpu-nodepool.sh"
+        self.assertTrue(script.is_file(), f"{script} must exist")
         # Test valid L4 configuration
         res_l4 = subprocess.run(
             ["bash", str(script), "validate"],
@@ -180,7 +165,8 @@ class DeployContractTest(unittest.TestCase):
         self.assertIn("Unsupported GPU_TYPE", res_invalid.stderr)
 
     def test_gpu_nodepool_missing_cluster_fails_cleanly(self):
-        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
+        repo_root = _OPERATOR_DIR.parent
+        script = repo_root / "examples" / "vllm-gemma" / "gpu-nodepool.sh"
         res = subprocess.run(
             ["bash", str(script), "create"],
             capture_output=True,

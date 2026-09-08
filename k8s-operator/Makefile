@@ -181,22 +181,19 @@ require-var = @test -n "$${$(1)}" || { echo "$(1) is not set. Export it; the ref
 IMAGES_JSON ?= $(CURDIR)/../images.json
 image_from_inventory = $(shell jq -r --arg n "$(1)" '.images[] | select(.name == $$n) | "\(.repository):\(.tag)"' "$(IMAGES_JSON)" 2>/dev/null)
 LITELLM_IMAGE ?= $(call image_from_inventory,litellm)
-VLLM_GEMMA_IMAGE ?= $(call image_from_inventory,pytorch-vllm-serve)
 GITHUB_MINTER_IMAGE ?= $(call image_from_inventory,github-token-minter-server)
 HINDSIGHT_API_IMAGE ?= $(call image_from_inventory,hindsight-api)
 HINDSIGHT_POSTGRES_IMAGE ?= $(call image_from_inventory,hindsight-postgresql)
 # The recipes read these through the shell (envsubst and require-var both want
 # them in the environment), which a plain make variable would not reach.
-MODEL_DEFAULT_NAME ?= google/gemma-4-E2B-it
-export MODEL_DEFAULT_NAME
 export LITELLM_IMAGE
-export VLLM_GEMMA_IMAGE
 export GITHUB_MINTER_IMAGE
 export HINDSIGHT_API_IMAGE
 export HINDSIGHT_POSTGRES_IMAGE
 
 LITELLM_VARS = $$NAMESPACE $$MODEL_PROVIDER $$MODEL_DEFAULT_NAME $$LITELLM_IMAGE
 LITELLM_VERTEX_VARS = $(LITELLM_VARS) $$PROJECT_ID $$LITELLM_KSA_NAME $$LITELLM_GSA_NAME $$VERTEX_PROJECT_ID $$VERTEX_LOCATION
+LITELLM_CUSTOM_VARS = $(LITELLM_VARS) $$CUSTOM_API_BASE $$CUSTOM_API_KEY
 # Hindsight's manifests need no other substitution: the namespace comes from
 # `kubectl apply -n`, and every in-cluster address is a short service name.
 HINDSIGHT_VARS = $$HINDSIGHT_API_IMAGE $$HINDSIGHT_POSTGRES_IMAGE
@@ -205,29 +202,26 @@ HINDSIGHT_VARS = $$HINDSIGHT_API_IMAGE $$HINDSIGHT_POSTGRES_IMAGE
 deploy-litellm: kustomize ## Deploy LiteLLM integration.
 	$(call require-var,LITELLM_IMAGE,images.json)
 	@if [ "$$MODEL_PROVIDER" = "vertex_ai" ]; then \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | kubectl delete --ignore-not-found -n $${NAMESPACE:-kubeagents-system} -f -; \
 		$(KUSTOMIZE) build config/integrations/litellm/overlays/vertex_ai | envsubst '$(LITELLM_VERTEX_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
-	elif [ "$$MODEL_PROVIDER" = "gemma4" ] || [ "$$MODEL_PROVIDER" = "vllm" ]; then \
-		test -n "$$VLLM_GEMMA_IMAGE" || { echo "VLLM_GEMMA_IMAGE is not set. Export it; the reference lives in images.json." >&2; exit 1; }; \
-		export MODEL_DEFAULT_NAME="$${MODEL_DEFAULT_NAME:-google/gemma-4-E2B-it}"; \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | envsubst '$$NAMESPACE $$MODEL_DEFAULT_NAME $$VLLM_GEMMA_IMAGE' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f - && \
-		$(KUSTOMIZE) build config/integrations/litellm/overlays/gemma4 | envsubst '$(LITELLM_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
+	elif [ "$$MODEL_PROVIDER" = "custom" ] || [ "$$MODEL_PROVIDER" = "openai_compatible" ]; then \
+		export MODEL_DEFAULT_NAME="$${MODEL_DEFAULT_NAME:-custom-model}"; \
+		export CUSTOM_API_BASE="$${CUSTOM_API_BASE:-http://vllm-gemma:8000/v1}"; \
+		export CUSTOM_API_KEY="$${CUSTOM_API_KEY:-none}"; \
+		$(KUSTOMIZE) build config/integrations/litellm/overlays/custom | envsubst '$(LITELLM_CUSTOM_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	else \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | kubectl delete --ignore-not-found -n $${NAMESPACE:-kubeagents-system} -f -; \
 		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$(LITELLM_VARS)' | kubectl apply -n $${NAMESPACE:-kubeagents-system} -f -; \
 	fi
 
 .PHONY: undeploy-litellm
 undeploy-litellm: kustomize ## Undeploy LiteLLM integration.
 	@if [ "$$MODEL_PROVIDER" = "vertex_ai" ]; then \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 		$(KUSTOMIZE) build config/integrations/litellm/overlays/vertex_ai | envsubst '$(LITELLM_VERTEX_VARS)' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
-	elif [ "$$MODEL_PROVIDER" = "gemma4" ] || [ "$$MODEL_PROVIDER" = "vllm" ]; then \
-		export MODEL_DEFAULT_NAME="$${MODEL_DEFAULT_NAME:-google/gemma-4-E2B-it}"; \
-		$(KUSTOMIZE) build config/integrations/litellm/overlays/gemma4 | envsubst '$(LITELLM_VARS)' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | envsubst '$$NAMESPACE $$MODEL_DEFAULT_NAME $$VLLM_GEMMA_IMAGE' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
+	elif [ "$$MODEL_PROVIDER" = "custom" ] || [ "$$MODEL_PROVIDER" = "openai_compatible" ]; then \
+		export MODEL_DEFAULT_NAME="$${MODEL_DEFAULT_NAME:-custom-model}"; \
+		export CUSTOM_API_BASE="$${CUSTOM_API_BASE:-http://vllm-gemma:8000/v1}"; \
+		export CUSTOM_API_KEY="$${CUSTOM_API_KEY:-none}"; \
+		$(KUSTOMIZE) build config/integrations/litellm/overlays/custom | envsubst '$(LITELLM_CUSTOM_VARS)' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 	else \
-		$(KUSTOMIZE) build config/integrations/vllm-gemma | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 		$(KUSTOMIZE) build config/integrations/litellm/base | envsubst '$(LITELLM_VARS)' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -; \
 	fi
 
@@ -258,18 +252,6 @@ deploy-github: kustomize ## Deploy GitHub integration.
 .PHONY: undeploy-github
 undeploy-github: kustomize ## Undeploy GitHub integration.
 	$(KUSTOMIZE) build config/integrations/github | envsubst '$$NAMESPACE $$PROJECT_ID $$REGION $$CLUSTER_NAME $$KMS_KEYRING $$KMS_KEY $$KMS_KEY_VERSION $$KMS_LOCATION $$GITHUB_ORG $$GITHUB_MINTER_KSA_NAME $$GITHUB_MINTER_GSA_NAME $$PLATFORM_AGENT_GSA_NAME $$GITHUB_MINTER_IMAGE' | kubectl delete --ignore-not-found=$(ignore-not-found) -n $${NAMESPACE:-kubeagents-system} -f -
-
-.PHONY: check-gpu-obtainability
-check-gpu-obtainability: ## Query Compute Engine Capacity Advice API for GPU obtainability.
-	@$(CURDIR)/scripts/gpu-nodepool.sh check-obtainability
-
-.PHONY: create-gpu-nodepool
-create-gpu-nodepool: ## Provision a Flex/Spot GPU node pool with obtainability pre-check.
-	@$(CURDIR)/scripts/gpu-nodepool.sh create
-
-.PHONY: delete-gpu-nodepool
-delete-gpu-nodepool: ## Tear down the GPU node pool.
-	@$(CURDIR)/scripts/gpu-nodepool.sh delete
 
 
 

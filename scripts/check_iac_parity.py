@@ -10,7 +10,6 @@ Several static files hand-maintain the same DNS egress rule (port 53):
 * examples/vllm-gemma/networkpolicy.yaml
 * k8s-operator/config/integrations/github/deployment.yaml.template
 * k8s-operator/config/integrations/litellm/base/networkpolicy.yaml
-* k8s-operator/config/integrations/vllm-gemma/networkpolicy.yaml
 
 Context (#747 B5, D1; #687):
 #687 had to touch all static copies, and its first draft missed one —
@@ -121,7 +120,6 @@ STATIC_NETWORK_POLICIES: tuple[str, ...] = (
     "examples/vllm-gemma/networkpolicy.yaml",
     "k8s-operator/config/integrations/github/deployment.yaml.template",
     "k8s-operator/config/integrations/litellm/base/networkpolicy.yaml",
-    "k8s-operator/config/integrations/vllm-gemma/networkpolicy.yaml",
 )
 
 # Manifests containing kind: NetworkPolicy that are deliberately excluded from the

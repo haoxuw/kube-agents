@@ -543,18 +543,12 @@ export MODEL_DEFAULT_NAME=gemini-3.5-flash
 # For MODEL_PROVIDER=vertex_ai also export PROJECT_ID, LITELLM_KSA_NAME,
 # LITELLM_GSA_NAME, VERTEX_PROJECT_ID, and VERTEX_LOCATION — the vertex overlay
 # renders the gateway's Workload Identity ServiceAccount from them.
-# For MODEL_PROVIDER=gemma4 (or vllm), deploy-litellm also deploys the in-cluster
-# vLLM Gemma 4 inference server on GKE GPU accelerator nodes.
-# On an existing GKE Standard cluster, check obtainability and add the dedicated
-# GPU node pool (auto-detects active cluster from kubectl context):
-#   make check-gpu-obtainability
-#   make create-gpu-nodepool
-#   (On GKE Autopilot clusters, GPU nodes are provisioned dynamically; skip create-gpu-nodepool)
-# Deploy the integration:
-#   kubectl create secret generic hf-secret -n kubeagents-system --from-literal=token="<hf_token>"
-#   make deploy-litellm MODEL_PROVIDER=gemma4
-# Release the GPU node pool when finished:
-#   make delete-gpu-nodepool
+# For MODEL_PROVIDER=custom (or openai_compatible), deploy-litellm routes to an
+# existing in-cluster or external OpenAI-compatible inference endpoint:
+#   export MODEL_PROVIDER=custom
+#   export CUSTOM_API_BASE=http://vllm-gemma.kubeagents-system.svc.cluster.local:8000/v1
+#   export MODEL_DEFAULT_NAME=google/gemma-4-27B-it
+# (To deploy a standalone self-hosted Gemma 4 vLLM instance on GKE, see examples/vllm-gemma/)
 make deploy-litellm
 
 # Deploy GitHub Integration (requires pre-configured github-app-credentials secret and env vars)

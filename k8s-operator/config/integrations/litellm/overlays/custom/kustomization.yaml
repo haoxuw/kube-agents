@@ -18,10 +18,13 @@ patches:
           ports:
             - port: 8000
               protocol: TCP
+            - port: 8080
+              protocol: TCP
+            - port: 80
+              protocol: TCP
           to:
-            - podSelector:
-                matchLabels:
-                  app: vllm-gemma
+            - podSelector: {}
+            - namespaceSelector: {}
 
 labels:
   - includeSelectors: false

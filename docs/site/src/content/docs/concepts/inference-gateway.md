@@ -50,7 +50,7 @@ The two substituted values come from the install (`MODEL_PROVIDER` and `MODEL_DE
 | `anthropic`        | `claude-opus-5`              | Uses `ANTHROPIC_API_KEY`.                                               |
 | `openai`           | `gpt-5.4`                    | Uses `OPENAI_API_KEY`.                                                  |
 | `vertex_ai`        | `gemini-3.5-flash`           | No API key — Workload Identity. See below.                              |
-| `gemma4` / `vllm`  | `google/gemma-4-E2B-it`      | Kustomize dev path only (`deploy-litellm`). Requires GPU & `hf-secret`. |
+| `custom` / `openai_compatible` | `custom-model` | OpenAI-compatible endpoint (vLLM, Triton, Ollama). Uses `CUSTOM_API_BASE`. |
 
 Any model string the chosen provider accepts is valid — there is no allow-list in the harness. For example, [`examples/litellm-gemini/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-gemini) pins `gemini-3.1-flash-lite`.
 
@@ -62,58 +62,31 @@ export MODEL_DEFAULT_NAME=gemini-3.5-flash
 make -C k8s-operator deploy-litellm
 ```
 
-### Self-hosted Gemma 4 on an existing GKE cluster
+### Private and air-gapped inference (OpenAI-compatible endpoints)
 
-For disconnected, air-gapped, or privacy-sensitive environments, `kube-agents` supports self-hosted Gemma 4 inference via vLLM and LiteLLM (`MODEL_PROVIDER=gemma4`).
+For disconnected, air-gapped, or regulated environments where external foundation model APIs are prohibited by compliance policy or network isolation, `kube-agents` supports connecting to any self-hosted or private OpenAI-compatible endpoint (`MODEL_PROVIDER=custom`).
 
-#### 1. Adding the GPU node pool to an existing cluster
+#### Connecting to a private endpoint
 
-- **GKE Autopilot**: Autopilot provisions GPU accelerators dynamically at pod scheduling time. No node pool creation is required; proceed directly to deploying the integration.
-- **GKE Standard**: Provision an isolated GPU node pool (`nvidia-l4` on `g2-standard-8` Spot) using the helper script or Makefile target. The script auto-detects your active cluster and zone from `kubectl` context, verifies accelerator obtainability via the Compute Engine Capacity Advice API, and provisions the pool with autoscaling (`0` to `2` nodes) and taint `nvidia.com/gpu:NoSchedule` so existing cluster workloads remain unaffected:
-
-```bash
-# Check GPU obtainability via Capacity Advice API
-make -C k8s-operator check-gpu-obtainability
-
-# Provision the dedicated GPU node pool on your existing cluster
-make -C k8s-operator create-gpu-nodepool
-```
-
-To target a specific cluster or region explicitly:
+Set `MODEL_PROVIDER=custom` and supply your endpoint's base URL and optional credentials:
 
 ```bash
-CLUSTER_NAME=my-cluster LOCATION=us-central1-a \
-  ./k8s-operator/scripts/gpu-nodepool.sh create
+export MODEL_PROVIDER=custom
+export MODEL_DEFAULT_NAME=google/gemma-4-27B-it
+export CUSTOM_API_BASE=http://vllm-gemma.kubeagents-system.svc.cluster.local:8000/v1
+export CUSTOM_API_KEY=none
+make -C k8s-operator deploy-litellm
 ```
 
-#### 2. Deploying the inference integration
+#### Air-gapped and regulated customer journeys
 
-Create the Hugging Face access secret for model weights and deploy the vLLM and LiteLLM integration:
+- **Air-gapped clusters (zero internet egress)**: In environments with no internet routing, container images are mirrored into private registries and model weights are pre-staged onto cluster storage (e.g. via PersistentVolumes or Cloud Storage FUSE). `kube-agents` requires only intra-cluster egress to the local model service.
+- **Policy-restricted enterprises (data sovereignty)**: Regulated institutions (financial services, healthcare) subject to strict data sovereignty rules can route inference to internal model serving infrastructure (private vLLM, Triton, or private Vertex AI PSC endpoints inside a VPC-SC perimeter), ensuring zero operational metadata leaves the private boundary.
+- **Standalone reference recipe**: See [`examples/vllm-gemma/`](https://github.com/gke-labs/kube-agents/tree/main/examples/vllm-gemma) for an unmanaged reference deployment of Gemma 4 on GKE, including offline weight mounting, hardware selection guidelines, and GPU obtainability pre-checks.
 
-```bash
-kubectl create secret generic hf-secret \
-  --namespace kubeagents-system \
-  --from-literal=token="<your-huggingface-token>"
+#### Model reasoning and sizing guidance
 
-make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4
-```
-
-Alternatively, deploy using `kubectl` directly:
-
-```bash
-kubectl apply -k k8s-operator/config/integrations/vllm-gemma
-kubectl apply -k k8s-operator/config/integrations/litellm/overlays/gemma4
-```
-
-#### 3. Releasing GPU resources
-
-When finished, tear down the dedicated GPU node pool without affecting existing cluster workloads:
-
-```bash
-make -C k8s-operator delete-gpu-nodepool
-```
-
-Either way the agent picks up the new model on its next request without any change to its own config.
+At present, only the **Gemma 4-27B** (`google/gemma-4-27B-it`) and **Gemma 4-31B** (`google/gemma-4-31B-it`) models are suggested for `kube-agents`. Smaller model variants (2B, 4B, or 9B) lack the parameter depth and reasoning capacity required for multi-step autonomous Kubernetes diagnostics, tool selection, and YAML reconciliation; do not deploy smaller variants for platform or cluster agent operations.
 
 ### Prompt caching
 
