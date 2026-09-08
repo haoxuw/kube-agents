@@ -4,19 +4,16 @@ model_list:
       model: openai/${MODEL_DEFAULT_NAME}
       api_base: ${CUSTOM_API_BASE}
       api_key: ${CUSTOM_API_KEY}
-      max_tokens: 8192
   - model_name: hermes-agent
     litellm_params:
       model: openai/${MODEL_DEFAULT_NAME}
       api_base: ${CUSTOM_API_BASE}
       api_key: ${CUSTOM_API_KEY}
-      max_tokens: 8192
   - model_name: ${MODEL_DEFAULT_NAME}
     litellm_params:
       model: openai/${MODEL_DEFAULT_NAME}
       api_base: ${CUSTOM_API_BASE}
       api_key: ${CUSTOM_API_KEY}
-      max_tokens: 8192
 litellm_settings:
   callbacks: ["otel", "prometheus"]
 router_settings:

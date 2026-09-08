@@ -4,9 +4,9 @@
 {{- fail "litellm.modelProvider 'chatgpt' is not supported: a ChatGPT subscription needs an OAuth token store this chart does not ship. Use 'openai' with an API key, or see examples/litellm-chatgpt-subscription for a hand-applied subscription proxy." }}
 {{- end }}
 {{- /* Per-provider default model names mirror scripts/installer/common.sh. */}}
-{{- $defaultModels := dict "gemini" "gemini-3.5-flash" "anthropic" "claude-opus-5" "openai" "gpt-5.4" "vertex_ai" "gemini-3.5-flash" }}
+{{- $defaultModels := dict "gemini" "gemini-3.5-flash" "anthropic" "claude-opus-5" "openai" "gpt-5.4" "vertex_ai" "gemini-3.5-flash" "custom" "google/gemma-4-27B-it" }}
 {{- if not (hasKey $defaultModels $provider) }}
-{{- fail (printf "litellm.modelProvider %q is not one of gemini, anthropic, openai, vertex_ai — a typo here would otherwise fail only at runtime" $provider) }}
+{{- fail (printf "litellm.modelProvider %q is not one of gemini, anthropic, openai, vertex_ai, custom — a typo here would otherwise fail only at runtime" $provider) }}
 {{- end }}
 {{- /* Both fenceposts at zero leaves the Deployment no way to make progress and
        the API server rejects it ("may not be 0 when maxSurge is 0"), so fail
@@ -61,6 +61,13 @@
 {{- fail "litellm.modelProvider 'vertex_ai' needs litellm.vertex.projectId (or platformAgent.harness.projectId): Vertex AI is addressed as projects/<project>/locations/<location> and the project has no usable default." }}
 {{- end }}
 {{- end }}
+{{- $custom := .Values.litellm.custom | default dict }}
+{{- $customApiBase := $custom.apiBase | default "" }}
+{{- if eq $provider "custom" }}
+{{- if empty $customApiBase }}
+{{- fail "litellm.modelProvider 'custom' needs litellm.custom.apiBase: an OpenAI-compatible endpoint URL must be provided (e.g. http://vllm-gemma.kubeagents-system.svc.cluster.local:8000/v1)." }}
+{{- end }}
+{{- end }}
 {{- $callbacks := ternary `["otel", "prometheus"]` `["prometheus"]` .Values.litellm.otel }}
 {{- /*
   Rendered once here and used twice below — as the ConfigMap body and as the
@@ -69,7 +76,7 @@
   "model-default", but a caller that names the harness ("hermes-agent") or the
   concrete model gets routed rather than a 404 from the gateway.
 */}}
-{{- $config := include "kube-agents.litellmConfig" (dict "provider" $provider "model" $model "callbacks" $callbacks) }}
+{{- $config := include "kube-agents.litellmConfig" (dict "provider" $provider "model" $model "callbacks" $callbacks "apiBase" $customApiBase) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -334,6 +341,18 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ include "kube-agents.otlpCollectorNamespace" . }}
+    {{- if eq $provider "custom" }}
+    - ports:
+        - port: 8000
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+      to:
+        - podSelector: {}
+        - namespaceSelector: {}
+    {{- end }}
   ingress:
     - from:
         - podSelector: {}

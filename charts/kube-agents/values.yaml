@@ -209,6 +209,10 @@ litellm:
     # region here for either reason.
     projectId: ""
     location: ""
+  # modelProvider: custom only.
+  custom:
+    # Base URL of the OpenAI-compatible endpoint (e.g. http://vllm-gemma.kubeagents-system.svc.cluster.local:8000/v1)
+    apiBase: ""
   # Keep in step with the kustomize base
   # (k8s-operator/config/integrations/litellm/base/deployment.yaml), which is
   # the dev copy of this gateway.

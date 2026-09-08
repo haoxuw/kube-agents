@@ -18,17 +18,50 @@ This directory provides a standalone reference recipe for deploying self-hosted 
     - **High-VRAM A100**: 1x or 2x NVIDIA A100 80GB (`a2-ultragpu-1g` / `a2-highgpu-2g`).
   - **Hardware Boundary Note**: Smaller single-GPU models (2B/4B/9B) lack the parameter depth for reliable agentic tool use and SRE reasoning; only the 27B and 31B models are suggested.
 
-### Provisioning the GPU Node Pool (GKE Standard)
+### GPU Architecture & Sizing Research
 
-Use the included helper script to verify obtainability via Compute Engine Capacity Advice API and provision an autoscaling GPU pool:
+| Accelerator         | Architecture           | SM SRAM (Shared Memory) | Native bfloat16    | VRAM per GPU | Gemma 4 Support                                                                      |
+| :------------------ | :--------------------- | :---------------------- | :----------------- | :----------- | :----------------------------------------------------------------------------------- |
+| **NVIDIA Tesla T4** | Turing (`sm_75`)       | 64 KB                   | No (emulated FP32) | 16 GB GDDR6  | **Unsupported**: Fails due to <99KB SRAM kernel barrier and lack of native bfloat16. |
+| **NVIDIA L4**       | Ada Lovelace (`sm_89`) | 100 KB                  | Yes                | 24 GB GDDR6  | **Supported**: 2x L4 (48 GB) for FP8/AWQ or 4x L4 (96 GB) for unquantized bfloat16.  |
+| **NVIDIA A100**     | Ampere (`sm_80`)       | 164 KB                  | Yes                | 80 GB HBM2e  | **Supported**: 1x A100 80GB for 27B native bfloat16; 1-2x A100 for 31B.              |
 
-```bash
-# Verify GPU quota and obtainability advice
-./gpu-nodepool.sh check-obtainability
+#### Architectural Barrier on Legacy GPUs (Tesla T4)
 
-# Provision the isolated GPU pool (tainted with nvidia.com/gpu:NoSchedule)
-./gpu-nodepool.sh create
-```
+Gemma 4 model architecture and modern vLLM attention kernels (e.g. FlashInfer) require hardware-accelerated `bfloat16` and allocate >99 KB of shared memory per Streaming Multiprocessor (SM). NVIDIA T4 hardware caps SM shared memory at 64 KB, leading to kernel compilation failures and runtime `CUDA error: out of shared memory`. Multi-GPU tensor parallelism cannot bypass this per-SM hardware barrier. Consequently, Ada Lovelace (L4) or Ampere (A100) GPUs are strictly required.
+
+### Cluster Node Provisioning
+
+Per repository engineering rules, GCP infrastructure is provisioned declaratively rather than via imperative shell scripts:
+
+- **GKE Autopilot**: Automatically provisions and scales GPU accelerator nodes dynamically when pods request `nvidia.com/gpu` with accelerator selector `cloud.google.com/gke-accelerator: nvidia-l4`. No manual node pool configuration is required.
+- **GKE Standard**: Configure an accelerator node pool declaratively in Terraform using `terraform/modules/gke-cluster/main.tf` or `google_container_node_pool`:
+  ```hcl
+  resource "google_container_node_pool" "gpu_pool" {
+    name       = "l4-inference-pool"
+    cluster    = google_container_cluster.primary.id
+    node_count = 1
+
+    node_config {
+      machine_type = "g2-standard-24" # 2x NVIDIA L4 (48 GB VRAM)
+      spot         = true
+
+      guest_accelerator {
+        type  = "nvidia-l4"
+        count = 2
+        gpu_driver_installation_config {
+          gpu_driver_version = "DEFAULT"
+        }
+      }
+
+      taint {
+        key    = "nvidia.com/gpu"
+        value  = "present"
+        effect = "NO_SCHEDULE"
+      }
+    }
+  }
+  ```
 
 ---
 
