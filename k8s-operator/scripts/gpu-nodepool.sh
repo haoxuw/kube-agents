@@ -84,10 +84,15 @@ resolve_gpu_configuration() {
     echo "ERROR: NVIDIA Tesla P4 (Pascal architecture, compute capability 6.1) is unsupported for Gemma 4 self-hosted inference." >&2
     echo "vLLM requires compute capability >= 7.0 (Volta or newer), and Gemma 4 attention kernels (Triton / FlashAttention)" >&2
     echo "require modern tensor cores and hardware bfloat16 support." >&2
-    echo "Recommendations:" >&2
-    echo "  - For the most cost-effective solution, use 1x NVIDIA L4 (Ada Lovelace, sm_89) via 'g2-standard-8' (Spot: ~\$0.22/hr), which offers native bfloat16 and 24GB VRAM." >&2
-    echo "  - Alternatively, use multi-GPU NVIDIA T4 (Turing, sm_75) with --dtype=float16 and tensor parallelism." >&2
+    echo "Recommendation: Use 1x NVIDIA L4 (Ada Lovelace, sm_89) via 'g2-standard-8' (Spot: ~\$0.22/hr), which offers native bfloat16 and 24GB VRAM." >&2
     exit 1
+  fi
+
+  if [[ "${gpu_type}" == "${GPU_TYPE_T4}" ]]; then
+    echo "WARNING: NVIDIA Tesla T4 (Turing architecture, sm_75) has a hardware shared memory ceiling of 64KB (65,536 bytes) per SM block." >&2
+    echo "Gemma 4's heterogeneous attention architecture (global_head_dim=512) requires 96KB (98,304 bytes) of SM shared memory in Triton," >&2
+    echo "failing with OutOfResources during attention compilation. In addition, 2x T4 Spot (~\$0.30/hr) is more expensive than 1x L4 Spot (~\$0.22/hr)." >&2
+    echo "Recommended: Use 1x NVIDIA L4 (Ada Lovelace, sm_89) via 'g2-standard-8' (24GB VRAM, 100KB SM SRAM, native bfloat16)." >&2
   fi
 
   if [[ "${gpu_type}" != "${GPU_TYPE_L4}" && "${gpu_type}" != "${GPU_TYPE_T4}" ]]; then
