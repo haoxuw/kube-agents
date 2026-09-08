@@ -90,6 +90,13 @@ const (
 	// exceeding Kubernetes 63-byte annotation key limits when GKE Autopilot / gVisor injects
 	// "dev.gvisor.internal.seccomp.<container-name>" (28-byte prefix without slash).
 	maxAutopilotContainerNameLen = 35
+
+	// defaultAgentMaxTokens is the default max_tokens cap configured for the PlatformAgent's
+	// custom model endpoint. Hermes defaults custom providers to 65536 max_tokens, which
+	// starves input context for models with context lengths <= 65536 (such as Gemma 4 on
+	// single-GPU vLLM). An 8192 token output cap accommodates generous reasoning and
+	// tool generation while preserving substantial input context window.
+	defaultAgentMaxTokens = 8192
 )
 
 // Shared-state ownership. Step 1.5 of deploy/shared/docker-entrypoint.sh reads this
@@ -369,7 +376,6 @@ func renderManagedEnv(agent *agentv1alpha1.PlatformAgent) string {
 	// sidecar's AGENT_API_UPSTREAM_KEY and to the probe's bearer, reintroducing exactly
 	// the several-parties-must-agree problem this closes.
 	add("API_SERVER_KEY", loopbackAgentAPIKey)
-
 	// The mode pin, also unconditional and also not about chat. The managed key
 	// is the only way the mode reaches the agent runtime, and pinning it is what
 	// keeps the agent from writing a competing answer into the PVC .env — which
@@ -1399,7 +1405,8 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 			//
 			// No omitempty: an empty value here would drop the key and take the
 			// pin with it.
-			APIMode string `json:"api_mode"`
+			APIMode   string `json:"api_mode"`
+			MaxTokens int    `json:"max_tokens,omitempty"`
 		} `json:"model"`
 		Approvals struct {
 			CronMode string `json:"cron_mode,omitempty"`
@@ -1453,6 +1460,7 @@ func renderConfigYAML(agent *agentv1alpha1.PlatformAgent, agentPlugins []*agentv
 	// (_resolve_plain_custom_api_mode in hermes_cli/runtime_provider.py), so this
 	// changes no behaviour — it only makes the value one the agent cannot rewrite.
 	cfg.Model.APIMode = "chat_completions"
+	cfg.Model.MaxTokens = defaultAgentMaxTokens
 
 	// Cron approvals. Uniform across the pod by design — the shared image default
 	// (deploy/shared/defaults/config.yaml) sets it and no persona has a reason to

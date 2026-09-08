@@ -62,12 +62,34 @@ export MODEL_DEFAULT_NAME=gemini-3.5-flash
 make -C k8s-operator deploy-litellm
 ```
 
-For self-hosted `MODEL_PROVIDER=gemma4` (or `vllm`), deploy LiteLLM using the development path (`make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4`). Running vLLM requires a GKE GPU node pool (e.g. `nvidia-l4`) and a Hugging Face secret containing an access token for gated weights:
+For self-hosted `MODEL_PROVIDER=gemma4` (or `vllm`), deploy LiteLLM using the development path (`make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4`). Running vLLM requires a GKE GPU node pool (e.g. `nvidia-l4` on `g2-standard-8`) and a Hugging Face secret containing an access token for gated weights.
+
+Before provisioning GPU capacity, query the Compute Engine Capacity Advice API for real-time obtainability scores to verify GPU availability:
+
+```bash
+make -C k8s-operator check-gpu-obtainability
+```
+
+Provision the GPU node pool with automatic obtainability pre-flight checks:
+
+```bash
+make -C k8s-operator create-gpu-nodepool
+```
+
+Then create the Hugging Face access secret and deploy the gateway:
 
 ```bash
 kubectl create secret generic hf-secret \
   --namespace kubeagents-system \
   --from-literal=token="<your-huggingface-token>"
+
+make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4
+```
+
+When self-hosted inference testing is finished, tear down the GPU node pool to release cloud accelerator resources:
+
+```bash
+make -C k8s-operator delete-gpu-nodepool
 ```
 
 Either way the agent picks up the new model on its next request without any change to its own config.

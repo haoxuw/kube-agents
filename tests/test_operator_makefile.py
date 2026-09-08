@@ -14,6 +14,7 @@ noticed some time later. `make -n` prints the recipe without a cluster, so
 assert on that.
 """
 
+import os
 import pathlib
 import shutil
 import subprocess
@@ -122,6 +123,62 @@ class DeployContractTest(unittest.TestCase):
                     f"kustomize build failed for {pkg}:\n{res.stderr}",
                 )
 
+    def test_gpu_nodepool_targets_point_at_script(self):
+        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
+        self.assertTrue(script.is_file(), f"{script} must exist")
+        for target, subcommand in (
+            ("check-gpu-obtainability", "check-obtainability"),
+            ("create-gpu-nodepool", "create"),
+            ("delete-gpu-nodepool", "delete"),
+        ):
+            with self.subTest(target=target):
+                recipe = _make_n(target)
+                self.assertIn("scripts/gpu-nodepool.sh", recipe)
+                self.assertIn(subcommand, recipe)
+
+    def test_gpu_nodepool_script_validation_and_rejection(self):
+        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
+        # Test valid L4 configuration
+        res_l4 = subprocess.run(
+            ["bash", str(script), "validate"],
+            capture_output=True,
+            text=True,
+            env={"GPU_TYPE": "nvidia-l4", "GPU_COUNT": "1", "PATH": os.environ.get("PATH", "")},
+        )
+        self.assertEqual(res_l4.returncode, 0, f"Valid L4 config failed:\n{res_l4.stderr}")
+        self.assertIn("g2-standard-8", res_l4.stdout)
+
+        # Test valid T4 multi-GPU configuration
+        res_t4 = subprocess.run(
+            ["bash", str(script), "validate"],
+            capture_output=True,
+            text=True,
+            env={"GPU_TYPE": "nvidia-tesla-t4", "GPU_COUNT": "2", "PATH": os.environ.get("PATH", "")},
+        )
+        self.assertEqual(res_t4.returncode, 0, f"Valid T4 config failed:\n{res_t4.stderr}")
+        self.assertIn("n1-standard-8", res_t4.stdout)
+
+        # Test rejection of unsupported Tesla P4
+        res_p4 = subprocess.run(
+            ["bash", str(script), "validate"],
+            capture_output=True,
+            text=True,
+            env={"GPU_TYPE": "nvidia-tesla-p4", "GPU_COUNT": "1", "PATH": os.environ.get("PATH", "")},
+        )
+        self.assertNotEqual(res_p4.returncode, 0, "Tesla P4 should be rejected")
+        self.assertIn("NVIDIA Tesla P4", res_p4.stderr)
+        self.assertIn("unsupported for Gemma 4", res_p4.stderr)
+
+        # Test rejection of invalid GPU type
+        res_invalid = subprocess.run(
+            ["bash", str(script), "validate"],
+            capture_output=True,
+            text=True,
+            env={"GPU_TYPE": "nvidia-k80", "PATH": os.environ.get("PATH", "")},
+        )
+        self.assertNotEqual(res_invalid.returncode, 0, "Invalid GPU type should be rejected")
+        self.assertIn("Unsupported GPU_TYPE", res_invalid.stderr)
+
 
 def _check_img(img, env=None):
     """Run the real check-img target (no cluster needed) and return the result."""
@@ -181,3 +238,4 @@ class MutableImageGuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
