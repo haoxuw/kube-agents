@@ -248,8 +248,6 @@ for r in recs:
 
 cmd_create() {
   resolve_cluster_and_location
-  local project
-  project="$(resolve_project)"
   local cluster="${RESOLVED_CLUSTER}"
   local location="${RESOLVED_LOCATION}"
   local pool_name="${POOL_NAME:-${DEFAULT_POOL_NAME}}"
@@ -261,6 +259,9 @@ cmd_create() {
     echo "ERROR: CLUSTER_NAME and LOCATION must be specified or resolvable from kubectl/gcloud context." >&2
     usage
   fi
+
+  local project
+  project="$(resolve_project)"
 
   local is_autopilot
   is_autopilot="$(gcloud container clusters describe "${cluster}" \
@@ -310,8 +311,6 @@ cmd_create() {
 
 cmd_delete() {
   resolve_cluster_and_location
-  local project
-  project="$(resolve_project)"
   local cluster="${RESOLVED_CLUSTER}"
   local location="${RESOLVED_LOCATION}"
   local pool_name="${POOL_NAME:-${DEFAULT_POOL_NAME}}"
@@ -320,6 +319,9 @@ cmd_delete() {
     echo "ERROR: CLUSTER_NAME and LOCATION must be specified or resolvable from kubectl/gcloud context." >&2
     usage
   fi
+
+  local project
+  project="$(resolve_project)"
 
   echo "==> Checking if node pool '${pool_name}' exists..."
   if ! gcloud container node-pools describe "${pool_name}" \

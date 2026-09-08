@@ -319,6 +319,7 @@ data:
       api_mode: chat_completions
       base_url: http://litellm.kubeagents-system.svc.cluster.local/v1
       default: model-default
+      max_tokens: 8192
       model: model-default
       provider: custom
     platforms:
