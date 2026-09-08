@@ -179,6 +179,22 @@ class DeployContractTest(unittest.TestCase):
         self.assertNotEqual(res_invalid.returncode, 0, "Invalid GPU type should be rejected")
         self.assertIn("Unsupported GPU_TYPE", res_invalid.stderr)
 
+    def test_gpu_nodepool_missing_cluster_fails_cleanly(self):
+        script = _OPERATOR_DIR / "scripts" / "gpu-nodepool.sh"
+        res = subprocess.run(
+            ["bash", str(script), "create"],
+            capture_output=True,
+            text=True,
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "CLUSTER_NAME": "",
+                "LOCATION": "",
+                "KUBECONFIG": "/dev/null",
+            },
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("CLUSTER_NAME and LOCATION", res.stderr)
+
 
 def _check_img(img, env=None):
     """Run the real check-img target (no cluster needed) and return the result."""

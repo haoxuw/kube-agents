@@ -62,21 +62,33 @@ export MODEL_DEFAULT_NAME=gemini-3.5-flash
 make -C k8s-operator deploy-litellm
 ```
 
-For self-hosted `MODEL_PROVIDER=gemma4` (or `vllm`), deploy LiteLLM using the development path (`make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4`). Running vLLM requires a GKE GPU node pool (e.g. `nvidia-l4` on `g2-standard-8`) and a Hugging Face secret containing an access token for gated weights.
+### Self-hosted Gemma 4 on an existing GKE cluster
 
-Before provisioning GPU capacity, query the Compute Engine Capacity Advice API for real-time obtainability scores to verify GPU availability:
+For disconnected, air-gapped, or privacy-sensitive environments, `kube-agents` supports self-hosted Gemma 4 inference via vLLM and LiteLLM (`MODEL_PROVIDER=gemma4`).
+
+#### 1. Adding the GPU node pool to an existing cluster
+
+- **GKE Autopilot**: Autopilot provisions GPU accelerators dynamically at pod scheduling time. No node pool creation is required; proceed directly to deploying the integration.
+- **GKE Standard**: Provision an isolated GPU node pool (`nvidia-l4` on `g2-standard-8` Spot) using the helper script or Makefile target. The script auto-detects your active cluster and zone from `kubectl` context, verifies accelerator obtainability via the Compute Engine Capacity Advice API, and provisions the pool with autoscaling (`0` to `2` nodes) and taint `nvidia.com/gpu:NoSchedule` so existing cluster workloads remain unaffected:
 
 ```bash
+# Check GPU obtainability via Capacity Advice API
 make -C k8s-operator check-gpu-obtainability
-```
 
-Provision the GPU node pool with automatic obtainability pre-flight checks:
-
-```bash
+# Provision the dedicated GPU node pool on your existing cluster
 make -C k8s-operator create-gpu-nodepool
 ```
 
-Then create the Hugging Face access secret and deploy the gateway:
+To target a specific cluster or region explicitly:
+
+```bash
+CLUSTER_NAME=my-cluster LOCATION=us-central1-a \
+  ./k8s-operator/scripts/gpu-nodepool.sh create
+```
+
+#### 2. Deploying the inference integration
+
+Create the Hugging Face access secret for model weights and deploy the vLLM and LiteLLM integration:
 
 ```bash
 kubectl create secret generic hf-secret \
@@ -86,7 +98,16 @@ kubectl create secret generic hf-secret \
 make -C k8s-operator deploy-litellm MODEL_PROVIDER=gemma4
 ```
 
-When self-hosted inference testing is finished, tear down the GPU node pool to release cloud accelerator resources:
+Alternatively, deploy using `kubectl` directly:
+
+```bash
+kubectl apply -k k8s-operator/config/integrations/vllm-gemma
+kubectl apply -k k8s-operator/config/integrations/litellm/overlays/gemma4
+```
+
+#### 3. Releasing GPU resources
+
+When finished, tear down the dedicated GPU node pool without affecting existing cluster workloads:
 
 ```bash
 make -C k8s-operator delete-gpu-nodepool

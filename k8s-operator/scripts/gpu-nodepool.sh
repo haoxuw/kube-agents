@@ -22,6 +22,7 @@ readonly MODERATE_OBTAINABILITY_THRESHOLD="0.4"
 readonly GPU_TYPE_L4="nvidia-l4"
 readonly GPU_TYPE_T4="nvidia-tesla-t4"
 readonly GPU_TYPE_P4="nvidia-tesla-p4"
+readonly AUTOPILOT_TRUE="True"
 
 usage() {
   cat <<HELP_EOF
@@ -34,9 +35,9 @@ Commands:
   delete               Tear down the GPU node pool
 
 Environment variables:
-  PROJECT_ID           GCP project ID (default: current gcloud config)
-  CLUSTER_NAME         GKE cluster name (required for create/delete)
-  LOCATION             GKE cluster location/region/zone (required for create/delete)
+  PROJECT_ID           GCP project ID (default: current gcloud / kubectl context)
+  CLUSTER_NAME         GKE cluster name (default: current kubectl / gcloud context)
+  LOCATION             GKE cluster location/region/zone (default: current kubectl / gcloud context)
   POOL_NAME            Node pool name (default: ${DEFAULT_POOL_NAME})
   GPU_TYPE             GPU accelerator type: nvidia-l4, nvidia-tesla-t4, nvidia-tesla-p4 (default: ${DEFAULT_GPU_TYPE})
   GPU_COUNT            GPU count per node: 1, 2, 4 (default: ${DEFAULT_GPU_COUNT})
@@ -67,6 +68,44 @@ resolve_region_from_location() {
     echo "${BASH_REMATCH[1]}"
   else
     echo "${loc}"
+  fi
+}
+
+resolve_cluster_and_location() {
+  local cluster="${CLUSTER_NAME:-}"
+  local location="${LOCATION:-${REGION:-}}"
+  local project="${PROJECT_ID:-}"
+
+  if [[ -z "${cluster}" ]]; then
+    cluster="$(gcloud config get-value container/cluster 2>/dev/null || true)"
+  fi
+  if [[ -z "${location}" ]]; then
+    location="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+    if [[ -z "${location}" ]]; then
+      location="$(gcloud config get-value compute/region 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "${cluster}" || -z "${location}" || -z "${project}" ]]; then
+    local current_ctx
+    current_ctx="$(kubectl config current-context 2>/dev/null || true)"
+    if [[ "${current_ctx}" =~ ^gke_([^_]+)_([^_]+)_(.+)$ ]]; then
+      if [[ -z "${project}" ]]; then
+        project="${BASH_REMATCH[1]}"
+      fi
+      if [[ -z "${location}" ]]; then
+        location="${BASH_REMATCH[2]}"
+      fi
+      if [[ -z "${cluster}" ]]; then
+        cluster="${BASH_REMATCH[3]}"
+      fi
+    fi
+  fi
+
+  RESOLVED_CLUSTER="${cluster}"
+  RESOLVED_LOCATION="${location}"
+  if [[ -n "${project}" && -z "${PROJECT_ID:-}" ]]; then
+    PROJECT_ID="${project}"
   fi
 }
 
@@ -142,17 +181,12 @@ cmd_validate() {
 }
 
 cmd_check_obtainability() {
+  resolve_cluster_and_location
   local project
   project="$(resolve_project)"
-  local loc="${LOCATION:-${REGION:-}}"
+  local loc="${RESOLVED_LOCATION}"
   if [[ -z "${loc}" ]]; then
-    loc="$(gcloud config get-value compute/zone 2>/dev/null || true)"
-    if [[ -z "${loc}" ]]; then
-      loc="$(gcloud config get-value compute/region 2>/dev/null || true)"
-    fi
-  fi
-  if [[ -z "${loc}" ]]; then
-    echo "ERROR: LOCATION or REGION must be specified." >&2
+    echo "ERROR: LOCATION or REGION must be specified or resolvable from kubectl/gcloud context." >&2
     exit 1
   fi
 
@@ -213,18 +247,32 @@ for r in recs:
 }
 
 cmd_create() {
+  resolve_cluster_and_location
   local project
   project="$(resolve_project)"
-  local cluster="${CLUSTER_NAME:-}"
-  local location="${LOCATION:-}"
+  local cluster="${RESOLVED_CLUSTER}"
+  local location="${RESOLVED_LOCATION}"
   local pool_name="${POOL_NAME:-${DEFAULT_POOL_NAME}}"
   local initial_nodes="${INITIAL_NODES:-${DEFAULT_INITIAL_NODES}}"
   local min_nodes="${MIN_NODES:-${DEFAULT_MIN_NODES}}"
   local max_nodes="${MAX_NODES:-${DEFAULT_MAX_NODES}}"
 
   if [[ -z "${cluster}" || -z "${location}" ]]; then
-    echo "ERROR: CLUSTER_NAME and LOCATION are required to create a node pool." >&2
+    echo "ERROR: CLUSTER_NAME and LOCATION must be specified or resolvable from kubectl/gcloud context." >&2
     usage
+  fi
+
+  local is_autopilot
+  is_autopilot="$(gcloud container clusters describe "${cluster}" \
+    --location="${location}" \
+    --project="${project}" \
+    --format="value(autopilot.enabled)" 2>/dev/null || true)"
+
+  if [[ "${is_autopilot}" == "${AUTOPILOT_TRUE}" ]]; then
+    echo "INFO: Cluster '${cluster}' is a GKE Autopilot cluster."
+    echo "GKE Autopilot manages GPU accelerator node provisioning automatically at Pod scheduling time."
+    echo "No manual node pool creation is required or supported. Simply deploy vLLM with 'cloud.google.com/gke-accelerator: nvidia-l4'."
+    return 0
   fi
 
   resolve_gpu_configuration
@@ -261,14 +309,15 @@ cmd_create() {
 }
 
 cmd_delete() {
+  resolve_cluster_and_location
   local project
   project="$(resolve_project)"
-  local cluster="${CLUSTER_NAME:-}"
-  local location="${LOCATION:-}"
+  local cluster="${RESOLVED_CLUSTER}"
+  local location="${RESOLVED_LOCATION}"
   local pool_name="${POOL_NAME:-${DEFAULT_POOL_NAME}}"
 
   if [[ -z "${cluster}" || -z "${location}" ]]; then
-    echo "ERROR: CLUSTER_NAME and LOCATION are required to delete a node pool." >&2
+    echo "ERROR: CLUSTER_NAME and LOCATION must be specified or resolvable from kubectl/gcloud context." >&2
     usage
   fi
 
