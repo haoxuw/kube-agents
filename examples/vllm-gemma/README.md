@@ -11,12 +11,12 @@ This directory provides a standalone reference recipe for deploying self-hosted 
 
 ## Prerequisites & Hardware Selection
 
-* **GKE Autopilot**: Automatically provisions and scales GPU accelerator nodes dynamically when pods request `nvidia.com/gpu`. No node pool provisioning is required.
-* **GKE Standard**: Requires a GPU node pool.
-  * **Recommended Accelerators for 27B / 31B**:
-    * **Multi-GPU L4**: 2x NVIDIA L4 (`g2-standard-24`, 48 GB VRAM total) with FP8/AWQ quantization, or 4x NVIDIA L4 (`g2-standard-48`, 96 GB VRAM total) for native bfloat16 (`--tensor-parallel-size=2` or `4`).
-    * **High-VRAM A100**: 1x or 2x NVIDIA A100 80GB (`a2-ultragpu-1g` / `a2-highgpu-2g`).
-  * **Hardware Boundary Note**: Smaller single-GPU models (2B/4B/9B) lack the parameter depth for reliable agentic tool use and SRE reasoning; only the 27B and 31B models are suggested.
+- **GKE Autopilot**: Automatically provisions and scales GPU accelerator nodes dynamically when pods request `nvidia.com/gpu`. No node pool provisioning is required.
+- **GKE Standard**: Requires a GPU node pool.
+  - **Recommended Accelerators for 27B / 31B**:
+    - **Multi-GPU L4**: 2x NVIDIA L4 (`g2-standard-24`, 48 GB VRAM total) with FP8/AWQ quantization, or 4x NVIDIA L4 (`g2-standard-48`, 96 GB VRAM total) for native bfloat16 (`--tensor-parallel-size=2` or `4`).
+    - **High-VRAM A100**: 1x or 2x NVIDIA A100 80GB (`a2-ultragpu-1g` / `a2-highgpu-2g`).
+  - **Hardware Boundary Note**: Smaller single-GPU models (2B/4B/9B) lack the parameter depth for reliable agentic tool use and SRE reasoning; only the 27B and 31B models are suggested.
 
 ### Provisioning the GPU Node Pool (GKE Standard)
 
@@ -97,6 +97,6 @@ env:
 
 ## Model Sizing & Reasoning Guidance
 
-At present, only the **Gemma 4-27B** (`google/gemma-4-27B-it`) and **Gemma 4-31B** (`google/gemma-4-31B-it`) models are suggested for `kube-agents`. 
+At present, only the **Gemma 4-27B** (`google/gemma-4-27B-it`) and **Gemma 4-31B** (`google/gemma-4-31B-it`) models are suggested for `kube-agents`.
 
 Smaller model variants (such as 2B, 4B, or 9B) lack the parameter capacity and reasoning depth required for autonomous multi-step Kubernetes diagnostics, tool selection, and YAML reconciliation. Do not deploy smaller model variants for platform or cluster agent operations.
