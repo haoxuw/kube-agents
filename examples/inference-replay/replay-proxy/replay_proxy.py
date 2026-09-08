@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
 import httpx
+from cached_response import cached_llm_response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("replay-proxy-v1")
 
 INFERENCE_URL = os.environ.get("INFERENCE_URL", "http://localhost:4000")
 CACHE_FILE = os.environ.get("CACHE_FILE", "/data/replay_cache.json")
+LLM_CACHE_FILE = os.environ.get("LLM_CACHE_FILE", "/data/llm_cache.sqlite3")
 MODE_FILE = os.environ.get("MODE_FILE", "/etc/replay/mode")
 
 VALID_MODES = {"on", "off"}
@@ -193,6 +195,7 @@ async def _forward_stream(client, body, headers, req_hash, record):
 
 
 @app.post("/v1/chat/completions")
+@cached_llm_response(path=LLM_CACHE_FILE)
 async def chat_completions(request: Request):
     mode = current_mode  # snapshot for this request — mid-request reload cannot tear
     body = await request.json()

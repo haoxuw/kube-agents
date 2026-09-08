@@ -137,6 +137,30 @@ vLLM speaks OpenAI-compatible Completions, so LiteLLM can be layered on top (or 
 
 The proxy uses a `PersistentVolumeClaim` for the cache so replays survive pod restarts.
 
+### ID-aware caching for tests
+
+The proxy also wraps its chat-completion route with `cached_llm_response`. Its
+image pins the package to a commit; caching is disabled by default. To try it,
+keep the original replay cache off and enable the package:
+
+```bash
+kubectl patch configmap inference-replay-config -n <ns> --type merge \
+  -p '{"data":{"mode":"off"}}'
+kubectl set env deployment/standalone-replay -n <ns> CACHED_RESPONSE_MODE=testing
+```
+
+This restarts the proxy. Package entries use `/data/llm_cache.sqlite3` on the
+existing PVC; `LLM_CACHE_FILE` overrides that path. Set
+`CACHED_RESPONSE_MODE=disabled` to turn package caching off. The ConfigMap controls
+only the original replay cache; its `off` setting does not disable the package.
+
+The package can replace IDs and timestamps in a saved answer. Normalized matches
+skip model verification and can reuse incorrect facts; other nearby candidates
+need model approval, which adds model calls. Keep this for tests. Package logging
+stays silent by default; the proxy's existing access logs still run. See the
+[package matching guide](https://github.com/haoxuw/cached-response#matching-in-three-rules)
+for the rules and diagnostic APIs.
+
 ### When to use it
 
 - Demos where you want repeatable output for the same inputs.
