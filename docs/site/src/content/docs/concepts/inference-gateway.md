@@ -149,8 +149,10 @@ kubectl patch configmap inference-replay-config -n <ns> --type merge \
 kubectl set env deployment/standalone-replay -n <ns> CACHED_RESPONSE_MODE=testing
 ```
 
-This restarts the proxy. Package entries use `/data/llm_cache.sqlite3` on the
-existing PVC; `LLM_CACHE_FILE` overrides that path. Set
+This restarts the proxy. One replay-proxy replica shares its cache across requests
+to all LiteLLM replicas. Package entries use `/data/llm_cache.sqlite3` on the
+existing PVC; `LLM_CACHE_FILE` overrides that path and is passed directly to the
+decorator. The package does not read `CACHED_RESPONSE_PATH`. Set
 `CACHED_RESPONSE_MODE=disabled` to turn package caching off. The ConfigMap controls
 only the original replay cache; its `off` setting does not disable the package.
 
