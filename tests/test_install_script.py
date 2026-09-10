@@ -18,6 +18,7 @@ from tests.testing.common import (
     INVALID_IMMUTABLE_REFS,
     MOCK_GOOGLE_CHAT_MODE,
     VALID_IMMUTABLE_REFS,
+    create_minimal_tools_bin,
     create_mock_git_repo,
     get_isolated_test_env,
 )
@@ -96,11 +97,15 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
     def test_piped_stdin_executes_main(self):
         """Ensures piped curl | bash invocations execute main and do not exit early."""
         install_script_content = _INSTALL_SH.read_text()
+        test_env = get_isolated_test_env(
+            overrides={"KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock")}
+        )
         proc = subprocess.run(
             ["bash", "-s", "--", "--help"],
             input=install_script_content,
             capture_output=True,
             text=True,
+            env=test_env,
             cwd=str(_REPO_ROOT),
         )
         self.assertEqual(proc.returncode, 0, f"Piped execution failed: {proc.stderr}")
@@ -193,6 +198,42 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{isolated_install_sh}"
             self.assertIn(f"RESOLVED={repo_dir}", proc.stdout)
         finally:
             temp_dir.cleanup()
+
+    def test_verify_local_source_ref_dry_run_warning_does_not_claim_cluster_mutation(self):
+        """Under --dry-run, an unverified mismatched checkout warns about dry-run continuing without claiming cluster mutation."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_dir = pathlib.Path(temp_dir) / "repo"
+            repo_dir.mkdir()
+            subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True)
+            (repo_dir / "file.txt").write_text("initial\n")
+            subprocess.run(["git", "add", "file.txt"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir), check=True, capture_output=True, text=True).stdout.strip()
+            (repo_dir / "file.txt").write_text("second\n")
+            subprocess.run(["git", "commit", "-am", "second"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "tag", "0.2.0"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "checkout", head_commit], cwd=str(repo_dir), check=True, capture_output=True)
+
+            cmd = f'PARAM_DRY_RUN=true verify_local_source_ref "{repo_dir}" "0.2.0"'
+            proc = self._run_install_func(cmd)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("Continuing dry run with unverified install sources", proc.stdout)
+            self.assertIn("preview is continuing", proc.stdout)
+            self.assertNotIn("the cluster will get", proc.stdout)
+
+            cmd_dry_allow = f'PARAM_DRY_RUN=true PARAM_ALLOW_UNVERIFIED_SOURCE=true verify_local_source_ref "{repo_dir}" "0.2.0"'
+            proc_dry_allow = self._run_install_func(cmd_dry_allow)
+            self.assertEqual(proc_dry_allow.returncode, 0, proc_dry_allow.stderr)
+            self.assertIn("Continuing dry run with unverified install sources", proc_dry_allow.stdout)
+            self.assertIn("--allow-unverified-source active", proc_dry_allow.stdout)
+
+            cmd_real = f'PARAM_DRY_RUN=false PARAM_ALLOW_UNVERIFIED_SOURCE=true verify_local_source_ref "{repo_dir}" "0.2.0"'
+            proc_real = self._run_install_func(cmd_real)
+            self.assertEqual(proc_real.returncode, 0, proc_real.stderr)
+            self.assertIn("Continuing with unverified install sources", proc_real.stdout)
+            self.assertIn("the cluster will get this checkout's configuration", proc_real.stdout)
 
     def test_parse_args_google_chat_mode(self):
         """Verifies parse_args captures --google-chat-mode."""
@@ -540,6 +581,165 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{isolated_install_sh}"
             proc = self._run_install_func(cmd, cwd=archive_dir)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(proc.stdout.strip(), "0.2.0")
+
+    def test_resolve_effective_image_tag_adopts_baked_release_without_prompt(self):
+        """Verifies resolve_effective_image_tag adopts baked release version without prompting."""
+        cmd = 'BAKED_RELEASE_VERSION="0.4.0"; resolve_effective_image_tag tag "." ""; echo "TAG=$tag"'
+        proc = self._run_install_func(cmd)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TAG=0.4.0", proc.stdout)
+        self.assertIn("Using container image tag (official release 0.4.0)", proc.stdout)
+
+    def test_resolve_effective_image_tag_preserves_explicit_requested_tag(self):
+        """Verifies resolve_effective_image_tag honors explicitly passed tag over default."""
+        cmd = 'BAKED_RELEASE_VERSION="0.4.0"; resolve_effective_image_tag tag "." "0.3.0"; echo "TAG=$tag"'
+        proc = self._run_install_func(cmd)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("TAG=0.3.0", proc.stdout)
+
+    def test_resolve_effective_image_tag_rejects_invalid_requested_tag(self):
+        """Verifies resolve_effective_image_tag validates explicit tag and rejects mutable ref cleanly."""
+        cmd = 'resolve_effective_image_tag tag "." "latest" || rc=$?; echo "RC=${rc:-0} TAG=$tag"'
+        proc = self._run_install_func(cmd)
+        self.assertIn("RC=1 TAG=", proc.stdout)
+        self.assertIn("Mutable image/source ref 'latest' is not supported", proc.stdout)
+
+    def test_resolve_effective_image_tag_fails_when_non_interactive_and_no_default(self):
+        """Verifies resolve_effective_image_tag errors when non-interactive and no default tag exists."""
+        with tempfile.TemporaryDirectory() as empty_dir:
+            cmd = f'BAKED_RELEASE_VERSION=""; PARAM_NON_INTERACTIVE="true"; resolve_effective_image_tag tag "{empty_dir}" ""'
+            proc = self._run_install_func(cmd)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("--image-tag is required", proc.stdout)
+
+    def test_resolve_effective_image_tag_fails_headless_without_tty_and_no_default(self):
+        """Verifies resolve_effective_image_tag errors cleanly in headless environments without TTY."""
+        with tempfile.TemporaryDirectory() as empty_dir:
+            cmd = f'BAKED_RELEASE_VERSION=""; PARAM_NON_INTERACTIVE="false"; has_controlling_tty() {{ return 1; }}; resolve_effective_image_tag tag "{empty_dir}" "" || rc=$?; echo "RC=$rc TAG=$tag"'
+            proc = self._run_install_func(cmd)
+            self.assertIn("RC=1 TAG=", proc.stdout)
+            self.assertIn("--image-tag is required", proc.stdout)
+
+    def test_resolve_effective_image_tag_resolves_from_external_cwd(self):
+        """Verifies resolve_effective_image_tag discovers repo root even when cwd is external."""
+        with tempfile.TemporaryDirectory() as outside_dir:
+            cmd = 'BAKED_RELEASE_VERSION=""; resolve_effective_image_tag tag "" ""; echo "TAG=$tag"'
+            proc = self._run_install_func(cmd, cwd=outside_dir)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertRegex(
+                proc.stdout.strip(),
+                r"TAG=([0-9a-fA-F]{40}|[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$",
+            )
+
+    def test_resolve_effective_image_tag_discovers_home_kube_agents_repo(self):
+        """Verifies resolve_effective_image_tag adopts tag from HOME/kube-agents when standalone."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            home_dir = temp_path / "home"
+            repo_dir = home_dir / "kube-agents"
+            scripts_dir = repo_dir / "scripts" / "installer"
+            scripts_dir.mkdir(parents=True)
+            (scripts_dir / "installer_common.sh").write_text("# marker\n")
+
+            subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True)
+            (repo_dir / "file.txt").write_text("initial\n")
+            subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True)
+            subprocess.run(["git", "tag", "0.4.0"], cwd=str(repo_dir), check=True)
+
+            outside_dir = temp_path / "outside"
+            outside_dir.mkdir()
+            isolated_install_sh = outside_dir / "install.sh"
+            isolated_install_sh.write_text(_INSTALL_SH.read_text())
+
+            cmd = 'BAKED_RELEASE_VERSION=""; resolve_effective_image_tag tag "." ""; echo "TAG=$tag"'
+            setup = f"""
+KUBE_AGENTS_SOURCE_ONLY=true source "{isolated_install_sh}"
+{cmd}
+"""
+            full_env = get_isolated_test_env(overrides={"HOME": str(home_dir), "KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)})
+            proc = subprocess.run(
+                ["bash", "-c", setup],
+                capture_output=True,
+                text=True,
+                env=full_env,
+                cwd=str(outside_dir),
+            )
+            self.assertEqual(proc.returncode, 0, f"Failed: {proc.stderr}")
+            self.assertIn("TAG=0.4.0", proc.stdout)
+            self.assertIn("Using container image tag (release tag 0.4.0)", proc.stdout)
+
+    def test_resolve_effective_image_tag_prompts_and_retries_on_invalid_ref(self):
+        """Verifies resolve_effective_image_tag prompts interactively and loops until valid ref is entered."""
+        with tempfile.TemporaryDirectory() as empty_dir:
+            count_file = pathlib.Path(empty_dir) / "calls.txt"
+            cmd = (
+                'BAKED_RELEASE_VERSION=""; PARAM_NON_INTERACTIVE="false"; '
+                'has_controlling_tty() { return 0; }; '
+                f'CALL_FILE="{count_file}"; '
+                'prompt_read() { '
+                '  echo 1 >> "$CALL_FILE"; '
+                '  local count; count="$(wc -l < "$CALL_FILE" | tr -d "[:space:]")"; '
+                '  if [ "$count" -eq 1 ]; then printf -v "$2" "%s" "invalid_tag"; '
+                '  else printf -v "$2" "%s" "0.4.0"; fi; '
+                '}; '
+                f'resolve_effective_image_tag tag "{empty_dir}" ""; '
+                'echo "TAG=$tag CALLS=$(wc -l < "$CALL_FILE" | tr -d "[:space:]")"'
+            )
+            proc = self._run_install_func(cmd)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("TAG=0.4.0 CALLS=2", proc.stdout)
+            self.assertIn("Image/source ref must be a full 40-character commit SHA", proc.stdout)
+
+    def test_resolve_effective_image_tag_does_not_fire_err_trap_or_clobber_report(self):
+        """Verifies failure in resolve_effective_image_tag does not trigger ERR trap or overwrite install report."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_file = pathlib.Path(temp_dir) / "install-report.json"
+            report_file.write_text('{"status": "PREVIOUS_SUCCESS"}\n')
+            cmd = f'''
+set -Eeuo pipefail
+REPORT_FILE="{report_file}"
+write_json_report() {{
+  echo "{{\\"status\\": \\"$1\\"}}" > "$REPORT_FILE"
+}}
+on_error() {{
+  echo "INTERNAL_ERR_TRAP_FIRED" >&2
+  write_json_report "FAILED"
+}}
+trap 'on_error' ERR
+BAKED_RELEASE_VERSION=""
+PARAM_NON_INTERACTIVE="true"
+local_tag=""
+resolve_effective_image_tag local_tag "{temp_dir}" "" || rc=$?
+echo "RC=$rc"
+'''
+            proc = self._run_install_func(cmd)
+            self.assertIn("RC=1", proc.stdout)
+            self.assertNotIn("INTERNAL_ERR_TRAP_FIRED", proc.stderr)
+            self.assertIn("--image-tag is required", proc.stdout)
+            self.assertEqual(report_file.read_text(), '{"status": "PREVIOUS_SUCCESS"}\n')
+
+    def test_run_menu_system_binds_param_image_tag_to_save_and_apply(self):
+        """Verifies run_menu_system passes PARAM_IMAGE_TAG into option 6 (Save & Apply)."""
+        cmd = """
+has_controlling_tty() { return 0; }
+prompt_menu() {
+  local var="${!#}"
+  printf -v "$var" "%s" "6"
+}
+verify_local_source_ref() {
+  echo "VERIFIED_IMAGE_TAG=$2"
+  exit 0
+}
+PROJECT_ID="test-project"
+PARAM_IMAGE_TAG="0.4.0"
+run_menu_system "."
+"""
+        proc = self._run_install_func(cmd)
+        self.assertEqual(proc.returncode, 0, f"Failed: {proc.stderr}")
+        self.assertIn("VERIFIED_IMAGE_TAG=0.4.0", proc.stdout)
 
     def test_verify_local_source_ref_accepts_baked_release_in_non_git_dir(self):
         """Verifies verify_local_source_ref succeeds for unpacked release archive without Git repository."""
@@ -955,6 +1155,22 @@ class NonInteractiveRerunInheritanceTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
         self.assertIn("U=from-the-flag@example.com", proc.stdout)
 
+    def test_google_chat_home_channel_has_a_flag_and_inherits(self):
+        proc = self._params(
+            "GOOGLE_CHAT_HOME_CHANNEL=spaces/FROM_FILE",
+            'echo "H=$PARAM_GOOGLE_CHAT_HOME_CHANNEL"',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn("H=spaces/FROM_FILE", proc.stdout)
+
+        proc = self._params(
+            "GOOGLE_CHAT_HOME_CHANNEL=spaces/FROM_FILE",
+            'parse_args --google-chat-home-channel=spaces/FROM_FLAG; '
+            'echo "H=$PARAM_GOOGLE_CHAT_HOME_CHANNEL"',
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        self.assertIn("H=spaces/FROM_FLAG", proc.stdout)
+
     def test_the_gitops_repo_names_are_gitops_prefixed(self):
         """GITOPS_ORG / GITOPS_REPO are the installer's input names. (see #1026)
 
@@ -1345,6 +1561,238 @@ class InstallEnvIsCreatedInTheCheckoutTest(unittest.TestCase):
             self.assertIn(f"LEGACY={legacy}/vars.sh", proc.stdout)
 
 
+class ServiceAccountOwnershipIsCheckedOnEveryApplyDoorTest(unittest.TestCase):
+    """The 409 check has to sit between the generator and each apply, and
+    before the dry-run exit and the confirmation on the main path (#1294)."""
+
+    def setUp(self):
+        self.source = _INSTALL_SH.read_text()
+
+    def test_the_main_path_checks_after_the_generator_and_before_the_summary(self):
+        generator = self.source.index('write_tfvars_from_state "$tfvars_file" "$image_tag"')
+        check = self.source.index("check_service_account_ownership || exit 1", generator)
+        summary = self.source.index('print_step "11. Pre-Flight Configuration Summary"')
+        self.assertLess(generator, check)
+        self.assertLess(check, summary)
+
+    def test_the_day2_menu_checks_before_its_re_apply(self):
+        menu_generator = self.source.index(
+            'write_tfvars_from_state "$(tf_compose_dir "$repo_dir")/terraform.tfvars" "$image_tag"')
+        check = self.source.index("check_service_account_ownership || exit 1", menu_generator)
+        apply = self.source.index("run_lifecycle_apply", menu_generator)
+        self.assertLess(menu_generator, check)
+        self.assertLess(check, apply)
+
+
+class FailedInitialReleaseIsClearedBeforeTheApplyTest(unittest.TestCase):
+    """A retry after an apply that died inside the kube-agents release.
+
+    Helm refuses to create a release whose name a failed one still holds, so
+    the main path clears that one case -- on an existing cluster only, right
+    before the apply -- and treats a failure to clear it as a stop.
+    """
+
+    def setUp(self):
+        self.source = (_REPO_ROOT / "install.sh").read_text()
+
+    def test_the_main_path_clears_it_after_the_cluster_steps_and_before_the_apply(self):
+        cmek = self.source.index('ensure_existing_cluster_cmek "$project_id" "$cluster_name" "$region"')
+        clear = self.source.index(
+            'clear_failed_initial_helm_release "$KUBE_AGENTS_HELM_RELEASE" '
+            '"${NAMESPACE:-$DEFAULT_NAMESPACE}" || exit 1', cmek)
+        apply = self.source.index('run_lifecycle_apply "$repo_dir" "$provisioning_log"', cmek)
+        self.assertLess(cmek, clear)
+        self.assertLess(clear, apply)
+
+    def test_it_is_gated_on_the_cluster_existing_and_fetches_its_credentials(self):
+        # Existing, not adopted: a cluster this state created on the attempt
+        # that died exists with create_cluster = true, and its retry hits the
+        # same Helm refusal. The generator fetched credentials on the adoption
+        # path alone, so this branch fetches them itself.
+        clear = self.source.index('clear_failed_initial_helm_release "$KUBE_AGENTS_HELM_RELEASE"')
+        gate = self.source.rfind('if [ "${TFVARS_CLUSTER_EXISTS:-false}" = "true" ]; then', 0, clear)
+        self.assertGreater(gate, 0)
+        credentials = self.source.index('gcloud container clusters get-credentials "$cluster_name"', gate)
+        self.assertLess(credentials, clear)
+        # Nothing else opens between the gate and the call.
+        self.assertNotIn("\n  fi\n", self.source[gate:clear])
+        # The fetch reaches a DNS-endpoint-only cluster the way step 13's does;
+        # a plain one fails there, and the context gate then skips the check.
+        flag = self.source.index('gke_dns_endpoint_flag "$cluster_name" "$region" "$project_id"', gate)
+        self.assertLess(flag, credentials)
+        self.assertIn("$GKE_DNS_ENDPOINT_FLAG", self.source[credentials:clear])
+
+
+class TheCloneDirectoryNeedsHomeOnlyWhenCloningTest(unittest.TestCase):
+    """HOME is unset in some service environments (a systemd system unit, a
+    container with no passwd entry). A run from a checkout never clones, so it
+    must not need HOME at all under `set -u`; a run that does clone says what
+    it needed."""
+
+    def _run_without_home(self, tail):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_env = pathlib.Path(tmp) / "install.env"
+            empty_env.write_text("")
+            env = get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty_env)})
+            env.pop("HOME", None)
+            return subprocess.run(
+                ["bash", "-c", f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n{tail}'],
+                capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
+            )
+
+    def test_a_checkout_run_sources_without_home(self):
+        proc = self._run_without_home('echo sourced')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("sourced", proc.stdout)
+        self.assertNotIn("HOME", proc.stderr)
+
+    def test_the_clone_directory_names_home_when_it_is_missing(self):
+        proc = self._run_without_home('kube_agents_clone_dir')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("HOME", proc.stderr)
+
+    def test_the_clone_directory_is_under_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_env = pathlib.Path(tmp) / "install.env"
+            empty_env.write_text("")
+            env = get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty_env), "HOME": "/h"})
+            proc = subprocess.run(
+                ["bash", "-c", f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\nkube_agents_clone_dir'],
+                capture_output=True, text=True, env=env, cwd=str(_REPO_ROOT),
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "/h/kube-agents")
+
+
+class TheMinterCliSourceIsSpelledOnceTest(unittest.TestCase):
+    """The Minty CLI's repository and the manual recipe's clone directory are
+    named at the top of install.sh; the two lines that use them read the names."""
+
+    def test_the_repository_and_clone_directory_appear_only_as_constants(self):
+        text = (_REPO_ROOT / "install.sh").read_text()
+        for literal, constant in (("abcxyz/github-token-minter.git", "MINTY_CLI_REPO_URL="),
+                                  ("/tmp/minty", "MINTY_CLI_MANUAL_CLONE_DIR=")):
+            with self.subTest(literal=literal):
+                inline = [line for line in text.splitlines()
+                          if literal in line and not line.startswith(constant)]
+                self.assertEqual(inline, [], f"name {literal} through {constant}")
+
+
+class ShellNamespaceNeverReachesTheGeneratorTest(unittest.TestCase):
+    """NAMESPACE is a name kubectl tooling exports; only install.env may set it."""
+
+    def _namespace_after_load(self, contents):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = pathlib.Path(tmp) / "install.env"
+            env_file.write_text(contents)
+            env_file.chmod(0o600)
+            proc = subprocess.run(
+                ["bash", "-c",
+                 f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                 'echo "NS=${NAMESPACE:-unset}"'],
+                capture_output=True, text=True,
+                env=get_isolated_test_env(overrides={
+                    "KUBE_AGENTS_INSTALL_ENV": str(env_file),
+                    "NAMESPACE": "stray-from-kubectl-tooling",
+                }),
+                cwd=str(_REPO_ROOT),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return proc.stdout
+
+    def test_a_shell_export_is_dropped(self):
+        self.assertIn("NS=unset", self._namespace_after_load("PROJECT_ID=a-project\n"))
+
+    def test_the_file_still_sets_it(self):
+        self.assertIn("NS=from-the-file",
+                      self._namespace_after_load("PROJECT_ID=a-project\nNAMESPACE=from-the-file\n"))
+
+
+class BootstrapRecordsIdentityKeysOnlyWhenSetTest(unittest.TestCase):
+    """The GSA and CMEK names are recorded in a new install.env only when the
+    run set them. A default copied in would freeze at this release; a custom
+    name dropped would rename -- replace -- the account on the next run. And
+    NAMESPACE is never recorded from the environment: kubectl tooling exports
+    that name, and freezing a stray value would move the release.
+    """
+
+    def _bootstrap(self, env):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = pathlib.Path(tmp) / "new.install.env"
+            # An existing, empty input: install.sh refuses a KUBE_AGENTS_INSTALL_ENV
+            # that names a missing file, and the point here is the file it
+            # CREATES, not the one it loads.
+            loaded = pathlib.Path(tmp) / "loaded.install.env"
+            loaded.write_text("")
+            loaded.chmod(0o600)
+            proc = subprocess.run(
+                ["bash", "-c",
+                 f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                 'source scripts/installer/installer_common.sh\n'
+                 'resolve_shared_defaults\n'
+                 'PARAM_DRY_RUN=false; PARAM_MEMORY=file\n'
+                 f'bootstrap_install_env_file "{dest}" some-tag >/dev/null\n'
+                 f'cat "{dest}"'],
+                capture_output=True, text=True,
+                env=get_isolated_test_env(overrides={
+                    "KUBE_AGENTS_INSTALL_ENV": str(loaded),
+                    "PROJECT_ID": "p", "CLUSTER_NAME": "c", "REGION": "us-central1",
+                    **env,
+                }),
+                cwd=str(_REPO_ROOT),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return proc.stdout
+
+    def test_a_configured_name_is_recorded(self):
+        out = self._bootstrap({"PLATFORM_AGENT_GSA_NAME": "agent-two-gsa",
+                               "GKE_DB_KMS_KEYRING": "ring-two"})
+        self.assertIn("PLATFORM_AGENT_GSA_NAME=agent-two-gsa\n", out)
+        self.assertIn("GKE_DB_KMS_KEYRING=ring-two\n", out)
+
+    def test_an_unset_name_is_not_frozen_as_a_default(self):
+        out = self._bootstrap({})
+        for key in ("PLATFORM_AGENT_GSA_NAME", "GITHUB_MINTER_GSA_NAME", "LITELLM_GSA_NAME",
+                    "GKE_DB_KMS_KEYRING", "GKE_DB_KMS_KEY", "NAMESPACE"):
+            with self.subTest(key=key):
+                # re.MULTILINE, or `^` anchors at offset 0 only -- which is the
+                # file's comment header, so the assertion could never fail.
+                self.assertNotRegex(out, re.compile(rf"^{key}=", re.MULTILINE), msg=out)
+
+    def test_a_shell_exported_namespace_is_not_recorded(self):
+        out = self._bootstrap({"NAMESPACE": "stray-from-kubectl-tooling"})
+        self.assertNotRegex(out, re.compile(r"^NAMESPACE=", re.MULTILINE), msg=out)
+
+    def test_the_negative_assertions_can_fail(self):
+        """The guard the two tests above rely on: a key that IS written is
+        seen by the same anchored pattern, so their silence means absence."""
+        out = self._bootstrap({"GKE_DB_KMS_KEY": "key-two"})
+        self.assertRegex(out, re.compile(r"^GKE_DB_KMS_KEY=key-two$", re.MULTILINE))
+
+
+class FrontDoorsAgreeOnTheRepositoryTest(unittest.TestCase):
+    """Each front door clones the install sources before it has a checkout to
+    read the URL from, so each carries the URL; this pins the three equal."""
+
+    def test_every_front_door_names_the_same_clone_url(self):
+        urls = {}
+        for script in ("install.sh", "upgrade.sh", "uninstall.sh"):
+            match = re.search(r'^KUBE_AGENTS_REPO_URL="([^"]+)"$',
+                              (_REPO_ROOT / script).read_text(), re.MULTILINE)
+            self.assertIsNotNone(match, f"{script} declares no KUBE_AGENTS_REPO_URL")
+            urls[script] = match.group(1)
+        self.assertEqual(len(set(urls.values())), 1, urls)
+
+    def test_no_front_door_spells_the_url_inline(self):
+        for script in ("install.sh", "upgrade.sh", "uninstall.sh"):
+            with self.subTest(script=script):
+                text = (_REPO_ROOT / script).read_text()
+                inline = [line for line in text.splitlines()
+                          if "github.com/gke-labs/kube-agents.git" in line
+                          and not line.startswith("KUBE_AGENTS_REPO_URL=")]
+                self.assertEqual(inline, [], "clone through $KUBE_AGENTS_REPO_URL")
+
+
 class InstallEnvPermissionsTest(unittest.TestCase):
     """A copied install.env is a credential file at the operator's umask.
 
@@ -1568,6 +2016,26 @@ class SlackPromptsKeepTheirCurrentValuesTest(unittest.TestCase):
             "both the Slack-only and the Both arms must call it",
         )
 
+    def test_each_google_chat_prompt_defaults_to_its_own_current_value(self):
+        for var in ("allowed_users", "chat_topic_name", "google_chat_home_channel"):
+            with self.subTest(var=var):
+                self.assertRegex(
+                    self._SOURCE,
+                    re.compile(rf'{var} "\${var}"'),
+                    f"{var} must be prompted with itself as the default",
+                )
+
+    def test_both_chat_arms_share_google_chat_definition(self):
+        self.assertEqual(
+            1, self._SOURCE.count("_prompt_google_chat_settings() {"),
+            "the Google Chat prompts must be defined exactly once",
+        )
+        self.assertEqual(
+            2, len(re.findall(r'^\s*_prompt_google_chat_settings\s*$',
+                              self._SOURCE, re.MULTILINE)),
+            "both the Google-Chat-only and the Both arms must call it",
+        )
+
 
 class ChatBooleansAreReadThroughIsTruthyTest(unittest.TestCase):
     """`install.env` is hand-authored, so its booleans arrive in any spelling.
@@ -1729,9 +2197,9 @@ class UnrecordedInterviewAnswersAreReportedTest(unittest.TestCase):
         recorded = "".join(
             f"{key}=''\n"
             for key in (
-                "ALLOWED_USERS", "SLACK_ALLOWED_USERS", "SLACK_HOME_CHANNEL",
-                "SLACK_HOME_CHANNEL_NAME", "GITOPS_ORG", "GITHUB_APP_ID",
-                "GITHUB_PEM_PATH",
+                "ALLOWED_USERS", "GOOGLE_CHAT_HOME_CHANNEL", "SLACK_ALLOWED_USERS",
+                "SLACK_HOME_CHANNEL", "SLACK_HOME_CHANNEL_NAME", "GITOPS_ORG",
+                "GITHUB_APP_ID", "GITHUB_PEM_PATH",
             )
         )
         proc = self._warn(recorded, {})
@@ -1899,6 +2367,240 @@ class TfvarsTempFileIsCleanedUpTest(unittest.TestCase):
                     "TFVARS_TMP_FILE", handler,
                     f"{name}'s ERR trap must remove a partial tfvars",
                 )
+
+
+class PrerequisiteToolsListTest(unittest.TestCase):
+    """Verifies that install.sh pre-flights all required tools including gke-gcloud-auth-plugin."""
+
+    def test_install_script_checks_gke_gcloud_auth_plugin(self):
+        source = _INSTALL_SH.read_text()
+        self.assertIn("gke-gcloud-auth-plugin", source)
+        self.assertRegex(
+            source,
+            r"for tool in [^\n]*gke-gcloud-auth-plugin",
+            "install.sh must pre-flight gke-gcloud-auth-plugin in its prerequisite tool check loop",
+        )
+
+
+class AutoInstallToolTest(unittest.TestCase):
+    """Verifies that install.sh auto_install_tool handles various tool installation paths and flags."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self._empty_install_env = pathlib.Path(tmp.name) / "install.env"
+        self._empty_install_env.write_text("")
+
+    def _run_func(self, func_call, env=None, bin_dir=None, strict_path=False):
+        setup = f"""
+KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
+{func_call}
+"""
+        overrides = {"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}
+        overrides.update(env or {})
+        full_env = get_isolated_test_env(overrides=overrides, bin_dir=bin_dir)
+        if strict_path and bin_dir:
+            full_env["PATH"] = str(bin_dir)
+        return subprocess.run(
+            ["bash", "-c", setup],
+            capture_output=True,
+            text=True,
+            env=full_env,
+            cwd=str(_REPO_ROOT),
+        )
+
+    def test_dry_run_refuses_auto_install(self):
+        proc = self._run_func(
+            "PARAM_DRY_RUN=true auto_install_tool gke-gcloud-auth-plugin"
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Dry-run validation will not install missing tools", proc.stderr + proc.stdout)
+
+    def test_auto_install_via_brew_runs_gcloud_component_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = create_minimal_tools_bin(tmp_path)
+            log_file = tmp_path / "calls.log"
+
+            brew_bin = bin_dir / "brew"
+            brew_bin.write_text(f"#!/bin/bash\nprintf 'brew %s\\n' \"$*\" >> '{log_file}'\nexit 0\n")
+            brew_bin.chmod(brew_bin.stat().st_mode | stat.S_IEXEC)
+
+            plugin_path = bin_dir / "gke-gcloud-auth-plugin"
+            gcloud_bin = bin_dir / "gcloud"
+            gcloud_bin.write_text(
+                f"#!/bin/bash\n"
+                f"printf 'gcloud %s\\n' \"$*\" >> '{log_file}'\n"
+                f"if [ \"$1\" = \"components\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"gke-gcloud-auth-plugin\" ]; then\n"
+                f"  printf '#!/bin/bash\\nexit 0\\n' > '{plugin_path}'\n"
+                f"  chmod +x '{plugin_path}'\n"
+                f"fi\n"
+                f"exit 0\n"
+            )
+            gcloud_bin.chmod(gcloud_bin.stat().st_mode | stat.S_IEXEC)
+
+            proc = self._run_func(
+                "PARAM_NON_INTERACTIVE=true auto_install_tool gke-gcloud-auth-plugin",
+                bin_dir=str(bin_dir),
+                strict_path=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"Failed: {proc.stdout}\n{proc.stderr}")
+            self.assertIn("installed successfully", proc.stdout)
+            logged = log_file.read_text()
+            self.assertIn("gcloud components install gke-gcloud-auth-plugin -q", logged)
+
+    def test_auto_install_via_apt_installs_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = create_minimal_tools_bin(tmp_path)
+            log_file = tmp_path / "calls.log"
+
+            plugin_path = bin_dir / "gke-gcloud-auth-plugin"
+            apt_bin = bin_dir / "apt-get"
+            apt_bin.write_text(
+                f"#!/bin/bash\n"
+                f"printf 'apt-get %s\\n' \"$*\" >> '{log_file}'\n"
+                f"if [ \"$1\" = \"install\" ] && [ \"$2\" = \"-y\" ] && [ \"$3\" = \"google-cloud-cli-gke-gcloud-auth-plugin\" ]; then\n"
+                f"  printf '#!/bin/bash\\nexit 0\\n' > '{plugin_path}'\n"
+                f"  chmod +x '{plugin_path}'\n"
+                f"fi\n"
+                f"exit 0\n"
+            )
+            apt_bin.chmod(apt_bin.stat().st_mode | stat.S_IEXEC)
+
+            sudo_bin = bin_dir / "sudo"
+            sudo_bin.write_text('#!/bin/bash\nexec "$@"\n')
+            sudo_bin.chmod(sudo_bin.stat().st_mode | stat.S_IEXEC)
+
+            proc = self._run_func(
+                "PARAM_NON_INTERACTIVE=true auto_install_tool gke-gcloud-auth-plugin",
+                bin_dir=str(bin_dir),
+                strict_path=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"Failed: {proc.stdout}\n{proc.stderr}")
+            self.assertIn("installed successfully", proc.stdout)
+            logged = log_file.read_text()
+            self.assertIn("apt-get install -y google-cloud-cli-gke-gcloud-auth-plugin", logged)
+
+    def test_auto_install_bare_gcloud_installs_component(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = create_minimal_tools_bin(tmp_path)
+            log_file = tmp_path / "calls.log"
+
+            plugin_path = bin_dir / "gke-gcloud-auth-plugin"
+            gcloud_bin = bin_dir / "gcloud"
+            gcloud_bin.write_text(
+                f"#!/bin/bash\n"
+                f"printf 'gcloud %s\\n' \"$*\" >> '{log_file}'\n"
+                f"if [ \"$1\" = \"components\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"gke-gcloud-auth-plugin\" ]; then\n"
+                f"  printf '#!/bin/bash\\nexit 0\\n' > '{plugin_path}'\n"
+                f"  chmod +x '{plugin_path}'\n"
+                f"fi\n"
+                f"exit 0\n"
+            )
+            gcloud_bin.chmod(gcloud_bin.stat().st_mode | stat.S_IEXEC)
+
+            proc = self._run_func(
+                "PARAM_NON_INTERACTIVE=true auto_install_tool gke-gcloud-auth-plugin",
+                bin_dir=str(bin_dir),
+                strict_path=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"Failed: {proc.stdout}\n{proc.stderr}")
+            self.assertIn("installed successfully", proc.stdout)
+            logged = log_file.read_text()
+            self.assertIn("gcloud components install gke-gcloud-auth-plugin -q", logged)
+
+    def test_auto_install_fails_when_tool_remains_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bin_dir = create_minimal_tools_bin(tmp_path)
+
+            gcloud_bin = bin_dir / "gcloud"
+            gcloud_bin.write_text("#!/bin/bash\nexit 0\n")
+            gcloud_bin.chmod(gcloud_bin.stat().st_mode | stat.S_IEXEC)
+
+            proc = self._run_func(
+                "PARAM_NON_INTERACTIVE=true auto_install_tool gke-gcloud-auth-plugin",
+                bin_dir=str(bin_dir),
+                strict_path=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("Tool 'gke-gcloud-auth-plugin' is still missing", proc.stderr + proc.stdout)
+
+
+class RunLifecycleApplyTrapTest(unittest.TestCase):
+    """Verifies that run_lifecycle_apply does not trigger duplicate ERR traps or
+    misleading 'tee' error banners when lifecycle.sh fails (#1298)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self._tmp_path = pathlib.Path(tmp.name)
+        self._empty_install_env = self._tmp_path / "install.env"
+        self._empty_install_env.write_text("")
+
+    def _run_func(self, func_call, cwd=None):
+        setup = f"""
+source "{_INSTALLER_COMMON}"
+KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
+{func_call}
+"""
+        overrides = {
+            "KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env),
+            "KUBE_AGENTS_INSTALL_REPORT_FILE": str(self._tmp_path / "report.json"),
+        }
+        full_env = get_isolated_test_env(overrides=overrides)
+        return subprocess.run(
+            ["bash", "-c", setup],
+            capture_output=True,
+            text=True,
+            env=full_env,
+            cwd=str(cwd or _REPO_ROOT),
+        )
+
+    def test_failed_apply_reports_only_command_and_not_tee(self):
+        repo_dir = self._tmp_path / "mock-repo"
+        compose_dir = repo_dir / "terraform" / "examples" / "full-install"
+        compose_dir.mkdir(parents=True)
+        lifecycle_sh = compose_dir / "lifecycle.sh"
+        lifecycle_sh.write_text("#!/bin/bash\necho 'Terraform error' >&2\nexit 1\n")
+        lifecycle_sh.chmod(0o755)
+
+        log_file = self._tmp_path / "provision.log"
+        proc = self._run_func(f'run_lifecycle_apply "{repo_dir}" "{log_file}"')
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Error encountered at line", proc.stderr)
+        self.assertIn("./lifecycle.sh apply -auto-approve -input=false", proc.stderr)
+        self.assertNotIn('tee "$log_file"', proc.stderr)
+        self.assertNotIn("tee ", proc.stderr)
+
+    def test_successful_apply_writes_log_file_and_succeeds(self):
+        repo_dir = self._tmp_path / "mock-repo"
+        compose_dir = repo_dir / "terraform" / "examples" / "full-install"
+        compose_dir.mkdir(parents=True)
+        lifecycle_sh = compose_dir / "lifecycle.sh"
+        lifecycle_sh.write_text("#!/bin/bash\necho 'Apply complete'\nexit 0\n")
+        lifecycle_sh.chmod(0o755)
+
+        log_file = self._tmp_path / "provision.log"
+        proc = self._run_func(f'run_lifecycle_apply "{repo_dir}" "{log_file}"')
+
+        self.assertEqual(proc.returncode, 0, f"Stderr: {proc.stderr}")
+        self.assertTrue(log_file.exists())
+        self.assertIn("Apply complete", log_file.read_text())
+
+    def test_pipeline_status_handles_empty_array_safely_under_set_u(self):
+        source = _INSTALL_SH.read_text()
+        self.assertIn(
+            'handle_pipeline_status "./lifecycle.sh apply -auto-approve -input=false" "$log_file" ${ps[@]+"${ps[@]}"}',
+            source,
+        )
+        self.assertNotIn(
+            'handle_pipeline_status "./lifecycle.sh apply -auto-approve -input=false" "$log_file" "${ps[@]}"',
+            source,
+        )
 
 
 if __name__ == "__main__":
