@@ -24,7 +24,7 @@ This project follows [Google's Open Source Community Guidelines](https://opensou
 - **Commit style.** [Conventional Commits](https://www.conventionalcommits.org/).
 - **Branch location.** Push PR branches to your fork, not to the upstream repository.
 - **PR template.** Use [`.github/PULL_REQUEST_TEMPLATE.md`](https://github.com/gke-labs/kube-agents/blob/main/.github/PULL_REQUEST_TEMPLATE.md). Don't use `--fill` with `gh pr create` — it bypasses the template.
-- **Live validation.** Every PR describes how the change was exercised against a real, running installation. See [Live validation](#live-validation) below.
+- **Live validation.** Every PR describes how the change was exercised against a real, running installation. See [Live validation](#live-validation) below. For a change to what an agent does, that means an eval case seen red against `main` and green three times against the branch ([`.agents/rules/eval_driven_development.md`](https://github.com/gke-labs/kube-agents/blob/main/.agents/rules/eval_driven_development.md)).
 - **Self-review.** Every PR arrives already reviewed by its author, and says what that review found. See [Self-review](#self-review) below.
 
 ## Local validation
@@ -69,7 +69,13 @@ where a new one belongs, `docs/testing-map.md` maps the ten test homes to their 
 - **A2A module** (if you touched `a2a/`):
 
   ```bash
-  cd a2a && go vet ./... && go test -race ./...   # what the A2A Module Tests CI job runs; the conformance suite uses an embedded JetStream server, no cluster needed
+  cd a2a && go vet ./... && go test -race ./...   # the conformance suite uses an embedded JetStream server, no cluster needed
+  # The CI job additionally installs the envtest binaries and the nats CLI; without them the
+  # auth callout's API-server and CLI cases skip and the run still reports green. To match it:
+  #   KUBEBUILDER_ASSETS="$(make -C ../k8s-operator -s envtest-path)" go test -race ./...
+  # The path is relative to a2a/, which is where the cd above leaves you. Get it wrong and make
+  # fails, the substitution yields empty, and the cases skip exactly as if you had not set it.
+  # docs/testing-map.md is canonical for which suite runs where.
   ```
 
 - **Integration seams** (if you touched a component that another one talks to across a process, language, or protocol boundary):

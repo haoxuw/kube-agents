@@ -12,8 +12,8 @@ This repository contains the Kubernetes Agentic Harness (`kube-agents`). It is a
   - `cluster/`: The Cluster Agent profile _template_ (persona, scoped config, and runtime-debugging skills). The Platform Agent scaffolds this into per-cluster Hermes profiles at runtime; it is not deployed directly.
   - `contributor/`: The contributor-agent protocol: the claim/PR/review/escalation loop for external bots (e.g. Kyber, Codebot Robot) coordinating over GitHub alone. Not a runtime blueprint; not shipped in the images.
 - `.agents/skills/`: Repository-level skills, not shipped in the agent images — review skills (adversarial change review, security audits, docs-drift, skill quality) run against pull requests and clusters, with `review-preflight` running the pre-PR set of them in a context that did not write the change, plus the `install-kube-agents`/`uninstall-kube-agents`/`upgrade-kube-agents` lifecycle skills that drive the repository's installer scripts.
-- `.agents/rules/`: Repository-level rules an agent follows, one file per family and none shipped in the agent images — `core_engineering.md` for the code itself, `github_actions.md` for workflow authoring, `pre_pr_review.md` for the mechanics of the two pre-PR passes. This file states each rule and links there for the form it takes; the split keeps `AGENTS.md` inside the context budget `scripts/check_context_budget.py` enforces.
-- `a2a/`: Go module for the agent-to-agent bus — wire-protocol library and `a2a` topics CLI per `docs/designs/spec-a2a-payloads.md`, plus agent profiles. Nothing imports it yet.
+- `.agents/rules/`: Repository-level rules an agent follows, one file per family: the code (`core_engineering.md`), workflows (`github_actions.md`), the pre-PR passes (`pre_pr_review.md`), eval-driven development (`eval_driven_development.md`). This file states each rule and links there; the split keeps `AGENTS.md` inside the budget `scripts/check_context_budget.py` enforces.
+- `a2a/`: Go module for the agent-to-agent bus — wire-protocol library and `a2a` topics CLI per `docs/designs/spec-a2a-payloads.md`, plus agent profiles, persona, gateway and auth-callout.
 - `charts/`: Canonical Helm charts (`kube-agents`) for deploying the Kube-Agents operator and profiles.
 - `terraform/`: Companion reusable Terraform modules (`gke-cluster`, `kube-agents-iam`, `chat-pubsub`, `github-minter`, `gke-backup-plan`, `drift-pubsub`) for infrastructure provisioning, plus `examples/full-install/`, the single-apply composition that installs the Helm chart on top. `drift-pubsub` is not yet part of that composition.
 - `deploy/`: Deployment infrastructure code (Dockerfile, Kustomize bases, shared runtime assets).
@@ -48,10 +48,11 @@ did not expect, or nowhere at all, and the suite reports green around it.
   One carve-out: **security and permissions invariants** go in `tests/conformance/`, whose own
   README is the contract.
 - **Yes, and you plant the defect it has to find** — it is an eval, it belongs in
-  `bench/tasks/<name>/task.yaml`, and it runs in the Prow presubmit, so adding one changes what
-  every pull request reports. [`docs/designs/bench-case-format.md`](docs/designs/bench-case-format.md)
-  is the contract for what that file must carry; `make bench-case-check` checks it locally
-  and `scripts/test_task_registration.py` gates it.
+  `bench/tasks/<name>/task.yaml`, and it runs in CI, so adding one changes what every pull
+  request or nightly reports. [`docs/designs/bench-case-format.md`](docs/designs/bench-case-format.md)
+  is the contract; `make bench-case-check` checks it, `scripts/test_task_registration.py` gates it.
+  **A change to agent behaviour starts from one:** red locally, implement, green three times,
+  registered — [`.agents/rules/eval_driven_development.md`](.agents/rules/eval_driven_development.md).
 - **Yes, and it checks an install you already have** — it is a critical user journey, and it goes in
   `bench/cuj/`. **This tier is manual by design**, not pending automation: it needs a real
   deployment to point at and CI has none, so no job runs it and adding one changes nothing about
@@ -147,17 +148,14 @@ the assignee is the claim; do not apply `status:` labels to issues in this repos
 
 ## Skills Guidelines
 
-- Skills are located under `agents/platform/skills/` (Platform Agent: provisioning, governance, cost, manifest generation, GitOps) and `agents/cluster/skills/` (Cluster Agent: single-cluster runtime debugging and operations).
-- Each skill directory must contain a `SKILL.md` file providing instructions for that specific skill.
-- Place a skill according to its persona: fleet/provisioning/GitOps-write skills belong to the Platform Agent; read-only, single-cluster runtime-debugging skills belong to the Cluster Agent.
-- When adding new skills, ensure they follow the existing structure and are clearly documented to be understood by AI agents.
+- Skills live under `agents/platform/skills/` (Platform Agent) and `agents/cluster/skills/` (Cluster Agent); each holds a `SKILL.md` for an AI agent.
+- Place a skill by persona: fleet, provisioning and GitOps-write skills go to the Platform Agent; read-only, single-cluster runtime debugging to the Cluster Agent.
+- `agents/platform/skills/gke-*` are copies of `google/skills` that `scripts/sync-upstream-skills.py` overwrites wholesale, so the prefix is reserved and a direct edit lasts until the next sync. Put a `SKILL.md` change in its `SKILL_SUBSTITUTIONS` or `SKILL_FOOTERS` and make the same edit by hand; a rerun refreshes every skill from upstream.
 
 ## Engineering Rules
 
-Rules an agent follows live in [`.agents/rules/`](.agents/rules/), one file per family — the code
-itself here, [workflow authoring](.agents/rules/github_actions.md) and
-[the pre-PR passes](.agents/rules/pre_pr_review.md) under Pull Request Hygiene below. Read the file
-that covers what you are writing before you write it.
+Rules live in [`.agents/rules/`](.agents/rules/), one file per family (listed under Repository
+Layout). Read the file that covers what you are writing before you write it.
 
 - **No magic constants.** Every hardcoded value — number, string, duration, path, limit — gets a
   name declared at the top of the file, after the imports and before the first function. It binds
@@ -173,18 +171,18 @@ that covers what you are writing before you write it.
 Every fact has one home. Duplicating documentation across files is how it goes stale, so before
 adding a paragraph, check whether the topic already has an owner:
 
-| Content                                                  | Canonical home                               |
-| -------------------------------------------------------- | -------------------------------------------- |
-| User-facing narrative, how-to, and reference             | `docs/site/src/content/docs/`                |
-| End-state architecture                                   | `docs/architecture/`                         |
-| Per-feature design rationale                             | `docs/designs/`                              |
-| Shared installer defaults and the `install.env` model    | `scripts/installer/README.md`                |
-| Which container images an install pulls, and their pins  | `images.json`                                |
-| The install procedure (self-contained, agent-executable) | `INSTALL.md`                                 |
-| The commands behind this file's pull-request rules       | `docs/pull-request-workflow.md`              |
-| What the agent is and is not permitted to do             | the site's `reference/security-and-iam.md`   |
-| How to develop a specific directory                      | that directory's `README.md` (keep it short) |
-| Rules an agent follows, by family (code, CI, pre-PR)     | `.agents/rules/`                             |
+| Content                                                     | Canonical home                               |
+| ----------------------------------------------------------- | -------------------------------------------- |
+| User-facing narrative, how-to, and reference                | `docs/site/src/content/docs/`                |
+| End-state architecture                                      | `docs/architecture/`                         |
+| Per-feature design rationale                                | `docs/designs/`                              |
+| Shared installer defaults and the `install.env` model       | `scripts/installer/README.md`                |
+| Which container images an install pulls, and their pins     | `images.json`                                |
+| The install procedure (self-contained, agent-executable)    | `INSTALL.md`                                 |
+| The commands behind this file's pull-request rules          | `docs/pull-request-workflow.md`              |
+| What the agent is and is not permitted to do                | the site's `reference/security-and-iam.md`   |
+| How to develop a specific directory                         | that directory's `README.md` (keep it short) |
+| Rules an agent follows, by family (code, CI, pre-PR, evals) | `.agents/rules/`                             |
 
 Rules:
 
@@ -353,12 +351,10 @@ Agents with a user in the loop follow this file.
 ### The behavioural presubmit gate
 
 `pull-kube-agents-smoke-test` runs the eval matrix in `hack/ci-eval-pr.sh` — every active case,
-three repetitions each — and has been merge-blocking since 2026-09-02
-(GoogleCloudPlatform/oss-test-infra#2677). It is slow — recent green runs took 1.5 to 3.5 hours
-against a 360-minute ceiling — and a push restarts it unless only inert paths changed (step 0), so
-open the pull request early and batch changes. Another pull request merging usually does not — the
-green status is re-pinned to `main`'s new head
-([how a change merges](docs/pull-request-workflow.md#how-a-change-merges)).
+three repetitions each — and has blocked merges since 2026-09-02 (oss-test-infra#2677). It takes
+1.5 to 3.5 hours against a 360-minute ceiling, and a push restarts it unless only inert paths
+changed (step 0), so open the pull request early and batch changes. Another pull request merging
+usually does not — the green status is re-pinned to `main`'s new head.
 
 Two things red it. A case on the `BOOTSTRAP_ADMITTED` roster in `hack/ci-eval-pr.sh` fails **all**
 of its repetitions — one failed repetition out of three does nothing on its own. Or any case,
@@ -371,11 +367,12 @@ for what is admitted, `docs/eval-gate-roster.md` for demotion, and
 [`docs/designs/testing-strategy.md`](docs/designs/testing-strategy.md) §4.2 for the full verdict
 ladder.
 
-On a red, ask whether your diff explains it. If yes, fix it. If no, file an issue with the
-`presubmit-gate` label; if the cause is evident and the fix is quick, fixing it yourself is
-welcome — otherwise keep working while the eval crew classifies it. One `/retest` is reasonable
-for a suspected transient; repeated blind retests are noise. Never merge around a red gate, and
-never instruct anyone to.
+On a red, the health bot's comment on your pull request (and the dashboard,
+<https://storage.cloud.google.com/kube-agents-dashboards/evals/index.html>) tags each failed case
+as the gate's or yours. If yours, fix it; if unexplained, read the transcript first. If the gate's,
+file an issue with the `presubmit-gate` label; fix it yourself if quick, or keep working while the
+eval crew classifies it. One `/retest` is reasonable for a suspected transient; blind repeats are
+noise. Never merge around a red gate, and never instruct anyone to.
 
 `/override` (admin-only) is only for a red the eval crew classified as not the pull request's;
 the rest of the override mechanics, and why an approved, green pull request can sit unmerged,

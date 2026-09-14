@@ -28,6 +28,10 @@ _BASE_ARGS = [
     "--set", "platformAgent.harness.clusterName=my-cluster",
     "--set", "platformAgent.harness.location=us-central1",
 ]
+# The chart renders its static litellm-policy only when the operator does not
+# reconcile one (#1195); the policy assertions render that shape, the CR
+# assertions the stock one.
+_STATIC_POLICY_ARGS = ["--set", "operator.enabled=false"]
 _HOSTED_ARGS = [
     "--set", "litellm.modelProvider=hosted_vllm",
     "--set", f"litellm.modelDefaultName={_MODEL}",
@@ -63,7 +67,7 @@ def _same_namespace_rules(policy):
 @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
 class ChartRenderTest(unittest.TestCase):
     def test_hosted_vllm_renders_the_provider_line_the_env_var_and_one_egress_rule(self):
-        proc = _render(*_HOSTED_ARGS)
+        proc = _render(*_HOSTED_ARGS, *_STATIC_POLICY_ARGS)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         objects = _litellm_objects(proc.stdout)
         config = objects[("ConfigMap", "litellm-config")]["data"]["config.yaml"]
@@ -97,26 +101,41 @@ class ChartRenderTest(unittest.TestCase):
 
     def test_the_egress_rule_names_the_namespace_in_the_url(self):
         values = [v for v in _HOSTED_ARGS if v != "--set" and not v.startswith("litellm.hostedVllm.apiBase=")]
-        proc = _render(*sum([["--set", v] for v in values], []), "--set", "litellm.hostedVllm.apiBase=http://vllm.inference.svc.cluster.local/v1")
+        proc = _render(*sum([["--set", v] for v in values], []), "--set", "litellm.hostedVllm.apiBase=http://vllm.inference.svc.cluster.local/v1", *_STATIC_POLICY_ARGS)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rules = _same_namespace_rules(_litellm_objects(proc.stdout)[("NetworkPolicy", "litellm-policy")])
         self.assertEqual(rules[0]["to"], [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "inference"}}}])
 
     def test_a_bare_service_name_means_the_release_namespace(self):
         values = [v for v in _HOSTED_ARGS if v != "--set" and not v.startswith("litellm.hostedVllm.apiBase=")]
-        proc = _render(*sum([["--set", v] for v in values], []), "--set", "litellm.hostedVllm.apiBase=http://llm-service/v1", "--namespace", "agents")
+        proc = _render(*sum([["--set", v] for v in values], []), "--set", "litellm.hostedVllm.apiBase=http://llm-service/v1", "--namespace", "agents", *_STATIC_POLICY_ARGS)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rules = _same_namespace_rules(_litellm_objects(proc.stdout)[("NetworkPolicy", "litellm-policy")])
         self.assertEqual(rules[0]["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"], "agents")
 
+    def test_the_platformagent_cr_carries_the_upstream_annotation_for_the_operator(self):
+        """The operator reconciles litellm-policy on a stock install, so the
+        rule has to reach it: the chart stamps <namespace>:<pod port> from the
+        same values it renders its own static policy from."""
+        proc = _render(*_HOSTED_ARGS)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        cr = _litellm_objects(proc.stdout)[("PlatformAgent", "platform-agent")]
+        self.assertEqual(cr["metadata"]["annotations"]["kubeagents.x-k8s.io/litellm-upstream"], f"kubeagents-system:{_PORT}")
+        conflicting = _render(*_HOSTED_ARGS, "--set", "platformAgent.annotations.kubeagents\\.x-k8s\\.io/litellm-upstream=other:1")
+        self.assertNotEqual(conflicting.returncode, 0)
+        self.assertIn("contradicts litellm.hostedVllm", conflicting.stderr)
+
     def test_other_providers_render_none_of_it(self):
         for provider in ("gemini", "anthropic", "openai", "vertex_ai"):
             with self.subTest(provider=provider):
-                proc = _render("--set", f"litellm.modelProvider={provider}")
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertNotIn("HOSTED_VLLM", proc.stdout)
-                policy = _litellm_objects(proc.stdout)[("NetworkPolicy", "litellm-policy")]
-                self.assertEqual(_same_namespace_rules(policy), [])
+                for extra in ((), tuple(_STATIC_POLICY_ARGS)):
+                    proc = _render("--set", f"litellm.modelProvider={provider}", *extra)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertNotIn("HOSTED_VLLM", proc.stdout)
+                    self.assertNotIn("litellm-upstream", proc.stdout)
+                    objects = _litellm_objects(proc.stdout)
+                    if ("NetworkPolicy", "litellm-policy") in objects:
+                        self.assertEqual(_same_namespace_rules(objects[("NetworkPolicy", "litellm-policy")]), [])
 
 
 class InstallerTest(unittest.TestCase):

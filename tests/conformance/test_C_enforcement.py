@@ -364,6 +364,100 @@ class C1IsolationIsStructural(unittest.TestCase):
                         "an egress rule with no `to` allows every destination",
                     )
 
+    def test_C1_the_session_fence_selects_the_pods_the_spawner_stamps(self) -> None:
+        """The one A2A assertion that has to live here rather than in Go.
+
+        Under `spec.mode: next` the operator renders an egress NetworkPolicy
+        over the pods the A2A gateway spawns per delegated task. That fence is
+        what stops delegation being the way around the agent pod's own egress
+        allowlist: a session pod runs the model, holds a shared bus credential,
+        and without the fence has open egress.
+
+        A NetworkPolicy binds by label. The selector is a constant in the
+        operator (Go module `k8s-operator`) and the labels are constants in the
+        gateway's spawner (Go module `a2a`) -- two modules, so neither can
+        import the other's constant and no Go test can compare them. Rename
+        either side and both suites stay green, `kubectl get netpol` still
+        shows the policy, and it selects zero pods. There is no "selected
+        nothing" signal in the API, which is precisely the failure this suite
+        exists for: an object's existence mistaken for its enforcement.
+
+        Asserted as agreement rather than as literal values, so that renaming
+        the pair on purpose -- in both places, which is the point -- keeps this
+        green.
+        """
+        # The operator's constants are split across two files in one package.
+        fence = h.text("a2a_session_fence") + h.text("operator_labels")
+        spawner = h.text("a2a_spawner")
+
+        def go_const(source: str, name: str) -> str:
+            match = re.search(
+                rf"^\s*(?:const\s+)?{name}\s*=\s*\"([^\"]+)\"", source, re.MULTILINE
+            )
+            self.assertIsNotNone(match, f"{name} is no longer a string constant")
+            return match.group(1)
+
+        # The spawner's side: what a session pod actually carries.
+        stamped = {
+            go_const(spawner, "labelPartOf"): go_const(spawner, "partOfValue"),
+            go_const(spawner, "labelRole"): go_const(spawner, "sessionRole"),
+        }
+
+        # The operator's side: what the fence's podSelector requires. Read out
+        # of the function body, so a doc comment naming the labels cannot
+        # satisfy this.
+        body = h.go_function_body(fence, "buildA2ASessionNetworkPolicy")
+        selector = re.search(
+            r"PodSelector: metav1\.LabelSelector\{\s*MatchLabels: map\[string\]string\{(.+?)\}",
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(selector, "the session fence no longer has a podSelector")
+
+        required = {}
+        for key_expr, value_expr in re.findall(
+            r"(\"[^\"]+\"|\w+):\s*(\"[^\"]+\"|\w+),", selector.group(1)
+        ):
+            key = key_expr.strip('"') if key_expr.startswith('"') else go_const(fence, key_expr)
+            value = value_expr.strip('"') if value_expr.startswith('"') else go_const(fence, value_expr)
+            required[key] = value
+
+        self.assertTrue(required, "the fence's podSelector parsed as empty")
+        # Every label the fence requires must be one the spawner stamps, with
+        # the same value. A selector requiring a label the pod lacks matches
+        # nothing; the reverse -- a pod carrying extra labels -- is fine.
+        self.assertEqual(
+            required,
+            {key: stamped.get(key) for key in required},
+            "the session fence selects labels the spawner does not stamp, so it "
+            "fences no pod: fence requires %r, spawner stamps %r" % (required, stamped),
+        )
+
+    def test_C1_a_session_pod_carries_no_kubernetes_identity(self) -> None:
+        """The premise the fence's rule set rests on.
+
+        The fence grants DNS, the bus and LiteLLM and nothing else -- no
+        API-server rule, no 443, no metadata rule beyond DNS -- and that is
+        only safe while a session pod has no ServiceAccount to use them with.
+        The spawner sets AutomountServiceAccountToken false and names no
+        ServiceAccountName; if either changes, the pod acquires an identity
+        the fence was written on the assumption it did not have.
+        """
+        spawner = h.text("a2a_spawner")
+        body = h.go_function_body(spawner, "Spawn")
+
+        self.assertIn(
+            "AutomountServiceAccountToken: ptr.To(false)",
+            body,
+            "the spawner no longer refuses the ServiceAccount token mount",
+        )
+        self.assertNotIn(
+            "ServiceAccountName:",
+            body,
+            "the spawner now names a ServiceAccount, so a session pod has a "
+            "Kubernetes identity the session fence's rule set does not account for",
+        )
+
     @h.known_violation("C1", "slice-2b/findings.md 1.4 (see gke-labs/kube-agents#676)")
     def test_C1_the_rendered_egress_policy_reaches_no_metadata_address(self) -> None:
         """KNOWN VIOLATION. The sandbox reaches the metadata server anyway.
@@ -507,6 +601,73 @@ class C1IsolationIsStructural(unittest.TestCase):
                     "::ffff:169.254.169.254/128 passes the loop and normalises "
                     "to the metadata server in the cluster",
                 )
+
+    # The credential shapes gke-labs/kube-agents#603 measured in the durable
+    # artifacts, plus the two the same tool output carries alongside them. The
+    # OAuth token is 200 characters because that is the length #603 saw and
+    # the length the live check on #1340 sends; a pattern with a ceiling
+    # would pass a 40-character fixture and miss the real one.
+    LEAKED_CREDENTIAL_SHAPES = {
+        "gcp oauth token": "ya29." + "A" * 195,
+        "jwt": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0iLCJhdWQiOlsiazhzIl19.c2lnbmF0dXJlXw",
+        "gcp api key": "AIza" + "a" * 35,
+        "pem block": (
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx3f9\n-----END RSA PRIVATE KEY-----"
+        ),
+    }
+    # A Secret's payload is credential material whatever its keys are called,
+    # which is the one shape no token pattern can see.
+    LEAKED_SECRET_BLOCK = "kind: Secret\ndata:\n  ROTATED_ONCE: YWJjMTIz\n  other-key: c2FsdHk=\n"
+    LEAKED_SECRET_VALUES = ("YWJjMTIz", "c2FsdHk=")
+    # What a kubectl read of a healthy namespace looks like, and the two
+    # identifiers an over-eager redactor takes first: a service-account
+    # address, and an environment variable whose name merely contains `token`.
+    ORDINARY_MANIFEST_CONTENT = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nginx\n"
+        "  namespace: prod\nspec:\n  replicas: 3\n  template:\n    spec:\n"
+        "      containers:\n        - name: nginx\n          image: nginx:1.27\n"
+        "          env:\n            - name: TOKENIZER_PATH\n              value: /models/tok\n",
+        "binding kube-agents-platform@my-proj.iam.gserviceaccount.com to roles/container.viewer",
+        "kubectl get pods -n kube-system --sort-by=.status.startTime",
+    )
+
+    def test_C1_the_gateway_redactor_matches_the_leaked_credential_shapes(self) -> None:
+        """What leaves for the provider is what the redactor lets leave.
+
+        Isolation is structural only if the egress point enforces it without
+        the model's cooperation: the gateway hook runs before the provider
+        call, so this asserts the module it runs redacts every credential
+        shape #603 found in the clear. It reads the chart's copy, because that
+        is the file the LiteLLM pod mounts; the plugin copy's own suite covers
+        the audit path.
+        """
+        redactor = h.gateway_redactor_module().AuditRedactor
+        for label, credential in self.LEAKED_CREDENTIAL_SHAPES.items():
+            with self.subTest(shape=label):
+                result = redactor.redact_text(f"tool output: {credential} end")
+                self.assertNotIn(
+                    credential,
+                    result,
+                    f"a {label} passes the gateway redactor in the clear",
+                )
+                self.assertIn("[REDACTED_", result, f"the {label} was dropped, not marked")
+        result = redactor.redact_text(self.LEAKED_SECRET_BLOCK)
+        for value in self.LEAKED_SECRET_VALUES:
+            with self.subTest(shape="secret data block", value=value):
+                self.assertNotIn(value, result, "a Secret's data: value passes in the clear")
+
+    def test_C1_the_gateway_redactor_leaves_ordinary_manifest_content_alone(self) -> None:
+        """The other half: a redactor that eats the manifest gets switched off.
+
+        The service-account address is the load-bearing case. It is the one
+        thing an operator greps for, so the e-mail pattern exempts it by an
+        anchored negative lookahead; a mutation that drops the exemption
+        redacts every IAM principal and this goes red.
+        """
+        redactor = h.gateway_redactor_module().AuditRedactor
+        for content in self.ORDINARY_MANIFEST_CONTENT:
+            with self.subTest(content=content[:40]):
+                self.assertEqual(redactor.redact_text(content), content)
 
 
 class C2FailClosed(unittest.TestCase):
@@ -995,7 +1156,25 @@ class C5PrivilegedControllersAreBounded(unittest.TestCase):
         )
 
     def test_C5_no_agent_binding_names_the_auth_delegator_role(self) -> None:
-        """The shortcut the test above exists to keep closed."""
+        """The shortcut the test above exists to keep closed.
+
+        Scoped to the agent, and the name says so. The four golden fixtures
+        are all `mode: today`, and under `mode: next` the operator DOES bind
+        system:auth-delegator -- to the auth callout's own ServiceAccount, so
+        it can TokenReview the tokens bus clients present. That is the role's
+        intended use by a component whose whole job is validating tokens, and
+        it is bounded on the Go side instead: the operator's own grant is
+        `bind` restricted by resourceNames to this one role (A4), and in
+        platformagent_a2a_callout_test.go TestA2ACalloutIsGatedByMode asserts
+        the binding's roleRef while
+        TestEveryA2ABindingNamesOnlyTheServiceAccountItsWorkloadRunsAs asserts
+        it names exactly one subject, the callout's own ServiceAccount in the
+        agent's namespace.
+
+        What no fixture covers is the rendered mode: next object set, so this
+        invariant cannot yet be asserted over it. A golden_a2a_next fixture is
+        the way to close that, and it is owed rather than done.
+        """
         for name, documents in h.golden_documents().items():
             for kind in ("RoleBinding", "ClusterRoleBinding"):
                 for binding in h.objects_of_kind(documents, kind):

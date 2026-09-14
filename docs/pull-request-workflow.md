@@ -307,15 +307,17 @@ and retries it every ~85 seconds ahead of everyone else — #608 and #1197 held 
 for an hour on 2026-09-05. `/hold cancel` does not remove this label; resolving the threads does.
 A person who applies the same label by hand keeps it: the workflow removes only what it added.
 `/override <context>`, which only
-a repository admin can use, forces a required check that cannot pass on its own — and expires: the
-forced status embeds the base SHA at override time, so the next merge to `main` invalidates it,
-Tide re-runs the job, and the override has to be repeated if `main` moves before Tide merges
-(#1202).
-Prow's `/override-sticky` would write the `[prow:skip-retest]` sentinel instead, which Tide accepts
-regardless of base — but it is not in the Prow build this repository merges through: the
+a repository admin can use, forces a check that cannot pass on its own, required or not. The forced status
+embeds the base SHA at override time, so by itself it would expire on the next merge to `main` and
+Tide would re-run the job — which is how an override came to need repeating whenever `main` moved
+before Tide merged (#1202). The re-pin below carries it across merges the way it carries a green, so
+an override usually holds for the head it was given until a push — subject to the same race with
+Tide's sync, and a lost race costs more here, because the retest is of a check that cannot pass: it
+comes back red and the override has to be given again. Prow's `/override-sticky` would do this
+without the race, with the `[prow:skip-retest]` sentinel Tide accepts regardless of base — but it is
+not in the Prow build this repository merges through: the
 [plugin help](https://oss.gprow.dev/command-help?repo=gke-labs%2Fkube-agents) lists only
-`/override`, and the command is silently ignored. A green run of the job is a different matter,
-below.
+`/override`, and the command is silently ignored.
 
 **Branch protection is not the gate and reads as though there is none.** `main` requires ten
 contexts — `cla/google`, `actionlint`, `build`, `prettier`, `validate`, `Run Controller Tests`,
@@ -324,15 +326,21 @@ contexts — `cla/google`, `actionlint`, `build`, `prettier`, `validate`, `Run C
 reviews, because approval is Tide's business rather than GitHub's. A reader who checks the
 repository settings for the review requirement therefore finds nothing and concludes wrongly.
 
-The last four joined the set on 2026-09-02; before that they reported on every pull request without
-gating one.
+The last four joined the set on 2026-09-02; before that, a pull request they had not run on could
+merge without them.
 
 Those ten are not the whole required set either. Tide also requires every Prow presubmit not marked
 `optional`, and those are configured in `oss-test-infra` rather than in branch protection —
 `pull-kube-agents-smoke-test` dropped its `optional: true` on 2026-09-02
 (GoogleCloudPlatform/oss-test-infra#2677), so the behavioural presubmit gates every merge from that
-date. The command below therefore answers half the question, and a red check in neither list blocks
-no merge:
+date. The command below therefore answers part of the question, and the two lists together still do
+not answer all of it: they say which contexts must be _present_ and green, but Tide also refuses any
+posted context that is not green, required or not, unless Prow marks it `optional`: Tide always
+reads a cancelled or failed check run as a failing context, and with no Tide context policy for this
+repository an unknown context is not optional. A `classify` run cancelled
+by a superseding event held #1364 unmerged with `lgtm` and `approved` on it, though `classify` is in
+neither list. `tide`'s own status names the offending context; `gh run rerun <run-id> --job <job-id>`
+clears it — by job ID, since `--failed` (below) re-runs failed jobs and a cancelled one is not failed.
 
 ```bash
 gh api repos/gke-labs/kube-agents/branches/main/protection \
@@ -353,7 +361,8 @@ starts the retest as before (a batch, when two or more qualify), crier's `pendin
 newer status, and the sweep leaves it alone. A push still starts a fresh run;
 `/test pull-kube-agents-smoke-test` on the same head posts `pending`, which wins until that run
 reports (`/retest` does not, because it reruns only failed contexts); a red is never touched, and
-neither is an admin `/override`. What this trades away is testing the combination with the `main`
+an admin `/override` is carried the same way as a green, because crier stamps the same `BaseSHA:`
+suffix on it. What this trades away is testing the combination with the `main`
 it lands on before the merge; until a scheduled eval run on `main` exists, a bad combination is
 found by the next smoke run that actually starts after it — a push or `/test` on whichever pull
 request that is, whose author then sees a red that is not theirs. Prow's own form of this — a `[prow:skip-retest]` sentinel
@@ -404,8 +413,9 @@ test is a different system and is not watched; the `presubmit-gate` label is tha
 Every open pull request has exactly one party whose move it is, and the commonest way one sits for
 a fortnight is that both sides believe it is the other's. The rule:
 
-**The author owns it while it is blocked on them** — a draft, failing _required_ checks, merge
-conflicts, unresolved review threads, changes requested, or no human reviewer requested yet.
+**The author owns it while it is blocked on them** — a draft, a failing or cancelled check that
+`tide` names, merge conflicts, unresolved review threads, changes requested, or no human reviewer
+requested yet.
 **Otherwise the requested reviewers own it.** A past reviewer does not: an approval already given
 is not an outstanding obligation. `kube-agents-bot` and other bot reviewers never count either way.
 
@@ -423,9 +433,11 @@ Four states that look like somebody else's problem and are not:
   Clearing the findings and commenting `/review` for a clean pass is what summons one;
   `/request-review` is the override. Answering every bot thread does not summon one by itself, so
   an author who has done everything asked of them can still be sitting with nobody assigned.
-- **A red check that is not required.** It blocks no merge and is not the author's problem — but
-  "required" means both lists above, not branch protection's ten alone, and `tide` is what actually
-  knows. Ask it before treating a failing job as work owed, and before concluding one is not.
+- **A red check that is not required.** It still blocks the merge if it is red on the head: Tide
+  refuses any posted context that is not green unless Prow marks it `optional`, not only the ones on
+  the two lists above, so a cancelled run of a non-required job is the author's problem too. `tide`
+  is what actually knows —
+  ask it before treating a failing job as work owed, and before concluding one is not.
 - **`mergeable: UNKNOWN`.** GitHub computes mergeability lazily and the first query only triggers
   the job, so a conflict reads as conflict-free until you ask twice.
 

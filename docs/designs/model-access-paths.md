@@ -70,7 +70,10 @@ the provider is useful without it.
 The gateway's NetworkPolicy has no general private-address egress: DNS, the metadata server, the
 OTLP collector, and 443 to public addresses. The `hosted_vllm` rule admits one namespace, read from
 the Service name in `apiBase` the way the collector's is read from `telemetry.otlpEndpoint`, on the
-configured `targetPort` (8000 in the example). Not every pod in the cluster, and the pod port
+configured `targetPort` (8000 in the example). On a stock install the operator renders
+`litellm-policy` (#1195), so the chart stamps the pair on the PlatformAgent CR as the
+`kubeagents.x-k8s.io/litellm-upstream` annotation and the reconciler appends the same rule; the
+operator learns a namespace and a port, not a provider. Not every pod in the cluster, and the pod port
 rather than the Service port, because the policy is evaluated after the Service's translation.
 The gateway's existing 443 rule to public addresses stays under `hosted_vllm`: it is the
 gateway's policy, not the provider's, the same Deployment serves whichever provider the install

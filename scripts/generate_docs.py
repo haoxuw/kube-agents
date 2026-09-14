@@ -128,10 +128,12 @@ SKILL_GROUPS: dict[str, list[str]] = {
         "kube-agents-observability",
     ],
     "Reliability": [
+        "fleet-upgrade-verification",
         "gke-reliability",
         "gke-upgrades",
     ],
     "Manifests and remediation": [
+        "gcp-config-connector",
         "gke-manifest-generation",
         "submit-suggestion",
     ],

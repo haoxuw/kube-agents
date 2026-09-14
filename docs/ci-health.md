@@ -4,16 +4,47 @@ Every 15 minutes `.github/workflows/ci-health.yml` refreshes the eval dashboard
 (the incremental collect → render → publish that `hack/ci-dashboard-refresh.sh`
 runs, split across two identities: `github-actions@kube-agents-prow` reads the
 Prow archive, `eval-dashboard-publisher@kube-agents-prow` writes the bucket),
-then `scripts/eval_dashboard/health.py` reads the `data.json` just published,
+then `scripts/eval_dashboard/health.py` reads the `data.json` just collected,
 decides whether `pull-kube-agents-smoke-test` is **GREEN**, **DEGRADED** or
-**OUTAGE** and why, and writes `health.json` next to it.
+**OUTAGE** and why, and writes `health.json` next to it — before the render, so
+the dashboard's Brief bakes that verdict and its history (`render.py --health`,
+`--health-history`; the checkout is fetched with full history for the Brief's
+"what changed right before" block).
 `scripts/eval_dashboard/post_health.py` tells `#kube-agents-ci-health` on Google
-Chat — only when the state changes, plus one digest a day at 08:00 UTC. A
+Chat — only when the state changes, plus one digest a day at 9 AM Toronto time.
+The digest also carries one line on last night's run of the nightly tier
+(`--data`, the `data.json` the tick collected): the cases recorded, how many
+passed all reps, partial and failed, what is newly failing against the night
+before, and the wall clock, with a link to the dashboard's Nightly report
+(`nightly.html`); a night Prow cut short, one still running, or no night
+since the day before yesterday, says so instead of numbers.
+`scripts/eval_dashboard/nightly.py` derives the line and the report from the
+same nightly runs.
+The same tick comments on each pull request whose run went red or whose
+build node went away (`gate_comment.py`), files the tracking issue a new
+OUTAGE lacks or the one a build-cluster node loss owes the cluster owner
+(`gate_issue.py`), and appends `health.json` to a history feed. A
 `workflow_dispatch` of the same workflow is the on-demand refresh button.
 
 Every message ends with a deep link into the dashboard:
-`index.html?cases=<comma-separated case ids>&since=<ISO 8601 UTC>[&until=<ISO 8601 UTC>]#gate`
-for an incident (`until` on the recovery message), `#agent` for the digest.
+`index.html#since=<ISO 8601 UTC>[&until=<ISO 8601 UTC>][&cases=<comma-separated case ids>]&view=gate`
+for an incident (`until` on the recovery message), `view=agent` for the
+digest. The scope rides in the URL fragment because the host's login redirect
+drops a query string and a browser carries the fragment through the redirect.
+The contract, and the older `?cases=…#gate` form the pages still read (it
+opens the same page wherever its query survives), are in
+[`scripts/eval_dashboard/SCHEMA.md`](../scripts/eval_dashboard/SCHEMA.md).
+
+## Times
+
+Every time a person reads — in a Chat message, the gate comment, the issue
+title — is America/Toronto, written `7:30 AM ET` (`Sun 7:30 AM ET` where the
+day matters), DST included. URL parameters, `health.json`, the state files and
+the history feed stay ISO 8601 UTC. The digest hour is a Toronto hour
+(`--digest-hour 9`, `--digest-tz America/Toronto` by default) and "once a day"
+is a Toronto day: the state file's `last_digest_date` is the local date.
+`--digest-tz` moves only the digest's clock; the times written into messages
+and the `ET` label are fixed to Toronto.
 
 The rules are the procedure the eval crew ran by hand through the week of
 2026-09-01, written down as constants in `health.py`; each one cites the
@@ -29,26 +60,47 @@ concluded runs (#1278, #1171). Don't retest: the reds share a cause. The message
 names the cases, the pull requests, and the tracking issue when
 `case-notes.yaml` has one.
 
-**DEGRADED** — a quota storm (15+ repetitions lost to 429s or empty records
-across 3+ pull requests among the runs that finished in the last 2 hours,
-#1225 / #1214), or setup deaths (3+ runs that concluded `FAILURE` under 5
-minutes with no tasks, on 2+ pull requests, in 2 hours, #1172; an aborted
-zero-task run is a superseded push). Retest after the time the message gives; a
-run started inside a storm loses repetitions to it.
+**DEGRADED** — lost pods (the build cluster lost the node under the job:
+3+ runs that concluded `FAILURE` with no tasks and either a `NodeNotReady` pod
+event or no build log at all, finishing within 30 minutes of each other, among
+the runs of the last 2 hours, #1478; 8+ is announced as a build-cluster event,
+and the cluster owner's issue below is filed on any new `lost_pods`
+condition), a quota storm (15+
+repetitions lost to 429s or empty records across 3+ pull requests among the
+runs that finished in the last 2 hours, #1225 / #1214), or setup deaths (3+ runs
+that concluded `FAILURE` under 5 minutes with no tasks, on 2+ pull requests, in
+2 hours, #1172; an aborted zero-task run is a superseded push). A zero-task run
+is either a lost pod or a setup death, never both: a lost pod is never a setup
+death, whatever its duration. When more than one condition fires, the order
+above decides which one the message carries; the others stay in the evidence.
+For a storm, retest after the time the message gives; for lost pods, once new
+jobs are progressing.
+
+A run collected before the collector recorded how a build ended (SCHEMA.md,
+`has_build_log`, `pod_*`) is unknown and is never a lost pod.
 
 **GREEN** — none of the above. No message of its own beyond the recovery that
-announces it; the daily digest carries the green rate, wall clock p50/p90, the
-infra-rep rate and the setup-death count over the last 24 hours.
+announces it; the daily digest carries the last 24 hours' runs, greens,
+PR-caused reds and infra reds (setup deaths and lost pods are folded into the
+infra count) and the typical run length. `health.json`'s `metrics` keeps the
+rest — green rate, wall clock p50/p90, the infra-rep rate, `setup_deaths`,
+`lost_pods`.
 
 A case failing on exactly one pull request while passing elsewhere is that pull
 request's problem and moves no state; the message lists it as "PR-caused".
+
+Only presubmit runs reach these rules and the digest's numbers. `data.json`
+also carries the nightly periodic's runs (`runs[].tier`, see
+`scripts/eval_dashboard/SCHEMA.md`); a nightly has no pull request to count
+towards a distinct-PR floor, and a nightly collapsing is a case's record on
+`main`, not a gate incident.
 
 ## Hysteresis
 
 A single bad tick does not change the state, and a single lucky green does not
 end an incident. Entering OUTAGE or a storm DEGRADED needs the condition to be
-current: one of the three newest completed runs carries it (setup deaths are
-not completed runs, so their count is the currency). Returning to GREEN needs 3
+current: one of the three newest completed runs carries it (setup deaths and
+lost pods are not completed runs, so their count is the currency). Returning to GREEN needs 3
 consecutive green runs on distinct pull requests, all finished after the
 incident began and none carrying its signature — the runs that made the
 incident cannot end it. Until then `health.json` reports `recovering`, its
@@ -67,6 +119,114 @@ flags it `stale` once the data is older than its own `stale_after_s` (2 hours
 by default), and the poster says so once, and once more when the data is fresh
 again. The digest carries the same note while it lasts.
 
+## The comment on a red pull request
+
+Each tick, `scripts/eval_dashboard/gate_comment.py` finds the
+`pull-kube-agents-smoke-test` runs in `data.json` that finished since its last
+tick and concluded `FAILURE` with at least one graded repetition — not aborted
+runs, not setup deaths, not a suite that lost every repetition to a storm — and
+leaves one comment on each pull request (the newest red run per pull request
+when there are several):
+
+- a heading, `❌ Smoke gate: failed · 3 of 14 cases`, or `· hard failure` when
+  the run failed with no gate case failing all of its repetitions (an absolute
+  check, or a truncated log);
+- a health box: during an OUTAGE or DEGRADED state whose signature the run
+  carries, that the red is not the author's code and not to retest yet; when
+  the gate is healthy and the failed case passes on other pull requests' recent
+  runs, that it looks specific to this pull request; a mix says both, with
+  counts;
+- a table of the failed cases — result as `passed / total reps`, and how many
+  other pull requests the case is failing on right now;
+- the check's reason for a case that looks like the pull request's;
+- how many cases passed, the run's wall clock and pool project, and links: the
+  build log, `run.html#build=<build id>` on the dashboard, and the incident
+  brief when there is an incident.
+
+Which class a case gets — `shared`, `only-this-pr`, `storm`, unexplained — is
+`scripts/eval_dashboard/classify.py`'s `classify_run`, the same rules the
+dashboard's run page and the incident brief use; the comment only phrases it.
+
+One zero-task run does get a comment: a lost pod (the build node went away
+under the job, #1478). It is one line, same marker and dedupe:
+
+```text
+### ⚪ Smoke gate: run lost
+
+> The Prow build node running this job went away at 10:19 AM ET (<node>).
+> Nothing was graded and nothing about your change is implied. `/retest` once
+> new jobs are progressing. [Details →](run.html#build=<build id>)
+
+Ran 128 min before the node went away · build log
+```
+
+While `health.json`'s condition is `lost_pods` the box adds "part of a
+build-cluster event: N runs on M PRs" (below the 8-run event bar, "one of N
+runs on M PRs that lost their build node") and the incident brief link. Prow's
+build-log page shows the pod's events. Setup deaths stay silent: a clone
+failure is usually the branch's own merge conflict, and the build log says so.
+
+The comment starts with a hidden marker (`<!-- smoke-gate-comment -->`); a
+later red on the same pull request edits it in place, and a build already
+commented on is never commented on twice. The watermark and the comment ids
+live in `gate-comment-state.json` beside `health.json`; a first tick with no
+state looks back one hour. Posting uses the workflow's own `GITHUB_TOKEN`
+through `gh api` (the job holds `pull-requests: write` and `issues: write` for
+this and the tracking issue). A failure to post is a warning; the run is
+retried next tick and the job never reds for it. `--dry-run` prints the
+comments instead.
+
+## The tracking issue
+
+When the state becomes OUTAGE and no issue tracks it — `case-notes.yaml` names
+none for the failing cases, and no open issue labelled `presubmit-gate` names
+every failing case in its title or body — the poster files one, labelled
+`presubmit-gate`: `Smoke gate outage: 3 cases failing on every PR since Sun
+7:30 AM ET`, with the cases, the window, the class, the incident brief link,
+and the line "Filed automatically by the smoke health bot; edit freely. Fix
+PRs: reference this issue." A human's issue that already names the cases is
+adopted instead. The Chat message then reads `Tracking #NNN`, the issue rides
+in `health-state.json` and in `health.json`'s `issue` field (`{number, url, condition}`,
+`null` outside an incident; `health.py` reads it back through
+`--posted-state`), and the recovery comments on it: "Healthy again after Xh;
+bot will not close it." `issue` is the current condition's; every issue the
+incident filed or adopted stays in `health-state.json`'s `issues` list until
+GREEN, so an outage that gives way to a storm or to lost pods before it clears
+still gets its recovery comment, and the recovery message names them all. The
+bot never closes an issue. A GitHub failure leaves
+the message at "no issue yet — file one with the presubmit-gate label" and the
+next change asks again.
+
+A new `lost_pods` condition files one the same way, for the cluster owner:
+`Build cluster lost node(s) gke-kube-agents-prow-default-pool-eb220b2a-{er33,pe72,sgnk} at Fri 10:05
+AM ET: 12 smoke runs on 12 PRs died mid-run` (several node names are compacted
+to their shared prefix; past GitHub's 256-character title limit they become a
+count), with the nodes and how many runs each lost, the window, the affected
+pull requests, the evidence, the advice for authors, and the line "Filed
+automatically by the smoke health bot; the cluster owner should check the node
+events and autorepair; the bot will not close it." An open `presubmit-gate`
+issue that already names every lost node is adopted instead. The Chat message
+reads `Tracking #NNN`; the issue rides in the state the same way and is filed
+once per event. Each issue records the condition it was filed for (`{number,
+url, condition}`): an outage's issue is never cited as the lost pods' tracking,
+nor the reverse, so a break followed by a node loss files both, and both are
+commented on when the gate recovers.
+
+## The history feed
+
+After `health.json` is uploaded, the same object is appended as one line to
+`gs://kube-agents-dashboards/evals/health-history.jsonl` (JSON Lines, one
+record per tick, oldest first, nothing trimmed). Each record is the
+`health.json` document verbatim — `schema_version`, `state`, `condition`,
+`since`, `cause`, `failing_cases`, `tracking_issues`, `issue`, `incident`,
+`evidence`, `advice`, `recovering`, `stale`, `metrics`, `dashboard_url`,
+`generated_at` — plus `tick`, the ISO 8601 UTC time the line was appended.
+`generated_at` is the data's horizon and `tick` the wall clock, so a stalled
+refresh shows as many ticks sharing one `generated_at`. GCS has no append: the
+workflow downloads the object (a missing one is the first tick), appends with
+`scripts/eval_dashboard/health_history.py`, and uploads; a failure there is a
+warning, not a failed tick. The incident brief reads this feed.
+
 ## Replaying history
 
 ```bash
@@ -80,6 +240,10 @@ timeline. `scripts/test_eval_dashboard_health.py` asserts that timeline for
 #1214, #1269, #1278). The roster history matters: `compliance-rbac-overgrant`
 and `rca-remediation-pr` were admitted when they collapsed and were demoted
 afterwards, so a replay with today's roster would not see the 09-02 outage.
+A second fixture, `testdata_health/lost-pods-2026-09-11.json.gz`, is the day
+the build cluster lost five nodes (#1478); the same test file asserts it reads
+as `lost_pods` with 12 runs on 12 pull requests, and that the setup-death rule
+no longer claims them.
 
 ## The Chat space
 
@@ -94,8 +258,9 @@ the publish, adjudicate and post steps run as; the space is
 workflow's `env`; the repository variables `CI_HEALTH_CHAT_SPACE` and
 `CI_HEALTH_SA` override them. The off switch is the repository variable
 `CI_HEALTH_MUTE=true`: no token is minted, the poster logs "webhook not
-configured" and exits 0, and the refresh, the verdict and the `health.json`
-upload carry on. An incoming-webhook URL in Secret Manager
+configured" and exits 0 before it would file a tracking issue, the comment
+step on pull requests is skipped, and the refresh, the verdict and the
+`health.json` upload carry on. An incoming-webhook URL in Secret Manager
 (`ci-health-chat-webhook`, `kube-agents-prow`) is the optional alternative.
 
 `post_health.py --dry-run` prints the messages instead of posting them.
