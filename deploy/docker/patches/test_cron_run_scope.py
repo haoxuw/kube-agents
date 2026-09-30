@@ -7,6 +7,7 @@ import ast
 import concurrent.futures
 import contextvars
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -17,6 +18,10 @@ from cron_run_scope import (
     CRON_RESPONSE_LIMIT,
     CRON_RISK_ENV,
     CRON_RUN_ENV,
+    KANBAN_DB_NAME,
+    KANBAN_HOME_ENV,
+    ORIGIN_THREADS_LIMIT,
+    WORKER_DB_ENV,
     WORKER_TASK_ENV,
     clip_cron_response,
     cron_ownership_violation,
@@ -24,6 +29,7 @@ from cron_run_scope import (
     current_cron_job,
     current_cron_risk,
     missing_task_id_error,
+    worker_origin,
 )
 
 # The card the kanban dispatcher scoped the worker to, and the job the worker
@@ -32,6 +38,61 @@ CALLER_CARD = "t_a1b2c3d4"
 JOB_ID = "fleet-wide-cost-analysis"
 DISPATCH_ENV = {WORKER_TASK_ENV: CALLER_CARD, CRON_RUN_ENV: JOB_ID}
 WORKER_ENV = {WORKER_TASK_ENV: CALLER_CARD}
+
+# The subscription table as hermes_cli/kanban_db.py declares it at v2026.9.14.
+# Copied rather than imported: the unit suite runs without a Hermes tree, and
+# what worker_origin depends on is these column names, which is what the copy
+# pins. verify_cron_run_scope.py runs the same lookup against upstream's real
+# SCHEMA_SQL in the image, so a drift between the two fails the build.
+KANBAN_NOTIFY_SUBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kanban_notify_subs (
+    task_id       TEXT NOT NULL,
+    platform      TEXT NOT NULL,
+    chat_id       TEXT NOT NULL,
+    thread_id     TEXT NOT NULL DEFAULT '',
+    user_id       TEXT,
+    user_id_alt   TEXT,
+    chat_type     TEXT,
+    notifier_profile TEXT,
+    delivery_mode TEXT NOT NULL DEFAULT 'notify',
+    delivery_metadata TEXT,
+    created_at    INTEGER NOT NULL,
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    last_ping_event_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (task_id, platform, chat_id, thread_id)
+);
+"""
+
+# The thread a person asked in — a Google Chat space and the message thread
+# under it — and a second subscriber on Slack with no thread (a channel).
+ASKING_THREAD = {
+    "platform": "google_chat",
+    "chat_id": "spaces/AAAA1234",
+    "thread_id": "spaces/AAAA1234/threads/BBBB5678",
+}
+CHANNEL_SUB = {"platform": "slack", "chat_id": "C0123456789", "thread_id": ""}
+
+
+def _board(rows, schema=KANBAN_NOTIFY_SUBS_SCHEMA, task_id=CALLER_CARD):
+    """A throwaway board holding ``rows`` as subscriptions to ``task_id``."""
+    path = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+    conn = sqlite3.connect(path)
+    conn.executescript(schema)
+    for order, row in enumerate(rows):
+        conn.execute(
+            "INSERT INTO kanban_notify_subs "
+            "(task_id, platform, chat_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                row.get("task_id", task_id),
+                row["platform"],
+                row["chat_id"],
+                row["thread_id"],
+                1000 + order,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return path
 
 
 class CronRunScopeTest(unittest.TestCase):
@@ -227,6 +288,142 @@ class MissingTaskIdErrorTest(unittest.TestCase):
         self.assertIn("final response", msg)
         # Must not tell the run to set the very env var that caused the bug.
         self.assertNotIn("set HERMES_KANBAN_TASK", msg)
+
+
+class WorkerOriginTest(unittest.TestCase):
+    """A worker's job remembers the thread that asked; nothing else does."""
+
+    def setUp(self):
+        for var in (WORKER_TASK_ENV, WORKER_DB_ENV, KANBAN_HOME_ENV, CRON_RUN_ENV):
+            self.addCleanup(os.environ.pop, var, None)
+            os.environ.pop(var, None)
+
+    def test_outside_a_worker_there_is_no_origin(self):
+        self.assertEqual(worker_origin({}), ("", []))
+        # The real environment, with the card scrubbed by setUp: the cron
+        # ticker's own process and an interactive session look like this.
+        self.assertEqual(worker_origin(), ("", []))
+        # A blank card id is no card.
+        self.assertEqual(worker_origin({WORKER_TASK_ENV: "   "}), ("", []))
+
+    def test_a_worker_reads_its_cards_subscriptions(self):
+        db = _board([ASKING_THREAD, CHANNEL_SUB])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(
+            worker_origin(env), (CALLER_CARD, [ASKING_THREAD, CHANNEL_SUB])
+        )
+
+    def test_the_pinned_board_path_is_what_the_dispatcher_injected(self):
+        # HERMES_KANBAN_DB is set on every spawn by kanban_db_dispatch; the
+        # explicit argument exists for the verifier and wins over it.
+        pinned = _board([ASKING_THREAD])
+        explicit = _board([CHANNEL_SUB])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: pinned}
+        self.assertEqual(worker_origin(env)[1], [ASKING_THREAD])
+        self.assertEqual(worker_origin(env, db_path=explicit)[1], [CHANNEL_SUB])
+
+    def test_without_a_pin_the_default_board_under_the_kanban_home_is_read(self):
+        db = _board([ASKING_THREAD])
+        env = {WORKER_TASK_ENV: CALLER_CARD, KANBAN_HOME_ENV: os.path.dirname(db)}
+        self.assertEqual(worker_origin(env), (CALLER_CARD, [ASKING_THREAD]))
+
+    def test_the_real_environment_is_read_when_none_is_given(self):
+        # create_job calls worker_origin() bare, so the default must be the
+        # process environment the dispatcher populated, not an empty mapping.
+        db = _board([ASKING_THREAD])
+        os.environ[WORKER_TASK_ENV] = CALLER_CARD
+        os.environ[WORKER_DB_ENV] = db
+        self.assertEqual(worker_origin(), (CALLER_CARD, [ASKING_THREAD]))
+
+    def test_another_cards_subscriptions_are_not_this_workers(self):
+        db = _board([dict(ASKING_THREAD, task_id="t_someone_else")])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(worker_origin(env), (CALLER_CARD, []))
+
+    def test_a_card_nobody_subscribed_to_is_still_a_card(self):
+        # The distinction the stamp relies on: origin_task set with an empty
+        # origin_threads means "created on request, but no thread to answer
+        # in", which the relay falls back from; no origin_task at all means
+        # the job was not created by a worker.
+        db = _board([])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(worker_origin(env), (CALLER_CARD, []))
+
+    def test_a_row_with_no_chat_id_is_unaddressable_and_dropped(self):
+        blank = {"platform": "slack", "chat_id": "", "thread_id": "1700000000.000100"}
+        db = _board([blank, ASKING_THREAD])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(worker_origin(env)[1], [ASKING_THREAD])
+
+    def test_an_empty_thread_id_is_a_channel_and_kept(self):
+        db = _board([CHANNEL_SUB])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(worker_origin(env)[1], [CHANNEL_SUB])
+
+    def test_duplicate_triples_collapse_to_one(self):
+        # Upstream's primary key already makes two identical rows for one card
+        # impossible on a current board, so the dedupe is exercised against
+        # the same table without the key — the shape of a board whose schema
+        # is not the one this suite pins, which is the case the dedupe is for.
+        keyless = KANBAN_NOTIFY_SUBS_SCHEMA.replace(
+            ",\n    PRIMARY KEY (task_id, platform, chat_id, thread_id)", ""
+        )
+        self.assertNotIn("PRIMARY KEY", keyless)
+        db = _board([ASKING_THREAD, ASKING_THREAD, CHANNEL_SUB, ASKING_THREAD], keyless)
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        self.assertEqual(worker_origin(env)[1], [ASKING_THREAD, CHANNEL_SUB])
+
+    def test_the_list_is_capped_oldest_first(self):
+        rows = [
+            {"platform": "slack", "chat_id": f"C{i:010d}", "thread_id": ""}
+            for i in range(ORIGIN_THREADS_LIMIT + 4)
+        ]
+        db = _board(rows)
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        threads = worker_origin(env)[1]
+        self.assertEqual(len(threads), ORIGIN_THREADS_LIMIT)
+        self.assertEqual(threads, rows[:ORIGIN_THREADS_LIMIT])
+
+    def test_a_cron_run_borrowing_the_worker_env_has_no_origin(self):
+        # A job a cron run creates was not asked for in the caller's thread.
+        # Both markers, because both exist: the ContextVar the scope sets and
+        # the env fallback a forked process would carry.
+        db = _board([ASKING_THREAD])
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+        with cron_run_scope(JOB_ID):
+            self.assertEqual(worker_origin(env), ("", []))
+        self.assertEqual(worker_origin(dict(env, **{CRON_RUN_ENV: JOB_ID})), ("", []))
+        # And the moment the run is over the worker's own creates see it again.
+        self.assertEqual(worker_origin(env), (CALLER_CARD, [ASKING_THREAD]))
+
+    def test_an_unreadable_board_stamps_nothing_and_never_raises(self):
+        missing = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+        garbage = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+        Path(garbage).write_bytes(b"this is not a database")
+        # An older board that predates the subscription table entirely.
+        old = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+        sqlite3.connect(old).close()
+        for db in (missing, garbage, old):
+            env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: db}
+            self.assertEqual(worker_origin(env), ("", []), db)
+        # Read-only through a URI: the lookup must not have created the board.
+        self.assertFalse(os.path.exists(missing))
+
+    def test_an_unreadable_board_is_logged_and_still_stamps_nothing(self):
+        # Fail-soft is not fail-silent: a create that quietly lost its origin
+        # would be indistinguishable from one nobody asked for in a thread, so
+        # the swallowed exception leaves a warning naming the board and what
+        # went wrong, and the return value is exactly the no-origin one.
+        garbage = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+        Path(garbage).write_bytes(b"this is not a database")
+        env = {WORKER_TASK_ENV: CALLER_CARD, WORKER_DB_ENV: garbage}
+        with self.assertLogs(worker_origin.__module__, level="WARNING") as captured:
+            self.assertEqual(worker_origin(env), ("", []))
+        self.assertEqual(len(captured.records), 1)
+        record = captured.records[0]
+        self.assertEqual(record.levelname, "WARNING")
+        self.assertIn(garbage, record.getMessage())
+        self.assertIn(sqlite3.DatabaseError.__name__, record.getMessage())
 
 
 class ClipCronResponseTest(unittest.TestCase):
@@ -597,6 +794,90 @@ class ApplierTest(unittest.TestCase):
             self.assertEqual(j5["risk"], "high")
             j6 = create_job("test6", "* * * * *", "echo 6", risk="banana")
             self.assertEqual(j6["risk"], "high")
+
+    def test_jobs_create_job_stamps_the_worker_origin_after_the_risk(self):
+        root = self._apply_all()
+        jobs = (root / "cron" / "jobs.py").read_text()
+        ast.parse(jobs)
+        self.assertIn('job["origin_task"] = _origin_task', jobs)
+        self.assertIn('job["origin_threads"] = _origin_threads', jobs)
+        # Both import paths, as the risk clamp has them.
+        self.assertIn("from tools.cron_run_scope import worker_origin", jobs)
+        self.assertIn("from cron_run_scope import worker_origin", jobs)
+        # Order: risk, origin, then the save the anchor was.
+        self.assertLess(
+            jobs.index('job["risk"] = _eff_risk'),
+            jobs.index('job["origin_task"] = _origin_task'),
+        )
+        self.assertLess(
+            jobs.index('job["origin_threads"] = _origin_threads'),
+            jobs.index("with _jobs_lock():"),
+        )
+
+    def _patched_create_job(self):
+        """``create_job`` from the patched stub, with the store stubbed out."""
+        import contextlib
+        from typing import Any, Dict, Optional
+        root = self._apply_all()
+        ns = {
+            "load_jobs": lambda: [],
+            "save_jobs": lambda js: None,
+            "_jobs_lock": contextlib.nullcontext,
+            "Optional": Optional,
+            "Dict": Dict,
+            "Any": Any,
+        }
+        exec((root / "cron" / "jobs.py").read_text(), ns)
+        return ns["create_job"]
+
+    def _worker_env(self, db):
+        for var in (WORKER_TASK_ENV, WORKER_DB_ENV, CRON_RUN_ENV):
+            self.addCleanup(os.environ.pop, var, None)
+        os.environ[WORKER_TASK_ENV] = CALLER_CARD
+        os.environ[WORKER_DB_ENV] = db
+
+    def test_a_worker_created_job_carries_its_card_and_threads(self):
+        create_job = self._patched_create_job()
+        self._worker_env(_board([ASKING_THREAD, CHANNEL_SUB]))
+        job = create_job("recheck", "0 9 * * *", "re-check the rollout")
+        self.assertEqual(job["origin_task"], CALLER_CARD)
+        self.assertEqual(job["origin_threads"], [ASKING_THREAD, CHANNEL_SUB])
+        # The risk stamp it follows is untouched.
+        self.assertEqual(job["risk"], "low")
+
+    def test_a_card_with_no_subscribers_stamps_the_card_and_an_empty_list(self):
+        create_job = self._patched_create_job()
+        self._worker_env(_board([]))
+        job = create_job("recheck", "0 9 * * *", "re-check the rollout")
+        self.assertEqual(job["origin_task"], CALLER_CARD)
+        self.assertEqual(job["origin_threads"], [])
+
+    def test_a_job_created_outside_a_worker_has_neither_key(self):
+        create_job = self._patched_create_job()
+        for var in (WORKER_TASK_ENV, WORKER_DB_ENV, CRON_RUN_ENV):
+            self.addCleanup(os.environ.pop, var, None)
+            os.environ.pop(var, None)
+        job = create_job("recheck", "0 9 * * *", "re-check the rollout")
+        self.assertNotIn("origin_task", job)
+        self.assertNotIn("origin_threads", job)
+
+    def test_a_job_a_cron_run_creates_inside_a_worker_has_neither_key(self):
+        create_job = self._patched_create_job()
+        self._worker_env(_board([ASKING_THREAD]))
+        with cron_run_scope(JOB_ID):
+            job = create_job("recheck", "0 9 * * *", "re-check the rollout")
+        self.assertNotIn("origin_task", job)
+        self.assertNotIn("origin_threads", job)
+
+    def test_an_unreadable_board_does_not_fail_the_create(self):
+        create_job = self._patched_create_job()
+        garbage = os.path.join(tempfile.mkdtemp(), KANBAN_DB_NAME)
+        Path(garbage).write_bytes(b"this is not a database")
+        self._worker_env(garbage)
+        job = create_job("recheck", "0 9 * * *", "re-check the rollout")
+        self.assertEqual(job["name"], "recheck")
+        self.assertNotIn("origin_task", job)
+        self.assertNotIn("origin_threads", job)
 
     def test_a_wrapper_that_stopped_delegating_is_fatal_not_silent(self):
         """The shape that shipped the NameError: no lambda to forward through."""

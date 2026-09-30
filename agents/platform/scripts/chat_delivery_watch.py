@@ -44,7 +44,14 @@ or had no key. A partial one means it landed somewhere but not everywhere
 (``chat relay partial: the report did not reach <platforms>``); a degraded
 one means it was posted but the Chat Agent's turn failed. All three count
 toward the streak; the grade and the platforms are carried into the issue so
-a partial outage of one platform reads differently from a dead relay.
+a partial outage of one platform reads differently from a dead relay. Three
+notes arrive in the same field for a report that did arrive, and none of them
+counts: ``delivered without thread_id`` (the scheduler fell back from a thread
+it could not find), ``attachment(s) not delivered`` (it could not confirm an
+attachment), and ``the thread that asked could not be reached`` (the relay
+answered a worker-created job's report into the home channel because none of
+the threads that asked for it could be reached; a stamped thread that was
+deleted does this on every run, so counting it would page forever).
 
 Run by the platform roster every half hour. A tick sees each job's latest run
 only, so a job that runs more often than that is under-counted (never
@@ -118,10 +125,18 @@ PARTIAL_RE = re.compile(r"chat relay partial: the report did not reach ([^.]+)\.
 # "(target …)" note, so the platform list ends at either.
 HARD_UNDELIVERED_RE = re.compile(r"composed but not delivered to ([^;(\n]+)")
 NOT_CONFIGURED_RE = re.compile(r"platform '([^']+)' not configured/enabled")
-# Notes the scheduler files under the same field for a report that did arrive:
-# a thread it fell back from, an attachment it could not confirm. An error that
-# carries one of these and none of the failure shapes is a delivered report.
-DELIVERED_NOTE_MARKERS = ("delivered without thread_id", "attachment(s) not delivered")
+# Notes filed under the same field for a report that did arrive: a thread the
+# scheduler fell back from, an attachment it could not confirm, and the relay's
+# own note that a worker-created job's report went to the home channel because
+# none of the threads that asked for it could be reached (`ORIGIN_HOME_NOTE` in
+# deploy/docker/plugins/chat/adapter.py; a stamped thread that was deleted does
+# this on every run, so counting it would page forever). An error that carries
+# one of these and none of the failure shapes is a delivered report.
+DELIVERED_NOTE_MARKERS = (
+    "delivered without thread_id",
+    "attachment(s) not delivered",
+    "the thread that asked could not be reached",
+)
 FAILURE_MARKERS = (
     "composed but not delivered",
     "chat relay answered HTTP",

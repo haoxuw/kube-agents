@@ -35,6 +35,9 @@ JOB_ID = "obtainability-audit"
 LEDGER_URL = "https://example.invalid/issues/30"
 # A real Path, not a string. The string version is what let the Path bug ship.
 OUTPUT_FILE = pathlib.Path("/opt/data/profiles/platform/cron/output/x/y.md")
+# The thread a person asked in — platform, chat, thread — as a row of
+# kanban_notify_subs carries it and as worker_origin hands it back.
+ASKING_THREAD = ("google_chat", "spaces/AAAA1234", "spaces/AAAA1234/threads/BBBB5678")
 
 failures: list[str] = []
 
@@ -249,6 +252,72 @@ def main() -> int:
         "risk" in ct_cronjob_params,
         True,
     )
+
+    # --- and a worker-created job remembers the thread that asked ----------
+    # The stamp is source-checked like the risk one; the lookup behind it is
+    # run against a board built from upstream's own SCHEMA_SQL, because what
+    # the unit suite pins is a copy of the subscription table and the column
+    # names worker_origin selects are the thing a schema change would move.
+    check(
+        "cron.jobs.create_job stamps the origin card",
+        'job["origin_task"] = _origin_task' in cj_create_src,
+        True,
+    )
+    check(
+        "cron.jobs.create_job stamps the origin threads",
+        'job["origin_threads"] = _origin_threads' in cj_create_src,
+        True,
+    )
+    check(
+        "the origin stamp follows the risk stamp",
+        cj_create_src.find('job["risk"] = _eff_risk')
+        < cj_create_src.find('job["origin_task"] = _origin_task'),
+        True,
+    )
+
+    import sqlite3
+
+    from tools.cron_run_scope import KANBAN_DB_NAME, worker_origin
+
+    try:
+        from hermes_cli.kanban_db import SCHEMA_SQL
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"hermes_cli.kanban_db.SCHEMA_SQL is gone: {type(exc).__name__}: {exc}")
+        SCHEMA_SQL = None
+    if SCHEMA_SQL is not None:
+        board = os.path.join(tempfile.mkdtemp(prefix="cron-run-scope-board-"), KANBAN_DB_NAME)
+        conn = sqlite3.connect(board)
+        conn.executescript(SCHEMA_SQL)
+        # The asking thread, an unaddressable row (no chat), and another card's.
+        conn.executemany(
+            "INSERT INTO kanban_notify_subs "
+            "(task_id, platform, chat_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                (CALLER_CARD, *ASKING_THREAD, 1),
+                (CALLER_CARD, "slack", "", "1700000000.000100", 2),
+                ("t_other", "slack", "C0OTHER", "", 3),
+            ],
+        )
+        conn.commit()
+        conn.close()
+        worker_env = {"HERMES_KANBAN_TASK": CALLER_CARD, "HERMES_KANBAN_DB": board}
+        check(
+            "worker_origin reads the card's threads from the shipped schema",
+            worker_origin(worker_env),
+            (
+                CALLER_CARD,
+                [dict(zip(("platform", "chat_id", "thread_id"), ASKING_THREAD))],
+            ),
+        )
+        with cron_run_scope(JOB_ID):
+            check("a cron run inside the worker has no origin", worker_origin(worker_env), ("", []))
+        check("outside a worker there is no origin", worker_origin({}), ("", []))
+        check(
+            "an unreadable board stamps nothing",
+            worker_origin(worker_env, db_path=board + ".missing"),
+            ("", []),
+        )
+        check("and did not create one", os.path.exists(board + ".missing"), False)
 
     # --- the run's report reaches the caller --------------------------------
     seen = {}

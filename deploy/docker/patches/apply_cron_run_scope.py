@@ -278,6 +278,21 @@ JOBS_APPEND_ANCHOR = (
     "    return job\n"
 )
 
+# Two stamps share the one anchor: the risk tier, then the origin. The origin
+# is the card a kanban worker is scoped to and the chat threads subscribed to
+# that card, read from the board through ``worker_origin`` so the relay can
+# answer a scheduled re-check in the thread that asked for it rather than in
+# the per-job thread on the home channel. It is stamped here and nowhere else
+# because the worker's environment is the only place the card id and the
+# board path are both known; the cron ticker that later runs the job has
+# neither. The whole lookup is wrapped: a board that cannot be read stamps
+# nothing and the create proceeds, since a job without an origin still
+# delivers to the home channel as before, whereas a create that raised would
+# leave the person with no job. Same dual-path import as the risk clamp, for
+# the same reason — in the image the module is ``tools.cron_run_scope``; under
+# the unit suite the patches directory is top-level. An empty card id (no
+# worker, or a cron run borrowing a worker's env) leaves both keys absent, so a
+# job the roster shows without ``origin_task`` was not created on request.
 JOBS_APPEND_PATCHED = (
     "    # kube-agents patch: stamp risk tier on newly created cron jobs\n"
     "    # so runtime-created jobs run consistently across pod restarts.\n"
@@ -295,6 +310,22 @@ JOBS_APPEND_PATCHED = (
     "    if _in_high_cron:\n"
     '        _eff_risk = "high"\n'
     '    job["risk"] = _eff_risk\n'
+    "    # kube-agents patch: a job a kanban worker creates on request remembers\n"
+    "    # its card and the chat threads subscribed to it, so the relay can\n"
+    "    # report into the thread that asked. Only the worker env knows both the\n"
+    "    # card and the board; fail-soft, because bookkeeping must never fail\n"
+    "    # the create. See tools/cron_run_scope.py.\n"
+    "    try:\n"
+    "        try:\n"
+    "            from tools.cron_run_scope import worker_origin\n"
+    "        except ImportError:\n"
+    "            from cron_run_scope import worker_origin\n"
+    "        _origin_task, _origin_threads = worker_origin()\n"
+    "    except Exception:\n"
+    '        _origin_task, _origin_threads = "", []\n'
+    "    if _origin_task:\n"
+    '        job["origin_task"] = _origin_task\n'
+    '        job["origin_threads"] = _origin_threads\n'
     "\n"
     "    with _jobs_lock():\n"
     "        save_jobs(load_jobs() + [job])\n"

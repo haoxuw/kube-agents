@@ -295,6 +295,19 @@ prompt contract: **the job's prompt says nothing about it**, because the
 scheduler applies `[SILENT]` and builds the failure summary before delivery is
 reached.
 
+Which thread the Chat Agent posts into depends on where the job came from. A
+roster job, and a job created outside a kanban card, reports into the relay's
+own session — one per job per UTC day, in the home channel. A job a kanban
+worker creates on a user's request is stamped at create with the card's chat
+subscription rows (`origin_task` and `origin_threads` on the job record, read
+from `kanban_notify_subs` in the worker, the one process that holds both the
+card id and the board's path), and the relay posts each run's report into those
+threads instead, with an `incidents` row so a reply there is answered with the
+report in hand. When none of them can be reached the report goes to the home
+channel, the run record carries a delivered note saying so, and
+`chat-delivery-watch` does not count it as a failure
+([design](../../../docs/designs/cron-report-relay.md#reporting-into-the-thread-that-asked)).
+
 The relay itself posts to every chat platform the install has enabled, so on a
 dual-platform install whose cron child can address both, a job left on `"all"`
 is heard twice on _each_ of them rather than twice in one place. Two entries here name `"all"`

@@ -349,6 +349,96 @@ the history resets before it can grow without bound. Yesterday's thread does not
 go dark at the rollover, because `incident_context` resolves a reply by thread
 rather than by session id, and those rows live for `CLEANUP_TTL_DAYS`.
 
+## Reporting into the thread that asked
+
+A re-check a user asked for in chat reported into a thread the user never
+opened. The Platform Agent's kanban worker takes the request, creates the job
+with `deliver: "chat"`, and every run then lands in the per-job session above:
+its own thread, in the home channel, addressed to nobody in particular. The
+person who asked to probe the window again two hours before it starts has to
+notice a new thread and connect it to their own. The vehicle's R2
+([`capability-delivery-vehicle.md`](capability-delivery-vehicle.md)) says an
+advisory capability's re-check reports to the thread that asked; this section
+is what satisfies it.
+
+**The job record is stamped at create.** The worker never learns which thread
+it is answering, but the card's chat subscription rows do: `kanban_notify_subs`
+(`task_id, platform, chat_id, thread_id, …`) is how a card's progress reaches
+the thread that filed it. The worker process is the only place the two facts
+needed to read those rows meet — the card id in `HERMES_KANBAN_TASK` and the
+board's path in `HERMES_KANBAN_DB`, both injected by the dispatcher — so
+`create_job`, patched by `apply_cron_run_scope.py`, reads them there
+(`worker_origin` in `cron_run_scope.py`, read-only) and writes two keys onto
+the job: `origin_task`, the card id, and `origin_threads`, the
+`{platform, chat_id, thread_id}` triples, deduplicated and capped at eight.
+Only a worker outside a cron run stamps. A bookkeeping failure stamps nothing
+rather than failing the create, and a card with no subscription rows stamps an
+empty list. A job created anywhere else — a chat session, the CLI, a cron run —
+carries neither key and behaves exactly as before.
+
+**The relay carries the stamp forward.** `standalone_send` reads the job's
+roster record the same way it reads `deliver` for `also_delivered_to`, and the
+`POST /v1/cron-reports` body gains `origin_task` and `origin_threads`
+(malformed entries dropped, an empty list when the job has none). The daemon
+keeps an entry only when `platform` and `chat_id` are strings and `thread_id`
+is a string or absent, the ids match a bounded character class and the
+platform is a lowercase name, and keeps at most eight. It runs the Chat Agent
+turn as for any report, with one extra sentence in the relay instructions when
+at least one kept entry is on a platform the report will go to: the person in
+this thread asked for this scheduled re-check and is being answered in their
+own thread. Then, for each origin entry whose platform is one the report would
+go to anyway, it posts the composed message with
+`hermes send --to <platform>:<chat_id>:<thread_id>` — or
+`<platform>:<chat_id>` when the row has no thread, a fresh top-level post in
+that chat, where an unthreaded target used to mean the platform home — and
+stores an `incidents` row against the thread it landed in, so a reply there
+replays the report through `incident_context` like any other. Once one origin
+leg has landed the report is delivered: no per-job session routing is
+registered and the home-channel fan-out does not run. The response body says
+`"origin": "thread"`, and a platform on which every origin entry failed while
+another platform landed comes back in `undelivered`; a platform with one entry
+landed and one failed is delivered, not both.
+
+**When no origin leg lands** — the thread was deleted, the chat is gone, the
+send failed on every entry — the report falls through to the home-channel
+fan-out unchanged, and the response says so through `origin`, not through
+`degraded`. `origin` takes one of three values: `"thread"`, the report landed
+in at least one thread that asked; `"home"`, origin threads were named and
+none could be reached, so the report went to the home-channel fan-out; `""`,
+no origin threads were requested. `degraded` keeps its one meaning, that the
+Chat Agent turn failed, and `relay_detail` is unchanged, so a fallback run
+reads `"origin": "home"` beside `"relay": "ok"`. The adapter consumes the
+field: on `"home"` it files a delivered note in `last_delivery_error`, "chat
+relay delivered to the home channel: the thread that asked could not be
+reached.", with the same do-not-re-run trailer the other notes carry; on
+`"thread"` it logs that the report answered the thread that asked. The
+finding is in a channel either way; what the fallback gives up is the
+address, and the run record says which.
+
+The first draft routed the fallback through `degraded`, and that would have
+paged. `chat-delivery-watch` grades "chat relay degraded" as a failed Chat
+Agent turn and counts it toward a job's streak, and a stamped thread that has
+been deleted falls back on every run, so a job delivering correctly to the
+home channel would have crossed the alert threshold and stayed there for as
+long as it ran. A field of its own keeps "where it went" apart from "whether
+the turn worked", which the watch already tells apart.
+
+**What this costs.** A thread deleted between create and fire falls back to
+the home channel on every run, because nothing re-resolves the stamp. Each
+such run is recorded as `"origin": "home"` plus the delivered note above,
+which `chat-delivery-watch` reads as a delivery and not a failure (the note is
+on its `DELIVERED_NOTE_MARKERS` and carries none of its `FAILURE_MARKERS`), so
+the fallback is visible in `cronjob list` without paging anyone. Purging does
+not matter: `purge_stale_done_notify_subs` deletes a settled card's
+subscription rows after thirty days, but the stamp was taken at create and the
+job never reads the table again. An origin entry on a platform the install has
+since disabled is skipped rather than failed, so a dual-platform stamp on an
+install that kept one platform still lands on the one that remains; a stamp
+whose every platform is disabled falls back the same way, with the same
+record. And the `also_delivered_to` subtraction applies to origin legs as to
+the fan-out: an entry on a platform the cron child already posted to is not
+posted again.
+
 ## Why not a flag on `/sessions/{id}/inject`
 
 That route is an incident path. It classifies severity, spends `alert_quota`, and
@@ -570,7 +660,10 @@ every one of them is visible to a job author:
   `relay` has one cause today, and both callers had hard-coded the sentence for
   it, so the body also carries `relay_detail`: the route's own wording, which
   names the cause and never a platform, and which lets a second cause land in
-  the route without a client change.
+  the route without a client change. The origin fallback is deliberately not
+  that second cause: a report that went to the home channel instead of the
+  thread that asked travels in `origin`, not in `degraded` (see
+  [Reporting into the thread that asked](#reporting-into-the-thread-that-asked)).
   A send that lands on one platform and not another is a different case, and not
   a degradation — the report reached a channel, so `relay` stays `ok` — but one
   audience has nothing, so the body carries `undelivered`: the platforms that
@@ -637,8 +730,9 @@ anything but `ok` and that saved no document (interrupted by a gateway shutdown,
 or failed before delivery) is no evidence either, like a silent one; a failed
 run that did save its document had its failure summary delivered, which is a
 working leg. A note the scheduler files under the same field for a report that
-arrived (a thread it fell back from, an attachment it could not confirm) is not
-a failure. A job that is disabled or paused holds no streak, since it has no
+arrived (a thread it fell back from, an attachment it could not confirm, a
+thread that asked which it could not reach) is not a failure. A job that is
+disabled or paused holds no streak, since it has no
 next run to recover with.
 `CHAT_DELIVERY_ALERT_THRESHOLD` (default 2) is how many consecutive failing runs
 make a job degraded.

@@ -883,15 +883,16 @@ class TestSessionKvServerAuth(unittest.TestCase):
         # happens after.
         self._trigger = patch.object(session_kv_server, "trigger_agent_troubleshooter")
         self._trigger.start()
-        # (error, degraded, undelivered) — an unconfigured MagicMock would not
-        # unpack, and neither would a stale 2-tuple: the route would raise
-        # ValueError, get caught by the 502 handler, and this suite would still
-        # pass because it only asserts the status is not 401/403/503. So the
-        # arity here is what keeps the authenticated case exercising a healthy
-        # relay rather than the exception path. `degraded` is the reason string,
-        # so the healthy value is empty.
+        # (error, degraded, undelivered, origin) — an unconfigured MagicMock
+        # would not unpack, and neither would a stale 3-tuple: the route would
+        # raise ValueError, get caught by the 502 handler, and this suite would
+        # still pass because it only asserts the status is not 401/403/503. So
+        # the arity here is what keeps the authenticated case exercising a
+        # healthy relay rather than the exception path. `degraded` is the
+        # reason string and `origin` the delivery verdict, so the healthy
+        # values are empty.
         self._relay = patch.object(
-            session_kv_server, "relay_cron_report", return_value=(None, "", [])
+            session_kv_server, "relay_cron_report", return_value=(None, "", [], "")
         )
         self._relay.start()
 
@@ -2941,6 +2942,372 @@ class TestCronReportRelay(unittest.TestCase):
         with sqlite3.connect(temp_db_path) as conn:
             (blob,) = conn.execute("SELECT metadata FROM session_metadata").fetchone()
         self.assertEqual(json.loads(blob).get("title"), "Deploy verification")
+
+    # -- Reporting into the thread that asked (R2) ---------------------------
+    #
+    # A job a kanban worker created on a user's request carries the card's chat
+    # subscriptions as `origin_threads`; the relay answers there instead of in
+    # the per-job daily session. The home-channel fan-out above is the fallback.
+
+    ORIGIN = {"platform": "google_chat", "chat_id": "spaces/DM1", "thread_id": "spaces/DM1/threads/Q1"}
+    HOME_THREAD = "spaces/AAA/threads/T1"
+
+    def _send_that_answers_home_and_threads(self, *failing_chats):
+        """A `_send_to_chat` that keeps a known thread and opens one for a
+        fresh post, and fails for any chat named in `failing_chats`."""
+        def send(platform, message, chat_id="", thread_id=""):
+            if chat_id in failing_chats:
+                return None
+            if thread_id:
+                return thread_id
+            if chat_id:
+                return f"{chat_id}/threads/NEW"
+            return self.HOME_THREAD
+        return send
+
+    def _post_with_origin(self, origin_threads, send=None, turn="composed", **extra):
+        payload = {"job_id": "recheck", "profile": "platform", "report": "raw finding"}
+        if origin_threads is not None:
+            payload["origin_threads"] = origin_threads
+        payload.update(extra)
+        with patch.object(session_kv_server, "enabled_chat_platforms",
+                          return_value=["google_chat"]), \
+             patch.object(session_kv_server, "_create_gateway_session", return_value=True), \
+             patch.object(session_kv_server, "_run_relay_turn", return_value=turn) as relay_turn, \
+             patch.object(session_kv_server, "_send_to_chat",
+                          side_effect=send or self._send_that_answers_home_and_threads()) as sender:
+            response = self.client.post("/v1/cron-reports", json=payload)
+        return response, sender, relay_turn
+
+    def _cron_session_meta(self):
+        import sqlite3
+
+        with sqlite3.connect(temp_db_path) as conn:
+            (blob,) = conn.execute("SELECT metadata FROM session_metadata").fetchone()
+        return json.loads(blob)
+
+    def test_an_origin_thread_receives_the_composed_message_and_its_incident_row(self):
+        """(a) The person who asked gets the Chat Agent's message in their thread,
+        and a reply there finds it -- `incident_context` reads the row this stores."""
+        import sqlite3
+
+        response, sender, _ = self._post_with_origin([self.ORIGIN])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [c.args for c in sender.call_args_list],
+            [("google_chat", "composed", "spaces/DM1", "spaces/DM1/threads/Q1")],
+        )
+        with sqlite3.connect(temp_db_path) as conn:
+            rows = conn.execute("SELECT chat_id, thread_id, report FROM incidents").fetchall()
+        self.assertEqual(rows, [("spaces/DM1", "spaces/DM1/threads/Q1", "composed")])
+
+    def test_an_origin_landing_skips_the_home_channel_and_registers_no_routing(self):
+        """(b) The asking thread already has its own gateway session; the per-job
+        session must not be re-addressed at it, and the home channel must not
+        hear an answer meant for one person."""
+        _, sender, _ = self._post_with_origin([self.ORIGIN])
+
+        # One send, to the origin -- no home-channel leg with ("", "").
+        self.assertEqual(len(sender.call_args_list), 1)
+        self.assertNotIn(("", ""), [c.args[2:] for c in sender.call_args_list])
+        meta = self._cron_session_meta()
+        self.assertEqual(meta["platform"], "cron-report", "the sentinel must survive: nothing routed")
+        self.assertNotIn("platform_threads", meta)
+        self.assertNotIn("thread_id", meta)
+
+    def test_an_origin_on_a_platform_not_enabled_here_is_skipped(self):
+        """(c) A subscription from a platform this install does not post to is
+        skipped, not failed: it is neither sent to nor named in `undelivered`."""
+        slack_origin = {"platform": "slack", "chat_id": "C0123456789", "thread_id": "1712345678.000100"}
+        response, sender, _ = self._post_with_origin([slack_origin, self.ORIGIN])
+
+        self.assertEqual([c.args[0] for c in sender.call_args_list], ["google_chat"])
+        self.assertEqual(response.json()["undelivered"], "")
+        self.assertEqual(response.json()["origin"], "thread")
+
+    def test_an_unreachable_origin_falls_back_to_the_home_channel(self):
+        """(d) The thread was archived or the space left. A scheduled finding is
+        not lost for that: it goes where every other report goes, and the run
+        record says so through `origin`, never through `relay`. The fallback is
+        a delivery; `degraded` means the turn failed, and the watch that pages
+        on a streak of it must not count a thread deleted after it asked -- which
+        falls back on every run -- as the front door being down."""
+        import sqlite3
+
+        response, sender, _ = self._post_with_origin(
+            [self.ORIGIN], send=self._send_that_answers_home_and_threads("spaces/DM1"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "delivered")
+        self.assertEqual(body["relay"], "ok")
+        self.assertEqual(body["relay_detail"], "")
+        self.assertEqual(body["origin"], "home")
+        self.assertEqual(body["undelivered"], "")
+        # The origin was tried first; the home channel leg came after, unthreaded.
+        self.assertEqual(
+            [c.args[2:] for c in sender.call_args_list],
+            [("spaces/DM1", "spaces/DM1/threads/Q1"), ("", "")],
+        )
+        # The fallback is the ordinary fan-out: it routes the per-job session
+        # and stores the row for the home thread, and none for the origin.
+        self.assertEqual(self._cron_session_meta()["platform_threads"]["google_chat"]["thread_id"],
+                         self.HOME_THREAD)
+        with sqlite3.connect(temp_db_path) as conn:
+            rows = conn.execute("SELECT chat_id, thread_id FROM incidents").fetchall()
+        self.assertEqual(rows, [("spaces/AAA", self.HOME_THREAD)])
+
+    def test_a_failed_turn_and_an_unreachable_origin_are_said_in_separate_fields(self):
+        """Both happen on one run and each field keeps its one meaning: the
+        failed turn is `relay_detail`, the fallback is `origin`, and neither
+        mentions the other."""
+        response, _, _ = self._post_with_origin(
+            [self.ORIGIN], send=self._send_that_answers_home_and_threads("spaces/DM1"), turn=None)
+
+        body = response.json()
+        self.assertEqual(body["relay"], "degraded")
+        self.assertIn("Chat Agent turn failed", body["relay_detail"])
+        self.assertNotIn("thread that asked", body["relay_detail"])
+        self.assertEqual(body["origin"], "home")
+
+    def test_malformed_and_oversized_origin_entries_are_dropped(self):
+        """(e) Addresses are checked against the shape a real id has, never
+        repaired: a mended id is posted somewhere nobody is reading."""
+        parse = session_kv_server._parse_origin_threads
+        good = {"platform": "google_chat", "chat_id": "spaces/DM1", "thread_id": "spaces/DM1/threads/Q1"}
+        self.assertEqual(parse([good]), [good])
+        # Not a list, or not dicts.
+        self.assertEqual(parse("spaces/DM1"), [])
+        self.assertEqual(parse([None, "x", 7, ["google_chat", "spaces/DM1"]]), [])
+        # Wrong types, missing chat, whitespace, control characters, too long.
+        self.assertEqual(parse([{**good, "chat_id": 7}]), [])
+        self.assertEqual(parse([{**good, "chat_id": ""}]), [])
+        self.assertEqual(parse([{"platform": "google_chat", "thread_id": "spaces/DM1/threads/Q1"}]), [])
+        self.assertEqual(parse([{**good, "chat_id": "spaces/DM1 --to slack"}]), [])
+        self.assertEqual(parse([{**good, "thread_id": "spaces/DM1/threads/Q1\n"}]), [])
+        self.assertEqual(parse([{**good, "chat_id": "-spaces/DM1"}]), [])
+        self.assertEqual(parse([{**good, "chat_id": "s" * 201}]), [])
+        self.assertEqual(parse([{**good, "thread_id": "t" * 201}]), [])
+        # A platform that is not a lowercase name.
+        self.assertEqual(parse([{**good, "platform": "slack:C123"}]), [])
+        self.assertEqual(parse([{**good, "platform": ""}]), [])
+        # Spelled the way a human might; matched the way the registry spells it.
+        self.assertEqual(parse([{**good, "platform": " Google_Chat "}]), [good])
+        # An empty thread is a chat with no thread yet, and is kept.
+        unthreaded = {**good, "thread_id": ""}
+        self.assertEqual(parse([unthreaded]), [unthreaded])
+        self.assertEqual(parse([{**good, "thread_id": None}]), [unthreaded])
+        # Duplicates collapse on the triple; the cap holds in the order given.
+        self.assertEqual(parse([good, dict(good), unthreaded]), [good, unthreaded])
+        many = [{**good, "chat_id": f"spaces/DM{i}"} for i in range(12)]
+        kept = parse(many)
+        self.assertEqual(len(kept), session_kv_server.ORIGIN_THREADS_LIMIT)
+        self.assertEqual([e["chat_id"] for e in kept], [f"spaces/DM{i}" for i in range(8)])
+
+    def test_an_origin_with_no_thread_posts_to_its_chat_and_stores_the_thread_it_opened(self):
+        """(e) A card subscribed from a top-level message knows its chat and no
+        thread; the post goes to that chat, not to the home channel, and the
+        thread it opens is what a reply is matched on."""
+        import sqlite3
+
+        response, sender, _ = self._post_with_origin([{**self.ORIGIN, "thread_id": ""}])
+
+        self.assertEqual(response.json()["origin"], "thread")
+        self.assertEqual(
+            [c.args for c in sender.call_args_list],
+            [("google_chat", "composed", "spaces/DM1", "")],
+        )
+        with sqlite3.connect(temp_db_path) as conn:
+            rows = conn.execute("SELECT chat_id, thread_id FROM incidents").fetchall()
+        self.assertEqual(rows, [("spaces/DM1", "spaces/DM1/threads/NEW")])
+
+    def test_send_to_chat_addresses_a_chat_without_a_thread_as_platform_chat(self):
+        """The `hermes send --to` target for the third shape, and the two that
+        already existed unchanged beside it."""
+        def run(argv, **_kwargs):
+            done = MagicMock()
+            done.stdout = json.dumps({"message_id": "spaces/DM1/messages/M1.m1"})
+            return done
+
+        with patch.object(session_kv_server.subprocess, "run", side_effect=run) as runner, \
+             patch.object(session_kv_server, "_run_env", return_value={}):
+            unthreaded = session_kv_server._send_to_chat("google_chat", "m", "spaces/DM1", "")
+            threaded = session_kv_server._send_to_chat(
+                "google_chat", "m", "spaces/DM1", "spaces/DM1/threads/Q1")
+            bare = session_kv_server._send_to_chat("google_chat", "m")
+
+        targets = [c.args[0][c.args[0].index("--to") + 1] for c in runner.call_args_list]
+        self.assertEqual(targets, ["google_chat:spaces/DM1", "google_chat:spaces/DM1:spaces/DM1/threads/Q1", "google_chat"])
+        # A fresh post derives its thread from the message id, as before.
+        self.assertEqual(unthreaded, "spaces/DM1/threads/M1")
+        self.assertEqual(threaded, "spaces/DM1/threads/Q1")
+        self.assertEqual(bare, "spaces/DM1/threads/M1")
+
+    def test_the_turn_is_told_it_is_answering_the_thread_that_asked(self):
+        """(f) One sentence, only when there is a person to answer."""
+        _, _, with_origin = self._post_with_origin([self.ORIGIN])
+        _, _, without = self._post_with_origin(None)
+
+        self.assertIn("asked for this scheduled re-check", with_origin.call_args.args[3])
+        self.assertIn("their own thread", with_origin.call_args.args[3])
+        self.assertNotIn("asked for this scheduled re-check", without.call_args.args[3])
+        # The untrusted-report framing is not displaced by it.
+        self.assertIn("[SECURITY NOTICE:", with_origin.call_args.args[3])
+
+    def test_a_thread_this_report_is_not_going_to_does_not_make_it_an_answer(self):
+        """(f) The sentence follows the legs that will be attempted, not the list
+        being non-empty. The only thread that asked is on a platform this
+        install does not run: the report goes to the home channel, the turn is
+        not told it is answering anyone there, and the receipt records the
+        fallback as a delivery."""
+        slack_origin = {"platform": "slack", "chat_id": "C0123456789", "thread_id": "1712345678.000100"}
+        response, sender, relay_turn = self._post_with_origin([slack_origin])
+
+        self.assertNotIn("asked for this scheduled re-check", relay_turn.call_args.args[3])
+        body = response.json()
+        self.assertEqual(body["origin"], "home")
+        self.assertEqual(body["relay"], "ok")
+        self.assertEqual(body["relay_detail"], "")
+        self.assertEqual(body["undelivered"], "")
+        self.assertEqual(
+            [c.args for c in sender.call_args_list], [("google_chat", "composed", "", "")])
+
+    def test_a_thread_on_a_platform_the_scheduler_posts_to_itself_does_not_make_it_an_answer(self):
+        """The same after the `also_delivered_to` subtraction: the thread's
+        platform is enabled here, but the relay is not going there on this run,
+        so the thread is not one this report can answer."""
+        with patch.object(session_kv_server, "enabled_chat_platforms",
+                          return_value=["google_chat", "slack"]), \
+             patch.object(session_kv_server, "_create_gateway_session", return_value=True), \
+             patch.object(session_kv_server, "_run_relay_turn", return_value="composed") as relay_turn, \
+             patch.object(session_kv_server, "_send_to_chat",
+                          side_effect=self._send_that_answers_home_and_threads()) as sender:
+            response = self.client.post(
+                "/v1/cron-reports",
+                json={
+                    "job_id": "recheck", "profile": "platform", "report": "raw finding",
+                    "origin_threads": [self.ORIGIN],
+                    "also_delivered_to": ["google_chat"],
+                },
+            )
+
+        self.assertNotIn("asked for this scheduled re-check", relay_turn.call_args.args[3])
+        self.assertEqual(response.json()["origin"], "home")
+        self.assertEqual(response.json()["undelivered"], "")
+        self.assertEqual([c.args for c in sender.call_args_list], [("slack", "composed", "", "")])
+
+    def test_the_receipt_says_whether_the_thread_that_asked_got_it(self):
+        """(g) `origin` is a three-value verdict, present on every answer."""
+        landed, _, _ = self._post_with_origin([self.ORIGIN])
+        fell_back, _, _ = self._post_with_origin(
+            [self.ORIGIN], send=self._send_that_answers_home_and_threads("spaces/DM1"))
+        nobody_asked, _, _ = self._post_with_origin(None)
+        empty_list, _, _ = self._post_with_origin([])
+
+        self.assertEqual(landed.json()["origin"], "thread")
+        self.assertEqual(fell_back.json()["origin"], "home")
+        self.assertEqual(nobody_asked.json()["origin"], "")
+        self.assertEqual(empty_list.json()["origin"], "")
+
+    def test_an_empty_origin_list_behaves_exactly_as_no_origin_at_all(self):
+        """The switch is the list being non-empty; `[]` and absent are one case:
+        the same sends, the same instructions, the same receipt."""
+        # Distinct job ids: the second report of a job on one day replies into
+        # the first's thread, which would make the two differ for that reason.
+        # The job id is quoted in the instructions too, so those are compared
+        # with it levelled out.
+        absent_response, absent, absent_turn = self._post_with_origin(
+            None, job_id="recheck-absent")
+        empty_response, empty, empty_turn = self._post_with_origin([], job_id="recheck-empty")
+        self.assertEqual(
+            [c.args for c in absent.call_args_list], [c.args for c in empty.call_args_list])
+        self.assertEqual(absent.call_args.args[2:], ("", ""))
+        self.assertEqual(
+            absent_turn.call_args.args[3].replace("recheck-absent", "recheck"),
+            empty_turn.call_args.args[3].replace("recheck-empty", "recheck"),
+        )
+        for body in (absent_response.json(), empty_response.json()):
+            self.assertEqual(body["relay"], "ok")
+            self.assertEqual(body["relay_detail"], "")
+            self.assertEqual(body["origin"], "")
+
+    def test_also_delivered_to_still_subtracts_an_origin_leg(self):
+        """(h) The scheduler is posting the raw report to that platform itself;
+        the relay's origin leg there would be a second copy, so it is skipped
+        rather than counted as missed."""
+        slack_origin = {"platform": "slack", "chat_id": "C0123456789", "thread_id": "1712345678.000100"}
+        with patch.object(session_kv_server, "enabled_chat_platforms",
+                          return_value=["google_chat", "slack"]), \
+             patch.object(session_kv_server, "_create_gateway_session", return_value=True), \
+             patch.object(session_kv_server, "_run_relay_turn", return_value="composed"), \
+             patch.object(session_kv_server, "_send_to_chat",
+                          side_effect=self._send_that_answers_home_and_threads()) as sender:
+            response = self.client.post(
+                "/v1/cron-reports",
+                json={
+                    "job_id": "recheck", "profile": "platform", "report": "raw finding",
+                    "origin_threads": [self.ORIGIN, slack_origin],
+                    "also_delivered_to": ["google_chat"],
+                },
+            )
+
+        self.assertEqual([c.args[0] for c in sender.call_args_list], ["slack"])
+        self.assertEqual(sender.call_args.args[2:], ("C0123456789", "1712345678.000100"))
+        self.assertEqual(response.json()["origin"], "thread")
+        self.assertEqual(response.json()["undelivered"], "")
+
+    def test_an_origin_leg_that_fails_beside_one_that_lands_is_named(self):
+        """Partial origin delivery is a 200 that names the leg, as the fan-out does."""
+        slack_origin = {"platform": "slack", "chat_id": "C0123456789", "thread_id": "1712345678.000100"}
+        with patch.object(session_kv_server, "enabled_chat_platforms",
+                          return_value=["google_chat", "slack"]), \
+             patch.object(session_kv_server, "_create_gateway_session", return_value=True), \
+             patch.object(session_kv_server, "_run_relay_turn", return_value="composed"), \
+             patch.object(session_kv_server, "_send_to_chat",
+                          side_effect=self._send_that_answers_home_and_threads("C0123456789")) as sender:
+            response = self.client.post(
+                "/v1/cron-reports",
+                json={
+                    "job_id": "recheck", "profile": "platform", "report": "raw finding",
+                    "origin_threads": [self.ORIGIN, slack_origin],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["origin"], "thread")
+        self.assertEqual(response.json()["undelivered"], "slack")
+        self.assertEqual(response.json()["relay"], "ok")
+        # No home-channel leg was tried on either platform.
+        self.assertEqual(len(sender.call_args_list), 2)
+
+    def test_a_platform_that_landed_on_one_thread_is_not_also_failed_on_another(self):
+        """Two cards on one platform asked and one thread is gone. The platform
+        has the report, so the verdict is `thread` and nothing is `undelivered`:
+        naming it would have the adapter record a miss on a platform that has
+        the report."""
+        second = {"platform": "google_chat", "chat_id": "spaces/DM2", "thread_id": "spaces/DM2/threads/Q2"}
+        response, sender, _ = self._post_with_origin(
+            [self.ORIGIN, second], send=self._send_that_answers_home_and_threads("spaces/DM2"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["origin"], "thread")
+        self.assertEqual(body["undelivered"], "")
+        self.assertEqual(body["relay"], "ok")
+        # Both threads were tried, in the order given, and no home leg followed.
+        self.assertEqual(
+            [c.args[2:] for c in sender.call_args_list],
+            [("spaces/DM1", "spaces/DM1/threads/Q1"), ("spaces/DM2", "spaces/DM2/threads/Q2")],
+        )
+
+    def test_the_origin_card_id_is_scrubbed_before_it_is_logged(self):
+        """`origin_task` is a label: a newline in it would forge a log line."""
+        with self.assertLogs("session_kv_server", level="INFO") as captured:
+            self._post_with_origin([self.ORIGIN], origin_task="card-1\nERROR forged")
+        line = next(m for m in captured.output if "created by card" in m)
+        self.assertIn("card-1 ERROR forged", line)
+        self.assertNotIn("\nERROR", line)
 
 
 class TestRelayReachesEveryEnabledPlatform(unittest.TestCase):

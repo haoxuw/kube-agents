@@ -90,14 +90,52 @@ duration. ``kanban_tools.heartbeat_current_worker_from_env()`` reads it on
 every call to keep the dispatcher's 15-minute claim alive, and a compliance
 audit takes about 20 minutes — stripping it would let the claim lapse mid-run
 and hand the card to a second worker.
+
+Why a worker-created job remembers the thread that asked for it
+---------------------------------------------------------------
+The other direction of the same borrowed environment. When a person asks in
+chat for a scheduled re-check, the Planning Agent files a card, the kanban
+dispatcher spawns a worker for it, and the worker creates the cron job with
+``deliver: chat``. Every report that job produces then goes through the relay
+plugin to the Session KV daemon, which runs a Chat Agent turn and posts the
+result to every home channel in a per-job thread — never to the thread the
+person asked in, because nothing along that path knows which thread it was.
+
+The worker does not know either, but its card does: ``kanban_notify_subs`` in
+the board database holds one row per chat thread subscribed to the card, and
+the dispatcher injects both halves of the lookup into the worker's environment
+— the card id as ``HERMES_KANBAN_TASK`` and the board path as
+``HERMES_KANBAN_DB``. That environment is the only place the two are ever
+known together. The process that later runs the job is the cron ticker's,
+which has no card; the relay child it spawns has ``jobs.json`` and nothing
+else; and the daemon is a different container that has never heard of the
+board. So the join has to happen at ``create_job``, and it is recorded on the
+job itself as ``origin_task`` and ``origin_threads``, where the relay reads it
+back from the roster on every report. ``worker_origin`` does the reading.
+
+It is fail-soft, and the two halves of that are separate decisions. A job
+created without an origin is delivered to the home channel exactly as before
+this patch, which is a worse answer than the thread but a working one; a
+``create_job`` that raised over an unreadable board would leave the person
+with no job at all, mid-conversation, over a bookkeeping lookup. So any
+failure — no board, an old board without the table, a lock held past the
+timeout — stamps nothing and lets the create proceed. And a cron run borrowing
+a worker's environment returns nothing on purpose: a job *it* creates was not
+asked for in the caller's thread, and stamping the caller's subscriptions onto
+it would be precisely the borrowed-card confusion the rest of this module
+exists to prevent.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import sqlite3
 from contextvars import ContextVar
 from typing import Iterator, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 #: Name of the marker, used for both the context variable and the env var.
 CRON_RUN_ENV = "HERMES_KANBAN_CRON_RUN"
@@ -105,6 +143,25 @@ CRON_RISK_ENV = "HERMES_KANBAN_CRON_RISK"
 
 #: Set by the kanban dispatcher to the card the worker is scoped to.
 WORKER_TASK_ENV = "HERMES_KANBAN_TASK"
+
+#: Where the dispatcher pins the worker's board (``hermes_cli/kanban_db_dispatch.py``
+#: sets it on every spawn), and how ``kanban_db_path()`` resolves the default
+#: board when nothing pinned it: ``kanban.db`` under the shared Hermes root,
+#: which ``HERMES_KANBAN_HOME`` overrides and which is ``/opt/data`` in the image.
+WORKER_DB_ENV = "HERMES_KANBAN_DB"
+KANBAN_HOME_ENV = "HERMES_KANBAN_HOME"
+DEFAULT_KANBAN_HOME = "/opt/data"
+KANBAN_DB_NAME = "kanban.db"
+
+#: Most chat threads a job remembers asking for it. A card normally has one or
+#: two subscribers; the cap bounds the roster record and the relay payload, not
+#: the board.
+ORIGIN_THREADS_LIMIT = 8
+
+#: How long to wait on a busy board before giving up the stamp. The dispatcher
+#: writes the same file on every tick, so a short wait is normal and a long one
+#: is a reason to fall back rather than stall the create.
+KANBAN_DB_TIMEOUT_SECONDS = 5
 
 #: Budget for the run report carried back in the tool result. Roomier than the
 #: chat handoff limit because this goes to a model, not a chat window, and the
@@ -220,6 +277,76 @@ def missing_task_id_error(environ: Optional[Mapping[str, str]] = None) -> str:
             f"an explicit task_id only to read or comment on some other task."
         )
     return "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+
+
+def worker_origin(
+    environ: Optional[Mapping[str, str]] = None,
+    db_path: Optional[str] = None,
+) -> tuple[str, list[dict]]:
+    """The card this worker is scoped to, and the chat threads subscribed to it.
+
+    Returns ``(card id, [{"platform", "chat_id", "thread_id"}, ...])`` for a
+    kanban worker, read from ``kanban_notify_subs`` in the worker's board;
+    ``(card id, [])`` for a card nobody is subscribed to; and ``("", [])``
+    outside a worker, inside a cron run (``current_cron_job`` non-empty), and
+    on any failure to read the board, which is logged as a warning naming the
+    board and the exception class. It never raises: ``create_job`` calls it
+    on the way to saving the job, and the module docstring says why a
+    bookkeeping lookup must not be what fails the create.
+
+    ``db_path`` defaults to what the dispatcher pinned in ``HERMES_KANBAN_DB``,
+    else the default board under ``HERMES_KANBAN_HOME`` or ``/opt/data``. The
+    board is opened read-only through a URI so this can never create the file,
+    take a write lock, or leave a journal next to a database the dispatcher
+    owns. Rows with an empty ``chat_id`` are unaddressable and dropped; an
+    empty ``thread_id`` is a subscription to the channel itself and kept. The
+    result is deduplicated on the triple and capped at ``ORIGIN_THREADS_LIMIT``
+    in subscription order, oldest first.
+    """
+    env = os.environ if environ is None else environ
+    task_id = (env.get(WORKER_TASK_ENV) or "").strip()
+    if not task_id or current_cron_job(env):
+        return "", []
+    if db_path is None:
+        db_path = env.get(WORKER_DB_ENV) or os.path.join(
+            env.get(KANBAN_HOME_ENV) or DEFAULT_KANBAN_HOME, KANBAN_DB_NAME
+        )
+    try:
+        with contextlib.closing(
+            sqlite3.connect(
+                f"file:{db_path}?mode=ro", uri=True, timeout=KANBAN_DB_TIMEOUT_SECONDS
+            )
+        ) as conn:
+            rows = conn.execute(
+                "SELECT platform, chat_id, thread_id FROM kanban_notify_subs "
+                "WHERE task_id = ? ORDER BY created_at, platform, chat_id, thread_id",
+                (task_id,),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning(
+            "worker_origin: could not read kanban_notify_subs from %s (%s); "
+            "the job is created without an origin and reports to the home channel",
+            db_path,
+            type(exc).__name__,
+        )
+        return "", []
+    threads: list[dict] = []
+    seen: set = set()
+    for platform, chat_id, thread_id in rows:
+        entry = (
+            str(platform or "").strip(),
+            str(chat_id or "").strip(),
+            str(thread_id or "").strip(),
+        )
+        if not entry[1] or entry in seen:
+            continue
+        seen.add(entry)
+        threads.append(
+            {"platform": entry[0], "chat_id": entry[1], "thread_id": entry[2]}
+        )
+        if len(threads) >= ORIGIN_THREADS_LIMIT:
+            break
+    return task_id, threads
 
 
 def clip_cron_response(text: object) -> str:

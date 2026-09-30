@@ -294,6 +294,7 @@ RUN /opt/hermes/.venv/bin/python3 /tmp/apply_cron_run_scope.py /opt/hermes && \
     grep -q "cron_ownership_violation(tid)" /opt/hermes/tools/kanban_tools.py && \
     grep -q 'd.output_file = str(output_file)' /opt/hermes/cron/scheduler.py && \
     grep -q 'job\["risk"\] = _eff_risk' /opt/hermes/cron/jobs.py && \
+    grep -q 'job\["origin_threads"\] = _origin_threads' /opt/hermes/cron/jobs.py && \
     cd /opt/hermes && /opt/hermes/.venv/bin/python3 -c "\
 from gateway.kanban_handoff_clip import clip_handoff; \
 from tools.cron_run_scope import clip_cron_response, cron_run_scope; \

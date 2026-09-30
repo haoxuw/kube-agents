@@ -60,6 +60,20 @@ HARD_ERROR = (
     "delivered to slack, google_chat (target chat:cron-reports)"
 )
 UNREACHABLE_ERROR = "delivery error: chat relay unreachable: URLError: [Errno 111] Connection refused"
+# The relay's note for a worker-created job whose report went to the home channel
+# because none of the threads that asked for it could be reached. A delivered
+# note, and the adapter's `ORIGIN_HOME_NOTE` verbatim.
+HOME_FALLBACK_NOTE = (
+    "delivery error: chat relay delivered to the home channel: the thread that asked "
+    "could not be reached. Delivered — do not re-run to resend."
+)
+# The same note joined with a partial fan-out, in the order the adapter joins its
+# notes: the failure phrase is present, so the string is a failure.
+PARTIAL_AND_HOME_FALLBACK = (
+    "delivery error: chat relay partial: the report did not reach slack. "
+    "chat relay delivered to the home channel: the thread that asked could not be reached. "
+    "Delivered — do not re-run to resend."
+)
 # Written by the scheduler before any adapter runs; both seen live on gkedemos on 2026-09-10.
 NOT_CONFIGURED_ERROR = "platform 'google_chat' not configured/enabled"
 NO_TARGET_ERROR = "no delivery target resolved for deliver=chat"
@@ -194,8 +208,40 @@ class GradingTest(unittest.TestCase):
         adapter = (REPO_ROOT / "deploy" / "docker" / "plugins" / "chat" / "adapter.py").read_text(encoding="utf-8")
         self.assertIn("chat relay partial: the report did not reach {undelivered}.", adapter)
         self.assertIn("chat relay degraded: ", adapter)
+        # The delivered note too: reworded there, it would grade as a hard failure here.
+        self.assertIn(
+            "chat relay delivered to the home channel: the thread that asked could not be reached.",
+            adapter,
+        )
         relay = (REPO_ROOT / "agents" / "platform" / "scripts" / "session_kv_server.py").read_text(encoding="utf-8")
         self.assertIn("composed but not delivered to ", relay)
+
+    def test_the_home_channel_fallback_is_a_delivered_note(self) -> None:
+        """A worker-created job whose thread was deleted falls back on every run.
+
+        The adapter records that as a note, never through `degraded`: graded as
+        a failure it would hold a streak, and so an issue, open forever on a job
+        that is delivering. The note must therefore share no phrase with the
+        failure shapes, or `is_delivered_note` would reject it.
+        """
+        self.assertTrue(cdw.is_delivered_note(HOME_FALLBACK_NOTE))
+        for marker in cdw.FAILURE_MARKERS:
+            self.assertNotIn(marker, HOME_FALLBACK_NOTE)
+        for phrase in ("chat relay degraded", "chat relay partial", "composed but not delivered"):
+            self.assertNotIn(phrase, HOME_FALLBACK_NOTE)
+        entry = cdw.advance(cdw.new_entry(), job("a", RUN_1, HARD_ERROR), silent=False)
+        entry = cdw.advance(entry, job("a", RUN_2, HOME_FALLBACK_NOTE), silent=False)
+        self.assertEqual((entry["streak"], entry["grade"], entry["last_error"]), (0, None, None))
+        self.assertEqual(entry["last_seen_run_at"], RUN_2)
+
+    def test_the_home_channel_fallback_beside_a_partial_is_still_partial(self) -> None:
+        # The adapter joins its notes into one string, and a failure among them
+        # is what the string is: the fallback note does not launder a missed leg.
+        self.assertFalse(cdw.is_delivered_note(PARTIAL_AND_HOME_FALLBACK))
+        self.assertEqual(cdw.grade_error(PARTIAL_AND_HOME_FALLBACK), cdw.GRADE_PARTIAL)
+        self.assertEqual(cdw.platforms_from(PARTIAL_AND_HOME_FALLBACK), ["slack"])
+        entry = cdw.advance(cdw.new_entry(), job("a", RUN_1, PARTIAL_AND_HOME_FALLBACK), silent=False)
+        self.assertEqual((entry["streak"], entry["grade"], entry["platforms"]), (1, cdw.GRADE_PARTIAL, ["slack"]))
 
     def test_the_scheduler_s_own_failures_grade_hard_and_name_the_platform(self) -> None:
         self.assertEqual(cdw.grade_error(NOT_CONFIGURED_ERROR), cdw.GRADE_HARD)

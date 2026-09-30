@@ -123,6 +123,35 @@ _HOME_CHANNEL_SUFFIX = "_HOME_CHANNEL"
 _DEFAULT_HERMES_HOME = "/opt/data"
 _CRON_ROSTER = ("cron", "jobs.json")
 
+#: The most ``origin_threads`` entries a payload carries. A job a kanban worker
+#: creates on request records the chat threads that asked for it (see
+#: :func:`origin_threads_for`); ``create_job`` stamps at most this many and the
+#: daemon's ``submit_cron_report`` caps at the same number, so a roster edited
+#: by hand cannot turn one report into a fan-out over an unbounded list.
+ORIGIN_THREADS_LIMIT = 8
+
+#: The route's ``origin`` verdict: where a report that named the threads that
+#: asked for it went. ``ORIGIN_VERDICT_THREAD`` when it landed in at least one
+#: of them; ``ORIGIN_VERDICT_HOME`` when threads were named but none could be
+#: reached, so the report went to the home-channel fan-out instead; ``""`` when
+#: the payload named none, which is every job the image ships. The same
+#: strings the route answers with (``session_kv_server.py``,
+#: ``relay_cron_report``), restated here for the reason :data:`SILENT_MARKER`
+#: is: the daemon is not importable from this module.
+ORIGIN_VERDICT_THREAD = "thread"
+ORIGIN_VERDICT_HOME = "home"
+
+#: What ``last_delivery_error`` says under ``ORIGIN_VERDICT_HOME``. A delivered
+#: note, not a failure: the report is in a channel, the Chat Agent turn that
+#: composed it succeeded, and no platform was missed -- only the thread was.
+#: ``agents/platform/scripts/chat_delivery_watch.py`` matches on "the thread
+#: that asked could not be reached" and reads the whole string as delivered
+#: only if no failure phrase shares it, so this sentence carries none of them:
+#: not "degraded", not "partial", not "unreachable". Reword it there too.
+ORIGIN_HOME_NOTE = (
+    "chat relay delivered to the home channel: the thread that asked could not be reached."
+)
+
 #: The token a cron run emits to say it has nothing to report.
 #:
 #: Restated rather than imported from ``cron.scheduler``, which lives in the
@@ -182,6 +211,44 @@ def relay_url() -> str:
     return (os.getenv(RELAY_URL_ENV, "") or "").strip() or DEFAULT_RELAY_URL
 
 
+def _roster_job(job_id: str) -> dict:
+    """The job record for *job_id* from this profile's roster, or ``{}``.
+
+    The roster is the sender's only view of the job. ``standalone_sender_fn`` is
+    handed the delivery text (see the module docstring), so everything else the
+    payload says about the job -- its sibling ``deliver`` targets, the thread
+    that asked for it -- is read back from ``<HERMES_HOME>/cron/jobs.json`` by
+    the id the wrapper carried.
+
+    ``{}`` on any failure, and every caller treats ``{}`` as "the roster said
+    nothing": an unreadable or corrupt file, a store of the wrong shape, an id
+    the roster does not carry. The roster is bookkeeping and the report is the
+    delivery, so a problem reading the one must never fail the other.
+
+    An empty ``job_id`` looks nothing up. It is every delivery that carries no
+    cron wrapper -- the ``cron.wrap_response: false`` case this module still
+    relays -- and matching it against ``job.get("id") or ""`` made it equal to
+    the first job in the store with a missing or empty id. A hand-edited
+    ``jobs.json`` is all that takes, and the delivery then subtracted platforms
+    on a different job's ``deliver``. There is no job to look up here, so look
+    none up.
+    """
+    if not job_id:
+        return {}
+    home = Path(os.getenv("HERMES_HOME", "") or _DEFAULT_HERMES_HOME)
+    try:
+        with open(home.joinpath(*_CRON_ROSTER), encoding="utf-8") as handle:
+            store = json.load(handle)
+    except Exception:
+        return {}
+
+    jobs = store.get("jobs") if isinstance(store, dict) else store
+    for job in jobs if isinstance(jobs, list) else []:
+        if isinstance(job, dict) and str(job.get("id") or "") == job_id:
+            return job
+    return {}
+
+
 def sibling_delivery_targets(job_id: str) -> list[str]:
     """Platforms the scheduler is posting this same report to, besides the relay.
 
@@ -203,27 +270,11 @@ def sibling_delivery_targets(job_id: str) -> list[str]:
     Best effort in both directions, and the direction matters: an unreadable
     roster returns nothing, which relays as before rather than dropping a
     channel. Over-reporting would lose a delivery; under-reporting only risks
-    the duplicate this exists to prevent.
+    the duplicate this exists to prevent. Both the unreadable roster and the
+    empty ``job_id`` are :func:`_roster_job`'s ``{}``, which reads here as a
+    ``deliver`` of nothing.
     """
-    home = Path(os.getenv("HERMES_HOME", "") or _DEFAULT_HERMES_HOME)
-    try:
-        with open(home.joinpath(*_CRON_ROSTER), encoding="utf-8") as handle:
-            store = json.load(handle)
-    except (OSError, ValueError):
-        return []
-
-    jobs = store.get("jobs") if isinstance(store, dict) else store
-    raw: object = ""
-    # An empty `job_id` is every delivery that carries no cron wrapper -- the
-    # `cron.wrap_response: false` case this module still relays -- and matching
-    # it against `job.get("id") or ""` made it equal to the first job in the
-    # store with a missing or empty id. A hand-edited `jobs.json` is all that
-    # takes, and the delivery then subtracts platforms on a different job's
-    # `deliver`. There is no job to look up here, so look none up.
-    for job in jobs if isinstance(jobs, list) and job_id else []:
-        if isinstance(job, dict) and str(job.get("id") or "") == job_id:
-            raw = job.get("deliver") or ""
-            break
+    raw: object = _roster_job(job_id).get("deliver") or ""
 
     # A list is the shape the paragraph above describes and the one hermes
     # treats as native -- `hermes_cli/cron.py` coerces a string *into* a list,
@@ -294,6 +345,69 @@ def sibling_delivery_targets(job_id: str) -> list[str]:
     return sorted(handled)
 
 
+def origin_threads_for(job_id: str) -> tuple[str, list[dict]]:
+    """``(origin_task, origin_threads)`` off the job record: the thread that asked.
+
+    A job a kanban worker creates on a user's request ("probe that window again
+    two hours before it starts") owes its reports to the thread that asked, not
+    to the relay's per-job session for the day. The worker never learns its
+    thread, but the card's chat subscriptions do, so ``create_job`` stamps the
+    card id as ``origin_task`` and those subscriptions as ``origin_threads`` on
+    the job record. This reads them back for the payload; the route decides what
+    to do with them (``relay_cron_report``), and this end only promises that
+    what it forwards is well-formed.
+
+    Cleaning is shape only. An entry is a dict whose ``platform`` and
+    ``chat_id`` are non-empty strings and whose ``thread_id``, when present, is
+    a string. A ``thread_id`` that is absent or null becomes ``""``, which is
+    how a subscription on a channel rather than a thread is recorded; one that
+    is present and not a string drops the entry rather than being coerced --
+    ``str(1712.0001)`` matches a Slack ts only by luck of the float's repr, and
+    a number is nothing anyone subscribed under. Every other key is dropped.
+    Whether an id is one the route will address is the route's call -- it
+    validates against its own pattern and knows which platforms are enabled --
+    so nothing is judged here that would have to be judged twice. Capped at
+    :data:`ORIGIN_THREADS_LIMIT` after cleaning, so a roster with more entries
+    than the cap forwards the first well-formed ones rather than a shorter,
+    arbitrary set.
+
+    ``("", [])`` for a job that carries neither key, which is every job the
+    image ships and every job created outside a worker -- and, through
+    :func:`_roster_job`, for an unreadable roster or a delivery with no job id.
+    The route treats that as it treated a payload without the keys: fan out to
+    the home channels as before.
+    """
+    job = _roster_job(job_id)
+    origin_task = job.get("origin_task")
+    origin_task = origin_task.strip() if isinstance(origin_task, str) else ""
+
+    raw = job.get("origin_threads")
+    threads: list[dict] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if len(threads) >= ORIGIN_THREADS_LIMIT:
+            break
+        if not isinstance(entry, dict):
+            continue
+        platform, chat_id = entry.get("platform"), entry.get("chat_id")
+        if not (isinstance(platform, str) and platform.strip()):
+            continue
+        if not (isinstance(chat_id, str) and chat_id.strip()):
+            continue
+        thread_id = entry.get("thread_id")
+        if thread_id is None:
+            thread_id = ""
+        elif not isinstance(thread_id, str):
+            continue
+        threads.append(
+            {
+                "platform": platform.strip(),
+                "chat_id": chat_id.strip(),
+                "thread_id": thread_id.strip(),
+            }
+        )
+    return origin_task, threads
+
+
 def is_silent_report(report: str) -> bool:
     """Should this report be swallowed rather than relayed?
 
@@ -361,11 +475,13 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
 def _relay_receipt(response) -> dict:
     """The route's 2xx body, or ``{}`` if it could not be read.
 
-    Three fields are read off it, and each says something a bare 200 does not:
-    ``relay`` (``degraded`` when the report is in a channel but the delivery did
-    not go as intended), ``relay_detail`` (which of the degradations it was, in
-    words) and ``undelivered`` (the enabled chat platforms this report did not
-    reach while another one did).
+    Four fields are read off it, and each says something a bare 200 does not:
+    ``relay`` (``degraded`` when the report is in a channel but the Chat Agent
+    turn that composes it failed), ``relay_detail`` (that degradation in the
+    route's words), ``undelivered`` (the enabled chat platforms this report did
+    not reach while another one did) and ``origin`` (whether a report that
+    named the threads that asked for it landed in one, or fell back to the
+    home channels because none could be reached).
 
     Best effort, like :func:`_http_error_detail`: the body is read once and a
     delivery that worked is never turned into an exception by failing to parse
@@ -373,13 +489,16 @@ def _relay_receipt(response) -> dict:
     "nothing to report" — the caller acts only on explicit values.
 
     The whole body comes back rather than one field off it because the caller
-    reads three, and a tuple carrying some of them is one the two ends have to
+    reads four, and a tuple carrying some of them is one the two ends have to
     keep in step. ``relay_detail`` is the route's own wording for why ``relay``
-    is ``degraded`` -- one cause today, a Chat Agent turn that did not compose
-    the report -- carried so that this end stops hard-coding that sentence and
-    a second cause can land in the route without a client change. A route too
-    old to send it leaves the field absent, and the caller falls back to the
-    sentence it used to print unconditionally.
+    is ``degraded``, carried so that this end stops hard-coding that sentence
+    and a change to it can land in the route without a client change. A route
+    too old to send it leaves the field absent, and the caller falls back to the
+    sentence it used to print unconditionally. ``degraded`` itself keeps one
+    meaning, a Chat Agent turn that failed: the origin fallback is not a second
+    cause of it and rides on ``origin`` instead, because a stamped thread that
+    was deleted falls back on every run that follows, and a fallback graded as
+    a failed turn would be a delivery-watch page that never clears.
     """
     try:
         body = json.loads(response.read().decode("utf-8", "replace"))
@@ -439,8 +558,10 @@ async def standalone_send(
 
     ``chat_id``, ``thread_id``, ``media_files`` and ``force_document`` are
     accepted for signature parity and ignored: this sender names no destination
-    at all. The route resolves them itself — one per enabled chat platform — and
-    the Chat Agent decides what its own message says.
+    of its own. The route resolves them itself — one per enabled chat platform,
+    or the thread that asked for the job when the roster records one (see
+    :func:`origin_threads_for`) — and the Chat Agent decides what its own
+    message says.
 
     The error strings become ``last_delivery_error``, so they name the condition
     and never the key.
@@ -492,6 +613,7 @@ async def standalone_send(
             "job id, so the report shares its profile's thread for the day"
         )
 
+    origin_task, origin_threads = origin_threads_for(job_id)
     payload = {
         "job_id": job_id,
         "profile": profile_name(),
@@ -501,19 +623,25 @@ async def standalone_send(
         # platform, and `deliver: "all"` -- which posts the raw report to those
         # same platforms itself -- lands twice in each of them.
         "also_delivered_to": sibling_delivery_targets(job_id),
+        # The thread that asked for this job, when a kanban worker created it on
+        # a user's request. Empty for every other job, and the route then fans
+        # out to the home channels exactly as it did before the keys existed.
+        "origin_task": origin_task,
+        "origin_threads": origin_threads,
     }
     error, receipt = await asyncio.to_thread(_post, relay_url(), payload, api_key)
     if error:
         return {"error": error}
 
-    # Two ways a 200 is still worth recording, and a run can hit both at once,
-    # so they accumulate rather than returning early. In each case the report IS
-    # in a channel: `error` is the only field of this dict the scheduler reads
-    # and `last_delivery_error` is the only place a run record can carry the
-    # fact, so the verdict goes there rather than into a log line nobody greps —
-    # and each string says plainly that the report arrived, because `cronjob
-    # list` showing a delivery error is otherwise read as "nothing was sent" and
-    # invites a re-run that would post the same finding twice.
+    # Three ways a 200 is still worth recording, and a run can hit more than one
+    # at once, so they accumulate rather than returning early. In each case the
+    # report IS in a channel: `error` is the only field of this dict the
+    # scheduler reads and `last_delivery_error` is the only place a run record
+    # can carry the fact, so the verdict goes there rather than into a log line
+    # nobody greps — and each string says plainly that the report arrived,
+    # because `cronjob list` showing a delivery error is otherwise read as
+    # "nothing was sent" and invites a re-run that would post the same finding
+    # twice.
     #
     # Not doing this is what the relay was built to stop, one layer out: a front
     # door that has been down all week would otherwise produce run records
@@ -521,13 +649,15 @@ async def standalone_send(
     notes = []
 
     if receipt.get("relay") == "degraded":
-        # The wording comes from the route. `degraded` has one cause today --
-        # the Chat Agent turn did not compose the report and the raw text was
-        # posted instead -- and a leg that never landed is not this case: the
-        # route keeps `relay: ok` and names the platform in `undelivered`. The
-        # fallback is the sentence this end used to print unconditionally,
-        # which is right for the one cause a route too old to send a detail
-        # could have.
+        # The wording comes from the route. `degraded` means one thing -- the
+        # Chat Agent turn did not compose the report and the raw text was
+        # posted instead -- and two things that resemble it are not it: a leg
+        # that never landed keeps `relay: ok` and names the platform in
+        # `undelivered`, and a report that fell back from the thread that asked
+        # to the home channel keeps `relay: ok` and says so in `origin`, read
+        # below. The fallback sentence is the one this end used to print
+        # unconditionally, which is right for the one cause a route too old to
+        # send a detail could have.
         #
         # Bounded at `_DETAIL_MAX_CHARS`, the same ceiling as :func:`_http_error_detail`, and
         # for the same reason: this ends up inside the `error` string the
@@ -553,6 +683,25 @@ async def standalone_send(
     undelivered = str(receipt.get("undelivered") or "").strip()
     if undelivered:
         notes.append(f"chat relay partial: the report did not reach {undelivered}.")
+
+    # Where a report that named the threads that asked for it went. Neither
+    # value is a failure: `thread` is the intended outcome, and `home` means
+    # every named thread was unreachable (deleted, or on a platform this
+    # install no longer has) so the route fell back to the home-channel fan-out
+    # rather than dropping the report. `home` is still worth a line in the run
+    # record -- the person who asked will not see the answer where they asked --
+    # but as a delivered note the watch does not count, never through
+    # `degraded`: a stamped thread that was deleted falls back on every run
+    # that follows, and a fallback graded as a failed turn is a page that never
+    # clears.
+    origin = str(receipt.get("origin") or "").strip()
+    if origin == ORIGIN_VERDICT_HOME:
+        notes.append(ORIGIN_HOME_NOTE)
+    elif origin == ORIGIN_VERDICT_THREAD:
+        logger.info(
+            "chat relay: the report answered the thread that asked (job_id=%s)",
+            job_id or "?",
+        )
 
     if notes:
         message = " ".join(notes) + " Delivered — do not re-run to resend."

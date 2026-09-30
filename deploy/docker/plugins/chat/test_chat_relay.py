@@ -182,6 +182,11 @@ class TestStandaloneSend(unittest.TestCase):
                     # Empty because this HERMES_HOME has no roster to read, which
                     # is the safe answer: the field only ever removes targets.
                     "also_delivered_to": [],
+                    # Empty for the same reason, and the safe answer again: with
+                    # no thread named, the route fans out to the home channels
+                    # as it did before the keys existed.
+                    "origin_task": "",
+                    "origin_threads": [],
                 },
             )
 
@@ -619,9 +624,9 @@ class TestStandaloneSend(unittest.TestCase):
         """Every path out of `_post` is a 2-tuple; the callers unpack it.
 
         The receipt is the route's whole body rather than the one field the
-        caller used to branch on. Three are read off it now — `relay`,
-        `relay_detail` and `undelivered` — and a tuple carrying some of them is
-        one the two ends have to keep in step.
+        caller used to branch on. Four are read off it now — `relay`,
+        `relay_detail`, `undelivered` and `origin` — and a tuple carrying some
+        of them is one the two ends have to keep in step.
         """
         body = (
             b'{"relay":"degraded","relay_detail":"the send never reached slack",'
@@ -695,6 +700,114 @@ class TestStandaloneSend(unittest.TestCase):
                 result = asyncio.run(mod.standalone_send(None, "c", "r"))
         self.assertIn("unrelayed", result["error"])
         self.assertIn("slack", result["error"])
+
+    def test_a_report_that_fell_back_to_the_home_channel_is_a_delivered_note(self):
+        """`origin: "home"`: threads that asked were named, none could be reached.
+
+        The report is in the home channel, so the run record says where it went
+        and that it arrived -- and nothing else. Not `degraded`: the Chat Agent
+        turn did compose it. Not `partial`: no platform was missed. The delivery
+        watch counts either of those phrases toward a streak, and a stamped
+        thread that was deleted falls back on every run forever, so carrying
+        the fallback on them would page on a job that is delivering.
+        """
+        body = b'{"status":"delivered","relay":"ok","undelivered":"","origin":"home"}'
+        with RecordingRelay(body=body) as relay:
+            with patch.dict(
+                os.environ,
+                {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+            ):
+                result = asyncio.run(mod.standalone_send(None, "c", self.MESSAGE))
+        self.assertNotIn("success", result)
+        error = result["error"]
+        self.assertIn(mod.ORIGIN_HOME_NOTE, error)
+        self.assertIn("the thread that asked could not be reached", error)
+        self.assertIn("do not re-run", error.lower())
+        for failure_phrase in (
+            "chat relay degraded",
+            "chat relay partial",
+            "composed but not delivered",
+            "chat relay unreachable",
+            "unrelayed",
+        ):
+            self.assertNotIn(failure_phrase, error)
+
+    def test_a_report_that_answered_the_thread_is_a_plain_success(self):
+        """`origin: "thread"` is the intended outcome: a clean run record, one log line."""
+        body = b'{"status":"delivered","relay":"ok","undelivered":"","origin":"thread"}'
+        with RecordingRelay(body=body) as relay:
+            with patch.dict(
+                os.environ,
+                {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+            ):
+                with self.assertLogs(mod.logger, level="INFO") as logs:
+                    result = asyncio.run(mod.standalone_send(None, "c", self.MESSAGE))
+        self.assertTrue(result.get("success"), result)
+        self.assertNotIn("error", result)
+        self.assertTrue(
+            any("answered the thread that asked" in line for line in logs.output),
+            logs.output,
+        )
+
+    def test_no_origin_verdict_leaves_every_other_verdict_as_it_was(self):
+        """`origin: ""` (no thread named) and an absent field read the same.
+
+        Every job the image ships answers this way, so the receipt handling for
+        those jobs has to be what it was before the field existed -- on the
+        clean path and on the degraded-and-partial one alike.
+        """
+        errors = []
+        for origin in ({"origin": ""}, {}):
+            with self.subTest(origin=origin):
+                clean = json.dumps({"status": "delivered", "relay": "ok", **origin}).encode()
+                with RecordingRelay(body=clean) as relay:
+                    with patch.dict(
+                        os.environ,
+                        {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+                    ):
+                        result = asyncio.run(mod.standalone_send(None, "c", self.MESSAGE))
+                self.assertTrue(result.get("success"), result)
+                degraded = json.dumps(
+                    {"status": "delivered", "relay": "degraded", "undelivered": "slack", **origin}
+                ).encode()
+                with RecordingRelay(body=degraded) as relay:
+                    with patch.dict(
+                        os.environ,
+                        {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+                    ):
+                        result = asyncio.run(mod.standalone_send(None, "c", self.MESSAGE))
+                self.assertIn("unrelayed", result["error"])
+                self.assertIn("slack", result["error"])
+                self.assertNotIn("thread that asked", result["error"])
+                errors.append(result["error"])
+        self.assertEqual(errors[0], errors[1])
+
+    def test_the_home_fallback_accumulates_with_the_other_notes(self):
+        """A run can fall back to the home channel AND degrade AND miss a leg.
+
+        Each is its own sentence in the one string, so the reader of the run
+        record learns all three; an early return on any of them would drop the
+        rest.
+        """
+        body = json.dumps(
+            {
+                "status": "delivered",
+                "relay": "degraded",
+                "undelivered": "slack",
+                "origin": "home",
+            }
+        ).encode()
+        with RecordingRelay(body=body) as relay:
+            with patch.dict(
+                os.environ,
+                {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+            ):
+                result = asyncio.run(mod.standalone_send(None, "c", self.MESSAGE))
+        error = result["error"]
+        self.assertIn("unrelayed", error)
+        self.assertIn("chat relay partial: the report did not reach slack.", error)
+        self.assertIn(mod.ORIGIN_HOME_NOTE, error)
+        self.assertTrue(error.endswith("Delivered — do not re-run to resend."), error)
 
     def test_the_timeout_outlasts_a_chat_agent_turn(self):
         """Time out before the route answers and a delivered report is recorded
@@ -936,6 +1049,208 @@ class TestSiblingDeliveryTargets(unittest.TestCase):
         self.assertEqual(
             relay.requests[0]["body"]["also_delivered_to"], ["google_chat"]
         )
+
+
+class TestOriginThreads(unittest.TestCase):
+    """The thread that asked for a job, read back off its roster record.
+
+    A kanban worker that creates a job on a user's request stamps the card id
+    and the card's chat subscriptions on the record as ``origin_task`` and
+    ``origin_threads``. The sender forwards them so the route can answer in
+    that thread instead of the per-job daily session. This end only cleans the
+    shape; whether an id is addressable is the route's call.
+    """
+
+    SLACK = {"platform": "slack", "chat_id": "C0HOME", "thread_id": "1712.0001"}
+    GCHAT = {"platform": "google_chat", "chat_id": "spaces/AAA", "thread_id": ""}
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        os.makedirs(os.path.join(self.home, "cron"))
+        env = patch.dict(os.environ, {"HERMES_HOME": self.home})
+        env.start()
+        self.addCleanup(env.stop)
+        # One case below reads `also_delivered_to` off the same payload, and an
+        # ambient home-channel variable on the machine would change its answer.
+        for key in [k for k in os.environ if k.endswith("_HOME_CHANNEL")]:
+            del os.environ[key]
+
+    def _roster(self, *jobs):
+        path = os.path.join(self.home, "cron", "jobs.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"jobs": list(jobs)}, handle)
+
+    def _send(self, job_id="audit"):
+        with RecordingRelay() as relay:
+            with patch.dict(
+                os.environ,
+                {"SESSION_KV_API_KEY": "k", "CRON_REPORT_RELAY_URL": relay.url},
+            ):
+                asyncio.run(
+                    mod.standalone_send(None, "c", wrapped("Audit", job_id, "a finding"))
+                )
+            return relay.requests[0]["body"]
+
+    def test_a_worker_created_job_carries_its_origin(self):
+        self._roster(
+            {
+                "id": "audit",
+                "deliver": "chat",
+                "origin_task": "card-42",
+                "origin_threads": [self.SLACK, self.GCHAT],
+            }
+        )
+        self.assertEqual(
+            mod.origin_threads_for("audit"), ("card-42", [self.SLACK, self.GCHAT])
+        )
+        body = self._send()
+        self.assertEqual(body["origin_task"], "card-42")
+        self.assertEqual(body["origin_threads"], [self.SLACK, self.GCHAT])
+
+    def test_a_job_without_the_keys_forwards_empties(self):
+        """Every job the image ships, and every job created outside a worker."""
+        self._roster({"id": "audit", "deliver": "chat"})
+        self.assertEqual(mod.origin_threads_for("audit"), ("", []))
+        body = self._send()
+        self.assertEqual((body["origin_task"], body["origin_threads"]), ("", []))
+
+    def test_a_card_with_no_subscriptions_forwards_the_task_alone(self):
+        # `create_job` stamps `origin_task` and an empty list for a worker card
+        # with zero rows; the route then has nothing to address and fans out.
+        self._roster({"id": "audit", "origin_task": "card-42", "origin_threads": []})
+        self.assertEqual(mod.origin_threads_for("audit"), ("card-42", []))
+
+    def test_an_unreadable_roster_forwards_empties(self):
+        """No file, then a corrupt one. Neither may fail the delivery."""
+        self.assertEqual(mod.origin_threads_for("audit"), ("", []))
+        body = self._send()
+        self.assertEqual((body["origin_task"], body["origin_threads"]), ("", []))
+        with open(os.path.join(self.home, "cron", "jobs.json"), "w") as handle:
+            handle.write("{not json")
+        self.assertEqual(mod.origin_threads_for("audit"), ("", []))
+        body = self._send()
+        self.assertEqual((body["origin_task"], body["origin_threads"]), ("", []))
+
+    def test_no_job_id_adopts_no_jobs_origin(self):
+        """Same guard as `sibling_delivery_targets`: an empty id is "no wrapper".
+
+        A hand-edited entry with no id must not lend its thread to every
+        unwrapped delivery, which would post them all into someone's thread.
+        """
+        self._roster(
+            {
+                "name": "hand edited, no id",
+                "origin_task": "card-1",
+                "origin_threads": [self.SLACK],
+            },
+            {"id": "audit", "origin_task": "card-2", "origin_threads": [self.GCHAT]},
+        )
+        self.assertEqual(mod.origin_threads_for(""), ("", []))
+        self.assertEqual(mod.origin_threads_for("no-such-job"), ("", []))
+        self.assertEqual(mod.origin_threads_for("audit"), ("card-2", [self.GCHAT]))
+
+    def test_malformed_entries_are_dropped_and_extra_keys_stripped(self):
+        self._roster(
+            {
+                "id": "audit",
+                "origin_task": "card-42",
+                "origin_threads": [
+                    "slack:C0HOME",  # not a dict
+                    {"platform": "slack"},  # no chat_id
+                    {"platform": "", "chat_id": "C0HOME"},  # empty platform
+                    {"platform": "slack", "chat_id": "   "},  # blank chat_id
+                    {"platform": "slack", "chat_id": 12345},  # non-string chat_id
+                    {"platform": ["slack"], "chat_id": "C0HOME"},  # non-string platform
+                    None,
+                    # Kept: extra keys dropped, a missing thread_id defaults to "".
+                    {"platform": "slack", "chat_id": "C0HOME", "user": "U1", "ts": 1},
+                    # Kept: a null thread_id is "", not "None".
+                    {"platform": "google_chat", "chat_id": "spaces/AAA", "thread_id": None},
+                    # Kept: a string thread_id, stripped.
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": " 1712.0001 "},
+                    # Dropped: a thread_id that is present and not a string is
+                    # never coerced. `str(1712.0001)` reads as the ts only by
+                    # luck of the float's repr, and an int or a list is nothing
+                    # anyone subscribed under.
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": 1712.0001},
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": 1712},
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": ["1712.0001"]},
+                ],
+            }
+        )
+        self.assertEqual(
+            mod.origin_threads_for("audit"),
+            (
+                "card-42",
+                [
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": ""},
+                    {"platform": "google_chat", "chat_id": "spaces/AAA", "thread_id": ""},
+                    {"platform": "slack", "chat_id": "C0HOME", "thread_id": "1712.0001"},
+                ],
+            ),
+        )
+
+    def test_the_keys_themselves_can_be_malformed(self):
+        """A non-list `origin_threads` or a non-string `origin_task` is absent."""
+        for threads in ({"platform": "slack", "chat_id": "C0HOME"}, "slack:C0HOME", 7, None):
+            with self.subTest(origin_threads=threads):
+                self._roster({"id": "audit", "origin_task": "card-42", "origin_threads": threads})
+                self.assertEqual(mod.origin_threads_for("audit"), ("card-42", []))
+        for task in (42, ["card-42"], None, {"id": "card-42"}):
+            with self.subTest(origin_task=task):
+                self._roster({"id": "audit", "origin_task": task, "origin_threads": [self.SLACK]})
+                self.assertEqual(mod.origin_threads_for("audit"), ("", [self.SLACK]))
+
+    def test_the_list_is_capped_after_cleaning(self):
+        """The first well-formed entries up to the cap, not the first N raw ones.
+
+        The daemon caps at the same number, so this is not the only guard; it
+        is the one that keeps a hand-edited roster from sending a payload the
+        route will only truncate anyway.
+        """
+        self.assertEqual(mod.ORIGIN_THREADS_LIMIT, 8)
+        entries = []
+        for index in range(mod.ORIGIN_THREADS_LIMIT + 4):
+            entries.append("malformed")
+            entries.append({"platform": "slack", "chat_id": f"C{index}", "thread_id": ""})
+        self._roster({"id": "audit", "origin_task": "card-42", "origin_threads": entries})
+        _, threads = mod.origin_threads_for("audit")
+        self.assertEqual(len(threads), mod.ORIGIN_THREADS_LIMIT)
+        self.assertEqual(
+            [entry["chat_id"] for entry in threads],
+            [f"C{index}" for index in range(mod.ORIGIN_THREADS_LIMIT)],
+        )
+        self.assertEqual(len(self._send()["origin_threads"]), mod.ORIGIN_THREADS_LIMIT)
+
+    def test_the_roster_helper_is_shared_with_the_sibling_lookup(self):
+        """One read of the record serves both fields on the payload."""
+        self._roster(
+            {
+                "id": "audit",
+                "deliver": "all",
+                "origin_task": "card-42",
+                "origin_threads": [self.SLACK],
+            }
+        )
+        self.assertEqual(mod._roster_job("audit")["origin_task"], "card-42")
+        self.assertEqual(mod._roster_job(""), {})
+        self.assertEqual(mod._roster_job("no-such-job"), {})
+        with patch.dict(os.environ, {"GOOGLE_CHAT_HOME_CHANNEL": "spaces/AAA"}):
+            body = self._send()
+        self.assertEqual(body["also_delivered_to"], ["google_chat"])
+        self.assertEqual(body["origin_threads"], [self.SLACK])
+
+    def test_a_bare_list_store_is_still_a_roster(self):
+        # `_roster_job` accepts a store that is the list itself, without the
+        # `jobs` key, as the sibling lookup always has.
+        path = os.path.join(self.home, "cron", "jobs.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                [{"id": "audit", "origin_task": "card-42", "origin_threads": [self.GCHAT]}],
+                handle,
+            )
+        self.assertEqual(mod.origin_threads_for("audit"), ("card-42", [self.GCHAT]))
 
 
 class TestRegistration(unittest.TestCase):
