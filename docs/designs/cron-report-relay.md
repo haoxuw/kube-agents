@@ -439,6 +439,17 @@ record. And the `also_delivered_to` subtraction applies to origin legs as to
 the fan-out: an entry on a platform the cron child already posted to is not
 posted again.
 
+**A card opened from the admin portal has no thread to answer.** The REST
+bridge stamps its subscriptions `platform: api_server` with the session key as
+`chat_id`, and `api_server` is not a chat surface —
+`deploy/docker/patches/kanban_event_routing.py` already treats a subscription
+addressed to it as undeliverable. The stamp records it faithfully, the daemon
+skips it as a platform this report is not going to, and the report reaches the
+home channel exactly as before this change, with `"origin": "home"` on the
+record. Answering an API session — which can only be a turn in that session,
+since nothing appends to a Hermes session's history without inference — is a
+design of its own and is not attempted here.
+
 ## Why not a flag on `/sessions/{id}/inject`
 
 That route is an incident path. It classifies severity, spends `alert_quota`, and
