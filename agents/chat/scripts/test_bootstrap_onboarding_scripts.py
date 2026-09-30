@@ -39,7 +39,7 @@ import bootstrap_delivery  # noqa: E402
 import bootstrap_scan_gate  # noqa: E402
 import cluster_agent_profile  # noqa: E402
 import profile_scaffold  # noqa: E402
-from cluster_agent_reconcile import SCAFFOLD_ARTIFACTS  # noqa: E402
+from profile_scaffold import SCAFFOLD_ARTIFACTS  # noqa: E402
 
 INVENTORY = "INVENTORY.md"
 DELIVERED = "INVENTORY.delivered.md"

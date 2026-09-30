@@ -47,6 +47,13 @@ log = make_log("PROFILE-SCAFFOLD")
 # deploy/shared/profile_plugins.py for the whole failure mode).
 PROFILE_MARKER = "profile.yaml"
 
+# Written by cluster_agent_profile.create_profile after the identity stamp, so their absence
+# means the scaffold was interrupted between the two: registered, but its worker blocks at
+# preflight. The kubeconfig is checked separately by the reconcile: it is not on this pod's
+# filesystem. Read here by the reconcile, the Platform Agent's own roster
+# (platform_mcp_server.py), the bootstrap gate and the Chat Agent's roster (agent_roster.py).
+SCAFFOLD_ARTIFACTS = ("USER.md",)
+
 
 def profiles_base(hermes_home: Path) -> Path:
     # Hermes stores each named profile at $HERMES_HOME/profiles/<name>.
@@ -56,6 +63,17 @@ def profiles_base(hermes_home: Path) -> Path:
 def is_scaffolded(home: Path) -> bool:
     """True when Hermes has registered this profile, not merely that a directory exists."""
     return (home / PROFILE_MARKER).is_file()
+
+
+def is_ready(home: Path) -> bool:
+    """True when a card assigned to this profile would be dispatched and served.
+
+    Registered (``is_scaffolded``) and carrying every scaffold artifact: a scaffold
+    that stopped between the identity stamp and ``USER.md`` is registered, and its
+    worker blocks at preflight. Raises on a home that cannot be read; callers that
+    must degrade catch that per profile.
+    """
+    return is_scaffolded(home) and all((home / f).is_file() for f in SCAFFOLD_ARTIFACTS)
 
 
 def _clear_mount_skeleton(home: Path) -> bool:

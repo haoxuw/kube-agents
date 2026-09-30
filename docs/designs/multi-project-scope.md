@@ -336,7 +336,7 @@ profiles on the PVC whose project the scope never produced.
 Today the roster is the set of profiles under `$HERMES_HOME/profiles/` that finished
 scaffolding and carry a cluster identity, read by the bootstrap gate
 (`agents/chat/scripts/bootstrap_scan_gate.py`) through `cluster_agent_profile.list_profiles()`,
-`profile_scaffold.is_scaffolded()`, `cluster_agent_reconcile.SCAFFOLD_ARTIFACTS` and
+`profile_scaffold.is_scaffolded()`, `profile_scaffold.SCAFFOLD_ARTIFACTS` and
 `read_cluster_identity()` (`_cluster_agent_calls()`).
 The gate keeps reading that; the snapshot sits beside it as `$HERMES_HOME/fleet_scope.json` and,
 when the scope holds more than one project, the gate's instructions to the sweep worker name any

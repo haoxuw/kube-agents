@@ -203,8 +203,7 @@ def _cluster_agent_calls() -> list[str]:
     """
     try:
         import cluster_agent_profile as cap  # beside this script in the pod, as for the reconcile
-        from cluster_agent_reconcile import SCAFFOLD_ARTIFACTS
-        from profile_scaffold import is_scaffolded
+        from profile_scaffold import SCAFFOLD_ARTIFACTS, is_scaffolded
 
         names = cap.list_profiles()
     except Exception as e:  # noqa: BLE001 - never fail the cron run; see the docstring

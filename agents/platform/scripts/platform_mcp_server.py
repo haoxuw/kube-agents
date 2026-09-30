@@ -20,9 +20,8 @@ from mcp.server import MCPServer
 import sandbox_exec
 from agent_common_server import _run_env, CONFIG_PATH
 from cluster_agent_profile import RESERVED_PROFILES, profile_name, read_cluster_identity
-from cluster_agent_reconcile import SCAFFOLD_ARTIFACTS
 from gke_endpoint import dns_endpoint_args
-from profile_scaffold import is_scaffolded, profiles_base
+from profile_scaffold import is_ready, is_scaffolded, profiles_base
 
 DEFAULT_SESSION_KV_DB_PATH = "/var/lib/kube-agents/session/session_kv.db"
 
@@ -409,7 +408,7 @@ def _is_ready(home: Path) -> bool:
     identity before it fetches the credential and writes USER.md, so a scaffold that
     stopped in between is registered, and its worker blocks at preflight.
     """
-    return is_scaffolded(home) and all((home / f).is_file() for f in SCAFFOLD_ARTIFACTS)
+    return is_ready(home)
 
 
 def _cluster_agent_roster() -> list[dict]:

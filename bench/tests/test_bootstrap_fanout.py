@@ -217,7 +217,7 @@ def test_the_mirrored_names_match_the_agent_scripts() -> None:
     )
     assert discovery.READY_FILES == (
         _module_constant(scripts / "profile_scaffold.py", "PROFILE_MARKER"),
-        *_module_constant(scripts / "cluster_agent_reconcile.py", "SCAFFOLD_ARTIFACTS"),
+        *_module_constant(scripts / "profile_scaffold.py", "SCAFFOLD_ARTIFACTS"),
     )
 
 

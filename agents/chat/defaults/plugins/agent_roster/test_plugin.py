@@ -9,6 +9,7 @@ render the same fleet the same way, and a stub here would let them drift
 silently.
 """
 
+import importlib.util
 import os
 import shutil
 import sys
@@ -24,6 +25,22 @@ import plugin  # noqa: E402
 # .../agents/chat/defaults/plugins/agent_roster/test_plugin.py -> .../agents/chat
 CHAT_AGENT_DIR = Path(__file__).resolve().parents[3]
 ROSTER_SOURCE = CHAT_AGENT_DIR / "scripts" / "agent_roster.py"
+# The image copies agents/chat/scripts/ and agents/platform/scripts/ into one directory,
+# and the roster reads its readiness rule from profile_scaffold.py beside it.
+SCAFFOLD_SOURCE = CHAT_AGENT_DIR.parent / "platform" / "scripts" / "profile_scaffold.py"
+
+
+def _scaffold_files():
+    """What create_profile leaves in a finished Cluster Agent home, read from the rule
+    itself so a renamed marker cannot leave these tests green against a roster that
+    lists nobody."""
+    spec = importlib.util.spec_from_file_location("_test_profile_scaffold", SCAFFOLD_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return (module.PROFILE_MARKER, *module.SCAFFOLD_ARTIFACTS)
+
+
+SCAFFOLD_FILES = _scaffold_files()
 
 
 class InjectionTest(unittest.TestCase):
@@ -32,6 +49,7 @@ class InjectionTest(unittest.TestCase):
         self.data_dir = Path(self._tmp.name)
         (self.data_dir / "scripts").mkdir()
         shutil.copy(ROSTER_SOURCE, self.data_dir / "scripts" / "agent_roster.py")
+        shutil.copy(SCAFFOLD_SOURCE, self.data_dir / "scripts" / "profile_scaffold.py")
         self.profiles = self.data_dir / "profiles"
         self.profiles.mkdir()
         self._env = mock.patch.dict("os.environ", {"HERMES_HOME": str(self.data_dir)})
@@ -49,6 +67,9 @@ class InjectionTest(unittest.TestCase):
         (self.profiles / name).mkdir()
         if capabilities is not None:
             (self.profiles / name / "CAPABILITIES.md").write_text(capabilities)
+        if name not in ("default", "platform"):
+            for marker in SCAFFOLD_FILES:
+                (self.profiles / name / marker).write_text("")
 
     def test_injects_the_roster(self):
         self._profile("default")
@@ -89,6 +110,26 @@ class InjectionTest(unittest.TestCase):
         self._profile("cluster-new", "Diagnostics for the new cluster.")
         self.assertIn("cluster-new", plugin.handle_pre_llm_call()["context"])
 
+    def test_a_directory_that_is_not_a_finished_scaffold_is_not_offered(self):
+        # A bare `hermes profile create` from a terminal, or a kubelet mount point,
+        # is a directory under profiles/ and nothing more. Offering it as an
+        # assignee is how an off-topic request gets delegated to a profile whose
+        # SOUL.md is the Hermes boilerplate.
+        self._profile("default")
+        self._profile("platform", "Fleet work.")
+        (self.profiles / "testing-profile").mkdir()
+        (self.profiles / "testing-profile" / "SOUL.md").write_text("You are Hermes Agent.\n")
+        half = self.profiles / "cluster-half"
+        half.mkdir()
+        (half / SCAFFOLD_FILES[0]).write_text("")
+        (half / "CAPABILITIES.md").write_text("Diagnostics for a cluster still scaffolding.")
+
+        context = plugin.handle_pre_llm_call()["context"]
+
+        self.assertIn("- platform: Fleet work.", context)
+        self.assertNotIn("testing-profile", context)
+        self.assertNotIn("cluster-half", context)
+
     def test_missing_script_is_silent_not_fatal(self):
         # This hook runs ahead of every user turn on the front door: a raise
         # here is a Chat Agent that cannot answer at all.
@@ -100,6 +141,7 @@ class InjectionTest(unittest.TestCase):
         fallback = self.data_dir / "image-defaults"
         fallback.mkdir()
         shutil.copy(ROSTER_SOURCE, fallback / "agent_roster.py")
+        shutil.copy(SCAFFOLD_SOURCE, fallback / "profile_scaffold.py")
         (self.data_dir / "scripts" / "agent_roster.py").unlink()
         self._profile("default")
         self._profile("platform", "Fleet work.")

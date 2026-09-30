@@ -20,16 +20,38 @@
 # Everything here degrades rather than raises. The profiles live on a shared
 # PVC, so an I/O or permission fault must not turn routing into a traceback.
 
+import importlib.util
 import os
 import sys
 
 from pathlib import Path
+from types import ModuleType
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/opt/data"))
 # Hermes stores each profile at $HERMES_HOME/profiles/<name> (persists on the data PVC).
 PROFILES_BASE = HERMES_HOME / "profiles"
 # The front door itself; never a valid delegation target.
 SELF_PROFILE = "default"
+# The Platform Agent: scaffolded at pod start from the image template, and the roster's
+# default specialist. Routable whenever its home exists — the scaffold artifacts checked
+# below are a Cluster Agent's (RESERVED_PROFILES in cluster_agent_profile.py names both).
+PLATFORM_PROFILE = "platform"
+# A dot-prefixed entry (a live install carried a `.deleted` directory beside its profiles)
+# is never a profile; no sanitized cluster name or reserved name starts with one.
+HIDDEN_PREFIX = "."
+# The scaffold-readiness rule — PROFILE_MARKER, written by `hermes profile create`, and
+# SCAFFOLD_ARTIFACTS, written last by create_profile — lives in profile_scaffold.py. It is
+# loaded by path rather than imported. On the pod it sits beside this script, because the
+# image copies agents/chat/scripts/ and agents/platform/scripts/ into one directory; that
+# directory is on the writable data PVC, and putting it on the gateway's sys.path would let
+# a file written there shadow a lazy import in the front door. The second entry is the
+# repository layout, for the tests.
+SCAFFOLD_MODULE_NAME = "profile_scaffold.py"
+SCAFFOLD_MODULE_DIRS = (
+    Path(__file__).resolve().parent,
+    Path(__file__).resolve().parent.parent.parent / "platform" / "scripts",
+)
+SCAFFOLD_IMPORT_NAME = "_kube_agents_profile_scaffold"
 
 EMPTY_ROSTER = "No specialist agents are currently available to route to."
 # Discovery failed. Deliberately not EMPTY_ROSTER: an unreadable profiles
@@ -43,6 +65,66 @@ NO_DESCRIPTION = "(no description provided)"
 
 def log(msg: str) -> None:
     print(f"[AGENT-ROSTER] {msg}", file=sys.stderr)
+
+
+# Cached for the process, the failure included: the entrypoint copies the scripts
+# before the gateway starts, so a file missing on the first turn stays missing, and
+# retrying would log the same line ahead of every turn.
+_scaffold_rule: ModuleType | None = None
+_scaffold_rule_loaded = False
+
+
+def _load_scaffold_rule() -> ModuleType | None:
+    """Load profile_scaffold.py by path; ``None`` when no copy can be loaded."""
+    global _scaffold_rule, _scaffold_rule_loaded
+    if _scaffold_rule_loaded:
+        return _scaffold_rule
+    _scaffold_rule_loaded = True
+    found = False
+    for base in SCAFFOLD_MODULE_DIRS:
+        path = base / SCAFFOLD_MODULE_NAME
+        try:
+            # is_file() inside the try: pathlib re-raises an EACCES/EIO stat on the PVC.
+            if not path.is_file():
+                continue
+            found = True
+            spec = importlib.util.spec_from_file_location(SCAFFOLD_IMPORT_NAME, path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:  # noqa: BLE001 - degrade; this runs ahead of every turn
+            log(f"could not load the scaffold rule from {path}: {e}")
+            continue
+        _scaffold_rule = module
+        return module
+    where = [str(b) for b in SCAFFOLD_MODULE_DIRS]
+    if found:
+        log(f"{SCAFFOLD_MODULE_NAME} found under {where} but no copy loaded; only {PLATFORM_PROFILE} is routable")
+    else:
+        log(f"no {SCAFFOLD_MODULE_NAME} under {where}; only {PLATFORM_PROFILE} is routable")
+    return None
+
+
+def _is_routable(home: Path) -> bool:
+    """Whether a card assigned to this profile would be dispatched and served.
+
+    A directory under profiles/ is not a specialist. The kubelet leaves plugin mount
+    points there; ``hermes profile create`` from a terminal leaves a registered but bare
+    Hermes profile; a scaffold the bootstrap gate killed leaves a registered one with no
+    USER.md, whose worker blocks at preflight. Listing any of them offers it as an
+    assignee, described by whatever its SOUL.md says — and a bare Hermes profile's says
+    it is a general assistant, which is the target a front door forbidden from doing the
+    work itself picks for anything off-topic. Same rule as platform_mcp_server._is_ready,
+    so the two rosters agree on who exists. Raises on an unreadable home; discover()
+    skips that one profile.
+    """
+    if home.name.startswith(HIDDEN_PREFIX):
+        return False
+    if home.name == PLATFORM_PROFILE:
+        return True
+    rule = _load_scaffold_rule()
+    return rule is not None and rule.is_ready(home)
 
 
 def _summarize_soul(home: Path) -> str:
@@ -82,10 +164,12 @@ def _responsibilities(home: Path) -> str:
 
 
 def discover(base: Path | None = None) -> list[dict[str, str]] | None:
-    """Enumerate every routable specialist profile (all profiles except `default`).
+    """Enumerate every routable specialist: `platform`, and each Cluster Agent whose
+    scaffold finished (``_is_routable``). `default` is the front door itself.
 
     Degrades rather than raises. Errors are isolated per profile: one unreadable
-    directory costs that one agent, not the whole roster.
+    directory costs that one agent, not the whole roster — it is left out, since a
+    home that cannot be read cannot be shown to be one a card would reach.
 
     Returns ``None`` — distinct from ``[]`` — when the profiles directory itself
     could not be listed. "I could not read the fleet" and "there is no fleet"
@@ -105,7 +189,7 @@ def discover(base: Path | None = None) -> list[dict[str, str]] | None:
         return None
     for p in entries:
         try:
-            if not p.is_dir() or p.name == SELF_PROFILE:
+            if not p.is_dir() or p.name == SELF_PROFILE or not _is_routable(p):
                 continue
             agents.append({"name": p.name, "responsibilities": _responsibilities(p)})
         except OSError as e:

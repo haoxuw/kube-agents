@@ -76,6 +76,7 @@ from cluster_agent_profile import (
     profile_home,
     read_cluster_identity,
 )
+from profile_scaffold import SCAFFOLD_ARTIFACTS
 
 DESCRIBE_TIMEOUT_SECONDS = 30
 _MD_BASE = "http://metadata.google.internal/computeMetadata/v1/"
@@ -1245,11 +1246,10 @@ def _exclusive_run():
             return
         yield True
 
-# Written by create_profile after the identity stamp, so their absence means the
-# scaffold was interrupted between the two. The kubeconfig is checked separately:
-# it is not on this pod's filesystem.
-SCAFFOLD_ARTIFACTS = ("USER.md",)
-
+# SCAFFOLD_ARTIFACTS (imported above) is what create_profile writes after the identity
+# stamp; it lives in profile_scaffold.py beside PROFILE_MARKER, the other half of the
+# readiness rule, so every roster reads one definition.
+#
 # What create_profile fetches in step 3, relative to the profile home. Named here
 # because this pod cannot stat it -- the path is resolved on whichever side
 # kubectl runs, which kubeconfig_landed decides.

@@ -430,6 +430,21 @@ class EnsureProfileTest(unittest.TestCase):
         self.assertTrue(ps.is_scaffolded(self.home))
 
 
+    def test_is_ready_needs_the_marker_and_every_artifact(self):
+        # The rule the Platform Agent's and the Chat Agent's rosters share: a
+        # registered home whose scaffold stopped before its artifacts is not ready.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "cluster-a"
+            home.mkdir()
+            self.assertFalse(ps.is_ready(home))
+            (home / ps.PROFILE_MARKER).write_text("")
+            self.assertFalse(ps.is_ready(home))
+            for artifact in ps.SCAFFOLD_ARTIFACTS:
+                (home / artifact).write_text("")
+            self.assertTrue(ps.is_ready(home))
+            (home / ps.PROFILE_MARKER).unlink()
+            self.assertFalse(ps.is_ready(home))
+
 class BackfillCronStoreTest(unittest.TestCase):
     """Tests for standalone cron store backfill helpers (for cluster profiles and runtime stores)."""
 

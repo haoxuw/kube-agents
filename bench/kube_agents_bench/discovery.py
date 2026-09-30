@@ -52,7 +52,7 @@ CLUSTER_KEY_PREFIX = "bootstrap-inventory-cluster-"
 # agents/platform/scripts/cluster_agent_profile.py: RESERVED_PROFILES.
 RESERVED_PROFILES = ("default", "platform")
 
-# profile_scaffold.PROFILE_MARKER and cluster_agent_reconcile.SCAFFOLD_ARTIFACTS:
+# profile_scaffold.PROFILE_MARKER and profile_scaffold.SCAFFOLD_ARTIFACTS:
 # a profile missing either is one the gate leaves out of Step 2, as
 # platform_control's list_cluster_profiles does.
 READY_FILES = ("profile.yaml", "USER.md")
