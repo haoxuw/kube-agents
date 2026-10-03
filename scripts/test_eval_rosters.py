@@ -156,6 +156,9 @@ ADDED_AFTER_THE_MOVE = [
     "upgrades-zonal-skew-replicas-warned",
     "upgrades-fail-closed-webhook-warned",
     "upgrades-exclusion-end-date-named",
+    "upgrades-deprecated-api-caller-named",  # catalogue entries 9, 6 and 16, the third scenario group
+    "upgrades-removed-api-callers-distinguished",
+    "upgrades-network-policy-enforcement-stated",
 ]
 
 # Admitted after the split, each by a pull request that cited the record

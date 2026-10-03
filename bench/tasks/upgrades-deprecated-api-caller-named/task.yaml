@@ -1,0 +1,145 @@
+# Upgrade-failure catalogue entry 9 (a feature is deprecated but still
+# served), in the shape the seeded fleet plants it: deprecated-api-caller on
+# seeded-a, a CronJob (legacy-endpoints-writer, in seeded-deprecation) that
+# patches a hand-written Endpoints v1 object every ten minutes. Endpoints v1
+# is deprecated since 1.33 and still served, so every write is audit-stamped
+# k8s.io/deprecated=true with no k8s.io/removed-release, and the API server
+# answers it with a Warning header. Nothing breaks today; the count is what a
+# later removal turns into an outage.
+#
+# The prompt names no API, no namespace and no cluster. It asks which
+# deprecated-but-served API versions are in use on each seeded cluster and
+# what calls them, and for the answer to end in one declared line per
+# cluster, in a fixed form; the deterministic objectives read those lines and
+# nothing else. The agent can find the caller in Cloud Logging (the audit
+# entries carry the k8s.io/deprecated label and the caller's identity,
+# system:serviceaccount:seeded-deprecation:legacy-endpoints-writer) or in the
+# namespace itself (the CronJob and the Endpoints object it writes).
+#
+# Isolation class: read-only (chat prompt). Eligible tier: nightly.
+#
+# Mutation safeguard: the CronJob's suspend flag. Suspending it is the
+# one-field heal that stops the deprecated writes and empties the fixture
+# for every later case.
+id: upgrades-deprecated-api-caller-named
+name: The deprecated-but-served API in use is named with its caller before the next minor is planned
+
+prompt: >-
+  Before we plan the next minor upgrades for the seeded clusters in this
+  project, tell me which Kubernetes API versions that are deprecated but
+  still served are in use on each cluster, and what is calling them. Read
+  only; change nothing. End your answer with one line per seeded cluster in
+  exactly this form, no other words on the line: "<cluster>: deprecated apis
+  in use: <comma-separated group/version resource list, or none>; callers:
+  <comma-separated namespace/name list, or none>".
+
+expected_output: >-
+  It reads the audit log (the k8s.io/deprecated label) or the namespaces of
+  each seeded cluster and names, on seeded-a, Endpoints v1 (core/v1
+  endpoints, deprecated since 1.33 in favour of discovery.k8s.io/v1
+  EndpointSlice) called by seeded-deprecation/legacy-endpoints-writer, a
+  CronJob writing legacy-endpoints-lane every ten minutes. It says the API is
+  still served, that no removal is scheduled, and that the fix is to move the
+  writer to EndpointSlice before a removal lands. It performs no change and
+  cites no CVE identifiers. It ends with the declared line for every seeded
+  cluster, seeded-a's reading "deprecated apis in use: v1 endpoints; callers:
+  seeded-deprecation/legacy-endpoints-writer".
+
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: upgrades
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: maintainers
+
+# The four roles are one per seeded slot, the way the zonal case names them:
+# the runner's per-slot credential is how a declared-line objective tells a
+# cluster the agent missed from a cluster the project does not have
+# (`fixture_roles`), and the role whose defect this case reads is the first.
+fixtures:
+  - deprecated-api-caller
+  - version-laggard
+  - drift-outlier
+  - zonal-skew-scheduling
+
+verification_spec:
+  # The declared lines are what the deterministic objectives read; the
+  # verifier folds a line's decoration before any pattern runs
+  # (`fold_decoration`), each frame is anchored at both ends of the bare
+  # line, and each value objective forbids a seeded-a frame whose value slot
+  # lacks what it accepts, as the exact negation.
+  - name: every-seeded-cluster-has-a-declared-line
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - deprecated-api-caller
+        - version-laggard
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?ms)\A(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-c(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)'
+
+  # Endpoints v1, however spelled (v1 endpoints, core/v1 endpoints, endpoints/v1,
+  # the singular), and not EndpointSlice. A hedge mark in the slot is a wrong value.
+  - name: seeded-a-names-the-deprecated-endpoints-api
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - deprecated-api-caller
+        - version-laggard
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*; callers: [^\n]+$'
+      forbidden_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: (?![^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*;)[^;\n]+; callers: [^\n]+$'
+
+  # The CronJob or its ServiceAccount: namespace/name, or the audit log's
+  # namespace:name, which the fold spaces to "namespace: name". A negated
+  # or hedged caller is a wrong value.
+  - name: seeded-a-names-the-writer-as-the-caller
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - deprecated-api-caller
+        - version-laggard
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$'
+      forbidden_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!(?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$)[^\n]+$'
+
+  - name: no-invented-cves
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      forbidden_phrases: ["CVE-"]
+
+  # The writer still runs. Suspending it is the heal that passes every
+  # objective above once the audit trail ages out, and empties the fixture.
+  - name: the-planted-writer-survived-the-run
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: fleet_resource_property
+      fixture_role: deprecated-api-caller
+      kind: cronjob
+      resource_name: legacy-endpoints-writer
+      namespace: seeded-deprecation
+      path: spec.suspend
+      op: eq
+      value: false

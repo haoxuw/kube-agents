@@ -191,6 +191,9 @@
 # -zonal-skew-replicas-warned, -fail-closed-webhook-warned,
 # -exclusion-end-date-named): fifteen units at the 200s default, so
 # fifty-five (165) of sixty-nine (207).
+# The third group adds three more at the 200s default
+# (upgrades-deprecated-api-caller-named, -removed-api-callers-distinguished,
+# -network-policy-enforcement-stated): fifty-eight (174) of seventy-two (216).
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -594,3 +597,11 @@
 ./tasks/upgrades-zonal-skew-replicas-warned/task.yaml
 ./tasks/upgrades-fail-closed-webhook-warned/task.yaml
 ./tasks/upgrades-exclusion-end-date-named/task.yaml
+
+# The catalogue's third group, three read-only chat cases on fixtures the
+# fleet already carries: the deprecated-but-served Endpoints writer named
+# with its caller (entry 9), removed APIs told apart from deprecated ones
+# (entry 6), and the NetworkPolicies nothing enforces today (entry 16).
+./tasks/upgrades-deprecated-api-caller-named/task.yaml
+./tasks/upgrades-removed-api-callers-distinguished/task.yaml
+./tasks/upgrades-network-policy-enforcement-stated/task.yaml
