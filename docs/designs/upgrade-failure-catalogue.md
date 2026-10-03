@@ -235,7 +235,8 @@ nodes it can empty, then drains the rest, respecting the budget for up to one ho
   soak, at most seven days in total, on standard blue-green; the wait of up to seven days and then
   an hour's drain on autoscaled blue-green) and the removal that ends it are in GKE's
   [node upgrade strategies](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies).
-  The seeded fleet plants no drain-blocking budget.
+  The seeded fleet plants one on seeded-b (`readiness-drain-blocked`: the `pinned-batch-runner`
+  budget), which `upgrades-drain-blocking-budget-named` grades.
 
 ### 2. No spare capacity for the displaced pods
 
@@ -265,7 +266,8 @@ strategy's limitations.
   unavailability, not from an incident, and it does not arise on GKE's default settings. Measured
   on a test cluster whose GPU pool had `maxSurge` 0 and `maxUnavailable` 1: the only L4 node was
   destroyed, the zone had no L4 to replace it for eight minutes, and GKE reported the operation
-  done while the pool was in error. No public story verified and no fixture. Accelerator pools
+  done while the pool was in error. No public story verified; the seeded fleet plants the pool on
+  seeded-b (`readiness-surge-blocked` with `readiness-pinned-workload`). Accelerator pools
   are the common case because their quota is small.
 
 ### 3. Every replica in one zone or on one node
@@ -281,8 +283,8 @@ node, or a zone whose nodes roll together, the upgrade takes every replica at on
 - Mitigate after: the next rollout re-spreads the pods once the constraints are in place.
 - Read today: the obtainability audit's spread and pinning checks.
 - GKE recommender: none.
-- Why it is on the list: a consequence of scheduling, not an incident; no fixture on the seeded
-  fleet and no public story verified.
+- Why it is on the list: a consequence of scheduling, not an incident; the seeded fleet plants it
+  on seeded-d (`zonal-skew-scheduling`) and no public story verified.
 
 ### 4. Data on the node is gone
 
@@ -371,8 +373,8 @@ case `kube-system`.
 - Mitigate after: set `failurePolicy: Ignore` or remove the webhook configuration to unwedge the cluster, then restore it once the backend is up.
 - Read today: nothing.
 - GKE recommender: `K8S_ADMISSION_WEBHOOK_UNAVAILABLE` flags a webhook whose Service has no endpoints and `K8S_ADMISSION_WEBHOOK_UNSAFE` one that intercepts `kube-system` or cluster-scoped system resources ([webhook insights](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/optimize-webhooks)); the certificate subtypes (`DEPRECATION_K8S_1_23_CERTIFICATE`, `DEPRECATION_K8S_SHA_1_CERTIFICATE`) covered backend certificates the 1.23 and 1.29 removals rejected; `K8S_CRD_WITH_INVALID_CA_BUNDLE` flags CRDs with an invalid CA bundle.
-- Why it is on the list: Jetstack's Open Policy Agent webhook outage in the incidents; no fixture
-  on the seeded fleet.
+- Why it is on the list: Jetstack's Open Policy Agent webhook outage in the incidents; the seeded
+  fleet plants the webhook on seeded-b (`readiness-failclosed-webhook`).
 
 ### 8. A default changes in the new minor
 

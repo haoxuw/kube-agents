@@ -151,6 +151,11 @@ ADDED_AFTER_THE_MOVE = [
     "platform-worker-shell-edit-of-shipped-skill",  # the sandbox's image trees, #2096
     "autoops-controller-stall-triage",  # the stall watch on the inject path
     "upgrades-zonal-control-plane-outage-warned",  # upgrade-failure catalogue entry 11, the first scenario case
+    "upgrades-drain-blocking-budget-named",  # catalogue entries 1, 2, 3, 5 and 7, the second scenario group
+    "upgrades-no-surge-pool-recreate-warned",
+    "upgrades-zonal-skew-replicas-warned",
+    "upgrades-fail-closed-webhook-warned",
+    "upgrades-exclusion-end-date-named",
 ]
 
 # Admitted after the split, each by a pull request that cited the record
