@@ -300,7 +300,7 @@ A rebuilt node is a new machine. Local SSD and `emptyDir` contents do not come b
 - Why it is on the list: GKE's statement that Local SSD data does not survive a node upgrade is
   quoted at the end of the readiness requirements'
   [incidents section](upgrade-readiness-checks.md#upgrades-that-went-wrong-in-public); no public
-  incident verified.
+  incident verified. The seeded fleet plants it on seeded-a as the `node-local-state` role.
 
 ### 5. Maintenance window too short, or an exclusion ends mid-roll
 
@@ -462,7 +462,7 @@ schedule again.
 - Read today: nothing.
 - GKE recommender: none.
 - Why it is on the list: no GKE label removal verified. The public case, Reddit's 1.24 outage, was
-  a kubeadm label read by a CNI selector rather than a pod selector, and is entry 17's evidence.
+  a kubeadm label read by a CNI selector rather than a pod selector, and is entry 17's evidence. The seeded fleet plants it on seeded-a as the `deprecated-label-selector` role.
 
 ### 13. The container runtime changes
 
@@ -481,7 +481,7 @@ tolerated, which is the runtime change a node pool upgrade can carry.
 - Mitigate after: the same changes, under pressure; a completed node pool can be downgraded in place while GKE still offers the previous version.
 - Read today: the security-patch orchestrator flags a pool whose `config.imageType` the location no longer offers or that names a pre-containerd variant; CRI clients, image schemas and containerd configuration are unread.
 - GKE recommender: `DEPRECATION_CONTAINERD_V1_SCHEMA_IMAGES` and `DEPRECATION_CONTAINERD_V1ALPHA2_CRI_API`, the two transitions GKE has flagged on real clusters; `DEPRECATION_K8S_1_24_DOCKERSHIM` is the historical one.
-- Why it is on the list: GKE's Linux nodes move to containerd 2.0 at 1.33 and Windows Server nodes at 1.35 ([containerd 2 migration](https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/migrate-containerd-2)), and GKE's two containerd insights exist because both breaks happened on real clusters. The [reproduction](../../bench/upgrade-scenarios/README.md) saw a patch upgrade inside 1.31 move a node from containerd 1.7.34 to 2.0.10 and break a `v1alpha2` client, so the before-signal is the containerd version the target node image ships, not the minor.
+- Why it is on the list: GKE's Linux nodes move to containerd 2.0 at 1.33 and Windows Server nodes at 1.35 ([containerd 2 migration](https://docs.cloud.google.com/kubernetes-engine/docs/deprecations/migrate-containerd-2)), and GKE's two containerd insights exist because both breaks happened on real clusters. The [reproduction](../../bench/upgrade-scenarios/README.md) saw a patch upgrade inside 1.31 move a node from containerd 1.7.34 to 2.0.10 and break a `v1alpha2` client, so the before-signal is the containerd version the target node image ships, not the minor. The seeded fleet plants it on seeded-a as the `containerd-socket-agent` role.
 
 ### 14. cgroup v2 under a runtime that cannot read it
 
@@ -610,7 +610,7 @@ is the same.
   [1.25 CSI migration status](https://kubernetes.io/blog/2022/09/26/storage-in-tree-to-csi-migration-status-update-1.25/)
   and GKE's
   [PD CSI driver page](https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver);
-  no public incident verified and no fixture.
+  no public incident verified. The seeded fleet plants the volume on seeded-a as the `intree-pd-volume` role.
 
 ### 20. Images on a retired registry
 
@@ -625,10 +625,10 @@ stopped publishing, or an egress allowlist admits only the old hostname, only th
 - Mitigate after: retag or redirect the reference; the new nodes pull.
 - Read today: nothing.
 - GKE recommender: none.
-- Why it is on the list: the
+- Why it is on the list: The
   [`k8s.gcr.io` freeze](https://kubernetes.io/blog/2023/02/06/k8s-gcr-io-freeze-announcement/) and
   its [redirect](https://kubernetes.io/blog/2023/03/10/image-registry-redirect/): tags published
-  after the freeze exist only on the new host, and allowlists naming only the old one broke.
+  after the freeze exist only on the new host, and allowlists naming only the old one broke. The seeded fleet plants it on seeded-a as the `retired-registry-image` role.
 
 ## The order to add checks
 
