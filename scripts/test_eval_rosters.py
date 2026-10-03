@@ -147,6 +147,11 @@ ADDED_AFTER_THE_MOVE = [
     "chat-voice-ack-names-target",  # the front door's delegation ack
     "bootstrap-inventory-ranking-delivery",  # the onboarding prioritization stage, #2143
     "upgrades-zonal-control-plane-outage-warned",  # upgrade-failure catalogue entry 11, the first scenario case
+    "upgrades-drain-blocking-budget-named",  # catalogue entries 1, 2, 3, 5 and 7, the second scenario group
+    "upgrades-no-surge-pool-recreate-warned",
+    "upgrades-zonal-skew-replicas-warned",
+    "upgrades-fail-closed-webhook-warned",
+    "upgrades-exclusion-end-date-named",
 ]
 
 # Admitted after the split, each by a pull request that cited the record

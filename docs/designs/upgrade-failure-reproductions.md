@@ -27,11 +27,11 @@ Each line gives the entry, its verdict from the harness, the script the verdict 
 the seeded fleet on `main` holds for it. The fleet can carry a before-state only, and only one that GKE's own node rebuilds do not erase.
 
 1. [A PodDisruptionBudget forbids the eviction](#1-a-poddisruptionbudget-forbids-the-eviction):
-   reproduced; `scenarios/01.sh`; none shaped to block a drain on `main`.
+   reproduced; `scenarios/01.sh`; `readiness-drain-blocked` on seeded-b.
 2. [No spare capacity for the displaced pods](#2-no-spare-capacity-for-the-displaced-pods):
-   reproduced; `scenarios/02.sh`; no role on `main`.
+   reproduced; `scenarios/02.sh`; `readiness-surge-blocked` and `readiness-pinned-workload` on seeded-b.
 3. [Every replica in one zone or on one node](#3-every-replica-in-one-zone-or-on-one-node):
-   reproduced; `scenarios/03.sh`; no role on `main`.
+   reproduced; `scenarios/03.sh`; `zonal-skew-scheduling` on seeded-d.
 4. [Data on the node is gone](#4-data-on-the-node-is-gone): reproduced; `scenarios/04.sh`; no role
    on `main`.
 5. [Maintenance window too short, or an exclusion ends
@@ -41,8 +41,8 @@ the seeded fleet on `main` holds for it. The fleet can carry a before-state only
    `scenarios/06.sh`; no standing role possible; `deprecated-api-caller` stands in with a different
    label.
 7. [A fail-closed webhook whose backend is not
-   up](#7-a-fail-closed-webhook-whose-backend-is-not-up): reproduced; `scenarios/07.sh`; no role on
-   `main`.
+   up](#7-a-fail-closed-webhook-whose-backend-is-not-up): reproduced; `scenarios/07.sh`;
+   `readiness-failclosed-webhook` on seeded-b.
 8. [A default changes in the new minor](#8-a-default-changes-in-the-new-minor): reproduced;
    `scenarios/08.sh`; version-bound, not for the fleet.
 9. [A feature is deprecated but still served](#9-a-feature-is-deprecated-but-still-served): no break
@@ -86,10 +86,10 @@ Harness: `scenarios/01.sh`; `bash run.sh 01`. Reproduced: the budget refused GKE
 429 to the container-engine robot in the audit log), GKE force-killed the pod 61 minutes after the
 pool upgrade began, and the operation read DONE while the replacement was still Pending.
 
-Fleet: none on `main` is shaped to block a drain (`maxUnavailable` 0, or `minAvailable` at the
-replica count); seeded-a's `inference-server` budget reads `disruptionsAllowed` 0 at runtime as a
-side effect of its pinned pool, which the readiness check's spec-shape rule does not count. A budget
-shaped that way on seeded-b would carry the entry.
+Fleet: `readiness-drain-blocked` on seeded-b, the `pinned-batch-runner` budget in `seeded-upgrade`
+(`maxUnavailable` 0 over one replica), carries the entry; seeded-a's `inference-server` budget reads
+`disruptionsAllowed` 0 at runtime as a side effect of its pinned pool, which the readiness check's
+spec-shape rule does not count.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/01.sh`, evidence
 `bench/upgrade-scenarios/evidence/01/budget.txt`, and item 1 of the harness README. Detection, where
@@ -102,8 +102,9 @@ Harness: `scenarios/02.sh` (the verdict is from the `upg-02b` run); `bash run.sh
 a one-node pool with maxSurge 0 the drained replica was Pending for about four minutes and came back
 only on the rebuilt node.
 
-Fleet: no role on `main`; seeded-a's `pinned-inference-pool` (autoscaler 1/1) is the ceiling half of
-the before-signal. A pool with `maxSurge` 0 would carry the rest.
+Fleet: `readiness-surge-blocked` on seeded-b (`no-surge-pool`, `maxSurge` 0 and `maxUnavailable` 1
+on one node) with `readiness-pinned-workload` (`pinned-batch-runner` pinned to it) carries the
+entry; seeded-a's `pinned-inference-pool` (autoscaler 1/1) is the ceiling half of the same signal.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/02.sh`, evidence
 `bench/upgrade-scenarios/evidence/02/capacity-availability.txt`, and item 2 of the harness README.
@@ -116,8 +117,8 @@ Harness: `scenarios/03.sh` (`upg-03b`); `bash run.sh 03`. Reproduced: two replic
 node stopped in the same second and nothing served for 18 of 44 samples, while a spread Deployment
 on the same pool never dropped; the one-zone case was not planted.
 
-Fleet: no role on `main`, whose three clusters are single-zone; a multi-zonal slot with a
-zone-pinned workload would carry it.
+Fleet: `zonal-skew-scheduling` on the multi-zonal seeded-d (`zone-pinned-api`, two replicas held in
+one zone by a required affinity under a `ScheduleAnyway` spread) carries it.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/03.sh`, evidence
 `bench/upgrade-scenarios/evidence/03/placement.txt`, and item 3 of the harness README. Detection,
@@ -173,8 +174,9 @@ Harness: `scenarios/07.sh`; `bash run.sh 07`. Reproduced: a fail-closed webhook 
 rejected the drain's replacement pods (guarded 0/2), and deleting the webhook brought both back
 within a minute, which isolates it as the cause.
 
-Fleet: no role on `main`; a fail-closed webhook whose Service does not exist, confined by selectors
-to objects the fleet's own labels mark, would carry the before-state on seeded-b.
+Fleet: `readiness-failclosed-webhook` on seeded-b (`seeded-fail-closed-gate`, `failurePolicy: Fail`
+with a Service that does not exist, confined by selectors to objects the fleet's own labels mark)
+carries the before-state.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/07.sh`, evidence
 `bench/upgrade-scenarios/evidence/07/webhook.txt`, and item 7 of the harness README. Detection,

@@ -156,6 +156,11 @@
 # one case, three units at the 200s default (a read-only chat turn, measured
 # 3-8 minutes a repetition on the dev install), so forty-seven (141) of
 # sixty-one (183).
+# 2026-10-02 adds the catalogue's second group, five read-only chat cases
+# (upgrades-drain-blocking-budget-named, -no-surge-pool-recreate-warned,
+# -zonal-skew-replicas-warned, -fail-closed-webhook-warned,
+# -exclusion-end-date-named): fifteen units at the 200s default, so
+# fifty-two (156) of sixty-six (198).
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -525,3 +530,15 @@
 # mutate. Nightly from its first merge; a presubmit seat is a later pull
 # request that cites its record.
 ./tasks/upgrades-zonal-control-plane-outage-warned/task.yaml
+
+# The upgrade-failure catalogue's second group of scenario cases (entries 1,
+# 2, 3, 5 and 7), each a read-only chat prompt that names no fixture and
+# grades the reading of one the seeded fleet plants: the drain-blocking
+# budget, the pool that recreates its only node in place, the workload whose
+# replicas share a zone, the fail-closed webhook with no backend, and the
+# maintenance exclusion with its scope and end time.
+./tasks/upgrades-drain-blocking-budget-named/task.yaml
+./tasks/upgrades-no-surge-pool-recreate-warned/task.yaml
+./tasks/upgrades-zonal-skew-replicas-warned/task.yaml
+./tasks/upgrades-fail-closed-webhook-warned/task.yaml
+./tasks/upgrades-exclusion-end-date-named/task.yaml
