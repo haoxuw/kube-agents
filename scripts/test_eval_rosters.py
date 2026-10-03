@@ -170,6 +170,11 @@ ADDED_AFTER_THE_MOVE = [
     "findings-decision-covers-item",  # the findings queue's item-wide decision
     "upgrades-freeze-runbook-probe",  # the gke-upgrades skill sync
     "fleet-audit-unchanged-finding-keeps-wording",  # finish keeps the wording of an unchanged finding
+    "upgrades-drain-blocking-budget-named",  # upgrade-failure catalogue entries 1, 2, 3, 7 and 5, the second scenario group
+    "upgrades-no-surge-pool-recreate-warned",
+    "upgrades-zonal-skew-replicas-warned",
+    "upgrades-fail-closed-webhook-warned",
+    "upgrades-exclusion-end-date-named",
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.

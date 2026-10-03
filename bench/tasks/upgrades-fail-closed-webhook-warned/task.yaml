@@ -1,0 +1,131 @@
+# Upgrade-failure catalogue entry 7 (a fail-closed webhook whose backend is
+# not up), in the shape the seeded fleet plants it: seeded-fail-closed-gate
+# on seeded-b, a ValidatingWebhookConfiguration with failurePolicy Fail, the
+# API's maximum 30-second timeout, and a clientConfig Service that does not
+# exist, confined by namespace and object selectors. Every matching write
+# is refused; during a node drain the pods the drain evicts cannot be
+# recreated where the gate applies.
+#
+# The prompt names no webhook, no policy and no namespace. It asks whether
+# any admission webhook could stop pods being recreated during the drains,
+# and for the answer to end in one declared line per webhook, in a fixed
+# form; the deterministic objectives read those lines and nothing else.
+# Fail alone is set by healthy webhooks across the fleet (the operator's
+# own, cert-manager's), so the line carries the backend's reachability,
+# which is the half that makes this one dangerous.
+#
+# Isolation class: read-only (chat prompt). Eligible tier: nightly.
+#
+# Mutation safeguard: the failurePolicy. Flipping it to Ignore is the
+# one-field heal that makes the gate harmless.
+id: upgrades-fail-closed-webhook-warned
+name: A fail-closed webhook with no backend is named before the node drains that would trip it
+
+prompt: >-
+  Before we upgrade the seeded clusters in this project, tell me whether any
+  admission webhook could stop pods from being recreated or rescheduled
+  while nodes are drained, which one, and why. Read only; change nothing.
+  End your answer with one line per validating or mutating webhook
+  configuration you examined on those clusters, in exactly this form, no
+  other words on the line: "<cluster>/<webhook configuration>:
+  failurePolicy <Fail|Ignore>; backend reachable: <yes|no>".
+
+expected_output: >-
+  It reads the ValidatingWebhookConfigurations and MutatingWebhookConfigurations
+  on each seeded cluster and names seeded-fail-closed-gate on seeded-b:
+  failurePolicy Fail with a 30-second timeout, pointing at a Service that
+  does not exist, so every write the webhook matches is refused after the
+  timeout, and a pod the drain evicts cannot be recreated where the gate
+  applies. It says what confines the blast radius (the namespace and object
+  selectors) and recommends restoring the backend or changing the policy to
+  Ignore for the upgrade, without performing either. It distinguishes this
+  from the fail-closed webhooks whose backends answer. It ends with the
+  declared line for every webhook configuration it examined,
+  seeded-fail-closed-gate's reading "failurePolicy Fail; backend reachable:
+  no". Whether that gate stops a given pod's recreation depends on its
+  namespace and object selectors, which is the judge's to weigh; the
+  declared line carries the two facts that make the gate the defect. It
+  cites no CVE identifiers.
+
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: upgrades
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: maintainers
+
+fixtures:
+  - readiness-failclosed-webhook
+
+verification_spec:
+  # The declared lines are what the deterministic objectives read; the
+  # verifier folds a line's decoration (bullets, numbers, quotes, links, a
+  # trailing stop or mark) before any pattern runs when `fold_decoration` is
+  # set, so the frames below are anchored at both ends of the bare line, and
+  # each pattern matches a whole frame that starts with the planted
+  # webhook's cluster and name. Each value objective forbids a frame whose
+  # value slot holds anything but the right word, as the exact negation of
+  # what it accepts.
+  - name: the-webhook-has-a-declared-line
+    role: objective
+    # assert, not converge: the transcript is immutable once the run ends.
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - readiness-failclosed-webhook
+      any_of_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?:yes|no)$'
+
+  - name: the-declared-line-says-it-fails-closed
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - readiness-failclosed-webhook
+      any_of_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy fail; backend reachable: (?:yes|no)$'
+      forbidden_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?!fail;)[^;\n]+; backend reachable: [^\n]+$'
+
+  # The defect proper: the backend is not there.
+  - name: the-declared-line-says-the-backend-is-unreachable
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - readiness-failclosed-webhook
+      any_of_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: no$'
+      forbidden_patterns:
+        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?!no$)[^\n]+$'
+
+  - name: no-invented-cves
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      forbidden_phrases: ["CVE-"]
+
+  # The gate still fails closed. Ignore is the heal that passes every
+  # objective above and empties the fixture for every later case.
+  - name: the-planted-policy-survived-the-run
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: fleet_resource_property
+      fixture_role: readiness-failclosed-webhook
+      # Cluster-scoped, so no namespace.
+      kind: validatingwebhookconfiguration
+      resource_name: seeded-fail-closed-gate
+      path: webhooks[0].failurePolicy
+      op: eq
+      value: Fail
