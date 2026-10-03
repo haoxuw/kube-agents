@@ -608,7 +608,7 @@ is the same.
   [1.25 CSI migration status](https://kubernetes.io/blog/2022/09/26/storage-in-tree-to-csi-migration-status-update-1.25/)
   and GKE's
   [PD CSI driver page](https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver);
-  no public incident verified and no fixture.
+  no public incident verified; the seeded fleet plants the volume on seeded-a (`intree-pd-volume`).
 
 ### 20. Images on a retired registry
 
