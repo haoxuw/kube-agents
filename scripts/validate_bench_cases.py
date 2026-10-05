@@ -603,9 +603,12 @@ def _check_types(node: Any, found: set[str]) -> None:
         _check_types(child, found)
 
 
-def _fixture_roles(node: Any, found: set[str]) -> None:
+def _fixture_roles(node: Any, found: set[str], plural: set[str] | None = None) -> None:
     """Every `fixture_role:` (and `fixture_roles:` entry) named anywhere in
-    one check subtree."""
+    one check subtree. `plural` collects the `fixture_roles:` entries on
+    their own as well: the runner resolves those to a slot, so they are held
+    to the catalogue's slot-bearing roles, not to the widened vocabulary the
+    singular and `fixtures:` accept."""
     if not isinstance(node, dict):
         return
     role = node.get("fixture_role")
@@ -616,8 +619,10 @@ def _fixture_roles(node: Any, found: set[str]) -> None:
         for role in roles:
             if isinstance(role, str):
                 found.add(role)
+                if plural is not None:
+                    plural.add(role)
     for child in node.get("checks") or []:
-        _fixture_roles(child, found)
+        _fixture_roles(child, found, plural)
 
 
 def _entry_vocabulary(entry: dict[str, Any], where: str, problems: list[str]) -> None:
@@ -778,6 +783,7 @@ def validate_case(name: str, path: pathlib.Path, *, registered: set[str] | None)
         seen: set[str] = set()
         used_types: set[str] = set()
         used_roles: set[str] = set()
+        slot_roles: set[str] = set()
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 problems.append(f"verification_spec[{index}]: entry is not a mapping")
@@ -798,7 +804,17 @@ def validate_case(name: str, path: pathlib.Path, *, registered: set[str] | None)
                 _check_assertions(entry["check"], where, problems)
                 _fixture_roles_shape(entry["check"], where, problems)
                 _check_types(entry["check"], used_types)
-                _fixture_roles(entry["check"], used_roles)
+                _fixture_roles(entry["check"], used_roles, slot_roles)
+
+        # `fixture_roles:` asks whether a role's slot was reached, which the
+        # runner records for catalogue roles only; an overlay role with no
+        # slot (`orphan-disks`) passes `fixtures:` and errors every run.
+        for role in sorted(slot_roles - set(_catalog_roles())):
+            problems.append(
+                f"'fixture_roles:' names {role!r}, which has no cluster slot "
+                "in the fleet catalogue; the runner records a slot for "
+                "catalogue roles only, so the check would error on every run"
+            )
 
         # The two ways a case names a fixture have to be the same name. A
         # check's `fixture_role:` is what the runner resolves to a kubeconfig;

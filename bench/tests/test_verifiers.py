@@ -397,6 +397,10 @@ _RIGHT_REPORT = "\n".join(_zonal_line(c) for c in _SLOTS)
         "- Declared lines:\n" + "\n".join("  - " + _zonal_line(c) for c in _SLOTS),
         "\n".join(_zonal_line(c) + " ✅" for c in _SLOTS),
         "\n".join(_zonal_line(c) + " \U0001F44D" for c in _SLOTS),
+        # The same affirming closer with a skin-tone modifier: the modifier
+        # only changes how the listed mark renders and is folded with the
+        # other carriers.
+        "\n".join(_zonal_line(c) + " \U0001F44D\U0001F3FB" for c in _SLOTS),
         "\n".join(_zonal_line(c) + " \u2714\ufe0f" for c in _SLOTS),
         # Per-cluster prose that opens with a slot name is neither accepted
         # nor forbidden: only a whole declared frame is read.
@@ -663,6 +667,7 @@ def test_zonal_case_a_wrong_or_off_vocabulary_value_on_any_seeded_line_fails_its
         "unaffected \U0001F6AB",
         "unaffected \U0001F6D1",
         "unaffected \U0001F44E",
+        "unaffected \U0001F44E\U0001F3FB",
         "unaffected \u274e",
         "unaffected \u26a0\ufe0f",
         "unaffected \u26d4",

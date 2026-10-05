@@ -238,9 +238,11 @@ _INNER_UNDERSCORE = re.compile(r"(?<=[a-z0-9])_(?=[a-z0-9])")
 _SEPARATOR_NO_SPACE = re.compile(r"([:;])(?=[a-z\"'\u201c\u2018<])")
 # Invisible format characters a model or a pasted document carries (a
 # zero-width space or joiner, a word joiner, a byte-order mark, a variation
-# selector, a soft hyphen): not whitespace to Python, not a word character,
-# and not a value. Removed before anything else reads the line.
-_INVISIBLE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\ufe0e\ufe0f\u00ad]")
+# selector, a soft hyphen), and the five skin-tone modifiers an emoji is
+# rendered with (U+1F3FB to U+1F3FF, which only change how a listed closer
+# looks): not whitespace to Python, not a word character, and not a value.
+# Removed before anything else reads the line.
+_INVISIBLE = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff\ufe0e\ufe0f\u00ad\U0001f3fb-\U0001f3ff]")
 
 
 def _fold_trail_markers(line: str) -> str:

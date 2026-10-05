@@ -657,11 +657,32 @@ class TestTheRulesReject(unittest.TestCase):
         # `report_contains` is not a cluster-reading type, so before
         # fixture_roles existed it could name no role; now it can, and the
         # grep contract (one case per role) needs the list.
-        self._only(
+        problem = self._only(
             "declares no 'fixtures:'",
             fixtures=DELETE,
             verification_spec=self._entry(check={"type": "report_contains", "required_phrases": ["x"], "fixture_roles": ["crashloop-workload"]}),
         )
+        # The lead says what the case does: a report check opens no cluster.
+        self.assertIn("names seeded-fleet roles (crashloop-workload)", problem)
+        self.assertNotIn("reads live cluster state", problem)
+
+    def test_a_cluster_reading_check_with_no_fixtures_keeps_the_reading_lead(self):
+        problem = self._only(
+            "declares no 'fixtures:'",
+            fixtures=DELETE,
+            verification_spec=self._entry(check={"type": "fleet_resource_property", "fixture_role": "crashloop-workload", "kind": "deployment", "name": "payments-api", "namespace": "seeded-debug", "property_path": "spec.replicas", "op": "eq", "expected": 1}),
+        )
+        self.assertIn("reads live cluster state (fleet_resource_property)", problem)
+
+    def test_a_slotless_overlay_role_is_rejected_in_fixture_roles(self):
+        # `orphan-disks` is in the overlay with no slot, so `fixtures:` takes
+        # it; the plural asks for a slot the runner never records.
+        problem = self._only(
+            "has no cluster slot in the fleet catalogue",
+            fixtures=["orphan-disks"],
+            verification_spec=self._entry(check={"type": "report_contains", "required_phrases": ["x"], "fixture_roles": ["orphan-disks"]}),
+        )
+        self.assertIn("'fixture_roles:' names 'orphan-disks'", problem)
 
     def test_a_scalar_fixture_roles_is_rejected_as_a_shape_not_as_letters(self):
         problem = self._only(
