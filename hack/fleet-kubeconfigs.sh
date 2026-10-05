@@ -489,10 +489,14 @@ write_fleet_kubeconfigs() {
   # So a check that cannot resolve its role can name the project it was looking
   # in. "role X is unavailable" is a bug report nobody can act on; "role X is
   # unavailable in kube-agents-evals-3" is one sentence from the answer. The
-  # per-slot `cluster.<slot>=` / `location.<slot>=` lines are appended below
-  # as each slot resolves, and a `slot.<role>=` line per catalog role as the
-  # role loop reads it.
+  # `slot.<role>=` line per catalog role comes next, from the rows already
+  # parsed and before any network call, so the record is complete the moment
+  # the file exists: a run that stops partway leaves a file whose missing
+  # lines are the per-slot `cluster.<slot>=` / `location.<slot>=` records
+  # appended below as each slot resolves, never a missing slot record a
+  # reader would take for an older runner or an uncatalogued role.
   printf 'project=%s\n' "$project" >"${dir}/.fleet-context"
+  printf '%s\n' "$rows" | awk 'NF >= 2 { printf "slot.%s=%s\n", $1, $2 }' >>"${dir}/.fleet-context"
   chmod 600 "${dir}/${_FLEET_MARKER}" "${dir}/.fleet-context"
 
   local slot cluster location slot_config listing discovered errors named
@@ -577,9 +581,6 @@ write_fleet_kubeconfigs() {
 
   while read -r role slot namespace probes; do
     [ -n "$role" ] || continue
-    # The role's slot, recorded whether or not the slot was reached: the
-    # verifier's slot-level resolution reads it rather than the catalog.
-    printf 'slot.%s=%s\n' "$role" "$slot" >>"${dir}/.fleet-context"
     slot_config="${dir}/clusters/${slot}.kubeconfig"
     if [ ! -f "$slot_config" ]; then
       unresolved=$((unresolved + 1))

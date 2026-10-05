@@ -674,6 +674,16 @@ class TestTheRulesReject(unittest.TestCase):
         )
         self.assertIn("reads live cluster state (fleet_resource_property)", problem)
 
+    def test_a_parked_case_may_name_the_role_its_issue_plants_in_fixture_roles(self):
+        # FIXTURE_NOT_READY keeps the case off every roster, so the role it
+        # waits for is not in the catalogue yet by definition.
+        with unittest.mock.patch.dict(validator.FIXTURE_NOT_READY, {"made-up-case": "#1 plants role not-yet-planted"}):
+            problems = self._validate(
+                fixtures=["not-yet-planted"],
+                verification_spec=self._entry(check={"type": "report_contains", "required_phrases": ["x"], "fixture_roles": ["not-yet-planted"]}),
+            )
+        self.assertEqual([p for p in problems if "no cluster slot" in p], [], problems)
+
     def test_a_slotless_overlay_role_is_rejected_in_fixture_roles(self):
         # `orphan-disks` is in the overlay with no slot, so `fixtures:` takes
         # it; the plural asks for a slot the runner never records.

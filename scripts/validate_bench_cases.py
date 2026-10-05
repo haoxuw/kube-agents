@@ -809,12 +809,16 @@ def validate_case(name: str, path: pathlib.Path, *, registered: set[str] | None)
         # `fixture_roles:` asks whether a role's slot was reached, which the
         # runner records for catalogue roles only; an overlay role with no
         # slot (`orphan-disks`) passes `fixtures:` and errors every run.
-        for role in sorted(slot_roles - set(_catalog_roles())):
-            problems.append(
-                f"'fixture_roles:' names {role!r}, which has no cluster slot "
-                "in the fleet catalogue; the runner records a slot for "
-                "catalogue roles only, so the check would error on every run"
-            )
+        # A case parked in FIXTURE_NOT_READY names the role its issue plants,
+        # which is not in the catalogue yet by definition; it is off every
+        # roster, so the plural is held to the catalogue only once it runs.
+        if name not in FIXTURE_NOT_READY:
+            for role in sorted(slot_roles - set(_catalog_roles())):
+                problems.append(
+                    f"'fixture_roles:' names {role!r}, which has no cluster slot "
+                    "in the fleet catalogue; the runner records a slot for "
+                    "catalogue roles only, so the check would error on every run"
+                )
 
         # The two ways a case names a fixture have to be the same name. A
         # check's `fixture_role:` is what the runner resolves to a kubeconfig;

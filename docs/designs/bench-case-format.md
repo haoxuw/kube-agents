@@ -184,7 +184,10 @@ numbers, headings, quotes, links, a trailing stop or an affirming mark; a mark t
 negates the last word stays, so it reads as a wrong value), so a pattern anchored at both ends
 spells a declared line once and should keep `\n` out of its gaps, for what no substring can
 express: a banned word whose negated uses are legitimate, and a required claim whose
-subject and verb an adverb or a tense can separate; its `fixture_roles` names the seeded-fleet
+subject and verb an adverb or a tense can separate; `{cluster:<slot>}` in either list stands for the
+cluster the runner recorded for that slot, bare or as the last joined component of a longer id and
+optionally followed by its recorded location, and `{cluster:any}` for every recorded slot, so a case
+names which cluster rather than what a cluster's name looks like; its `fixture_roles` names the seeded-fleet
 roles whose clusters the patterns require a line about, each resolved to its slot's own
 credential (`clusters/<slot>.kubeconfig`, written for every seeded cluster the runner reached,
 before any role on it is confirmed), and a slot the runner did not reach returns

@@ -2281,6 +2281,10 @@ def test_the_runner_records_every_roles_slot_whether_or_not_it_was_reached(shell
     context = (short / ".fleet-context").read_text().splitlines()
     for role, spec in _catalog()["roles"].items():
         assert f"slot.{role}={spec['cluster_slot']}" in context
+    # Written before any network call, so a run that stops partway leaves a
+    # complete slot record: every slot. line precedes the first cluster. line.
+    first_cluster = next(i for i, line in enumerate(context) if line.startswith("cluster."))
+    assert all(i < first_cluster for i, line in enumerate(context) if line.startswith("slot."))
     assert (short / "clusters" / "a.kubeconfig").is_file()
     assert not (short / "clusters" / "b.kubeconfig").exists()
 

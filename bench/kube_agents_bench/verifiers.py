@@ -75,6 +75,7 @@ from kube_agents_bench.fleet import (
     ROLE_PATTERN,
     FleetRoleUnresolved,
     FleetSlotUnreached,
+    recorded_clusters,
     confirmed_subjects,
     kubeconfig_for_role,
     slot_kubeconfig_for_role,
@@ -118,6 +119,23 @@ _ONBOARDING_READ_TIMEOUT_SEC = 60.0
 # The sandbox's report changes at most twice (written, then renamed), so at most
 # two of three sandbox re-reads can differ from the read before them.
 _REPORT_READ_ATTEMPTS = 3
+
+# `{cluster:<slot>}` in a `forbidden_patterns` or `any_of_patterns` entry
+# stands for the cluster the runner recorded for that slot, as a frame that
+# matches the name bare or as the last `-`, `_` or `/`-joined component of a
+# longer id (a project, a kubeconfig context, a resource path), followed by
+# nothing or by `-<location>` as recorded. `{cluster:any}` is every recorded
+# slot. The case then says WHICH cluster, not what a cluster's name looks
+# like, so `seeded-a-us-west1` is slot a only where the runner recorded it.
+_CLUSTER_PLACEHOLDER = re.compile(r"\{cluster:([a-z0-9-]+)\}")
+_CLUSTER_ANY = "any"
+_NAME_CHARS = "[a-z0-9/._-]"
+_NAME_JOINERS = "[-_/]"
+_UNRECORDED_SLOT_REASON = (
+    "a pattern names a seeded-fleet slot the runner recorded no cluster for, so the line it "
+    "requires cannot be told from a line about another cluster"
+)
+
 
 # Emphasis and code markers, dropped before matching. The agent answers in
 # Markdown, and a phrase spanning an emphasised word cannot match the raw
@@ -352,7 +370,8 @@ class ReportContainsVerifier(BaseVerifier):
     # carry: a whole declared line, or a subject bound to its verb across an
     # adverb. Searched against the same line-preserving text as
     # forbidden_patterns, so a pattern may anchor on a newline and should keep
-    # it out of its gaps.
+    # it out of its gaps. `{cluster:<slot>}` in either list stands for the
+    # cluster the runner recorded for that slot (see _CLUSTER_PLACEHOLDER).
     any_of_patterns: list[str] = Field(default_factory=list)
     # Fold each line's decoration (bullets, numbers, quotes, links, a trailing
     # stop or an affirming mark; a mark that hedges or negates the last word
@@ -388,8 +407,52 @@ class ReportContainsVerifier(BaseVerifier):
     @classmethod
     def _patterns_compile(cls, patterns: list[str]) -> list[str]:
         for pattern in patterns:
-            re.compile(pattern)
+            # A placeholder expands to a name at verify time; what has to
+            # compile now is the pattern around it.
+            re.compile(_CLUSTER_PLACEHOLDER.sub("x", pattern))
         return patterns
+
+    @staticmethod
+    def _cluster_frame(name: str, location: str) -> str:
+        """The regex for one recorded cluster: its name, bare or as the last
+        joined component of a longer id, then nothing or its recorded
+        location, bounded so `seeded-a-canary` is not `seeded-a`."""
+        bare = re.escape(name.lower())
+        frame = f"(?:(?:(?!{bare}(?![a-z0-9])){_NAME_CHARS})*{_NAME_JOINERS})?{bare}"
+        if location:
+            frame += f"(?:-{re.escape(location.lower())})?"
+        return frame + "(?![a-z0-9])"
+
+    @classmethod
+    def expand_cluster_placeholders(cls, pattern: str, clusters: dict[str, tuple[str, str]]) -> str:
+        """``pattern`` with every ``{cluster:<slot>}`` replaced by the recorded
+        cluster's frame, ``{cluster:any}`` by every recorded slot's.
+
+        Raises:
+            KeyError: the pattern names a slot with no record (the message
+                names it; the caller turns that into ``status: error``).
+        """
+        def frame_for(match: re.Match) -> str:
+            slot = match.group(1)
+            if slot == _CLUSTER_ANY:
+                if not clusters:
+                    raise KeyError("no slot at all")
+                return "(?:" + "|".join(cls._cluster_frame(n, l) for n, l in clusters.values()) + ")"
+            if slot not in clusters:
+                raise KeyError(slot)
+            return cls._cluster_frame(*clusters[slot])
+        return _CLUSTER_PLACEHOLDER.sub(frame_for, pattern)
+
+    def _expanded_patterns(self) -> tuple[list[str], list[str]]:
+        """The two pattern lists with their cluster placeholders expanded from
+        the runner's record; the record is read only when a pattern asks."""
+        if not any(_CLUSTER_PLACEHOLDER.search(p) for p in self.forbidden_patterns + self.any_of_patterns):
+            return self.forbidden_patterns, self.any_of_patterns
+        clusters = recorded_clusters()
+        return (
+            [self.expand_cluster_placeholders(p, clusters) for p in self.forbidden_patterns],
+            [self.expand_cluster_placeholders(p, clusters) for p in self.any_of_patterns],
+        )
 
     def verify(self, timeout_sec: float) -> VerificationResult:
         start = time.monotonic()
@@ -404,6 +467,17 @@ class ReportContainsVerifier(BaseVerifier):
                 return VerificationResult(
                     success=False, status="error", elapsed_time=time.monotonic() - start, reason=f"{_UNRESOLVED_ROLES_REASON}: {exc}"
                 )
+        try:
+            forbidden_patterns, any_of_patterns = self._expanded_patterns()
+        except KeyError as exc:
+            return VerificationResult(
+                success=False, status="error", elapsed_time=time.monotonic() - start,
+                reason=f"{_UNRECORDED_SLOT_REASON}: slot {exc.args[0]!r} has no cluster record in the runner's context file",
+            )
+        except FleetRoleUnresolved as exc:
+            return VerificationResult(
+                success=False, status="error", elapsed_time=time.monotonic() - start, reason=f"{_UNRECORDED_SLOT_REASON}: {exc}"
+            )
         snap = transcript.get()
         if snap is None:
             return VerificationResult(
@@ -417,12 +491,12 @@ class ReportContainsVerifier(BaseVerifier):
         missing = [p for p in self.required_phrases if _normalize(p) not in text]
         present = [p for p in self.forbidden_phrases if _normalize(p) in text]
         lines = _normalize_lines(raw, fold_decoration=self.fold_decoration)
-        pattern_hits = [p for p in self.forbidden_patterns if re.search(p, lines)]
+        pattern_hits = [p for p in forbidden_patterns if re.search(p, lines)]
         any_of_miss = bool(self.any_of_phrases) and not any(
             _normalize(p) in text for p in self.any_of_phrases
         )
-        any_pattern_miss = bool(self.any_of_patterns) and not any(
-            re.search(p, lines) for p in self.any_of_patterns
+        any_pattern_miss = bool(any_of_patterns) and not any(
+            re.search(p, lines) for p in any_of_patterns
         )
         if missing or present or pattern_hits or any_of_miss or any_pattern_miss:
             parts = []

@@ -57,6 +57,7 @@ __all__ = [
     "FleetSlotUnreached",
     "slot_of_role",
     "slot_kubeconfig_for_role",
+    "recorded_clusters",
 ]
 
 # Set by hack/fleet-kubeconfigs.sh, exported by hack/ci-eval-pr.sh.
@@ -80,6 +81,12 @@ _SLOT_DIR = "clusters"
 # the catalogue itself.
 _PROJECT_KEY = "project"
 _SLOT_KEY_FORMAT = "slot.{role}"
+# The runner's record of which cluster each reached slot IS, one
+# `cluster.<slot>=<name>` and one `location.<slot>=<location>` line per slot it
+# fetched a credential for. A pattern that names a slot's cluster reads these
+# rather than guessing the name's shape.
+_CLUSTER_KEY_FORMAT = "cluster.{slot}"
+_LOCATION_KEY_FORMAT = "location.{slot}"
 
 # Written by hack/fleet-kubeconfigs.sh as `project=<id>`. The pool of eval
 # projects is leased at random and not every project in it necessarily carries
@@ -210,6 +217,39 @@ def slot_of_role(role: str, directory: str | os.PathLike[str] | None = None) -> 
         f"the runner recorded no slot for fixture role {role!r} in {root}/{_CONTEXT_FILE}: the role is "
         f"not in the catalogue (bench/tf/fleet/fixtures.json) the runner read"
     )
+
+
+def recorded_clusters(directory: str | os.PathLike[str] | None = None) -> dict[str, tuple[str, str]]:
+    """Slot -> (cluster name, location) for every seeded cluster the runner
+    reached, as it recorded them in the context file.
+
+    A slot the runner did not reach has no entry: it wrote the record only
+    after fetching the slot's credential. Which slot a role lives on is
+    :func:`slot_of_role`; this is which cluster that slot turned out to be in
+    the leased project, so a check can require the agent to name THAT cluster
+    rather than a name of the right shape.
+
+    Raises:
+        FleetRoleUnresolved: The runner provisioned nothing.
+    """
+    root = directory if directory is not None else os.environ.get(FLEET_KUBECONFIG_DIR_ENV)
+    if not root:
+        raise FleetRoleUnresolved(
+            f"no seeded-fleet kubeconfigs: {FLEET_KUBECONFIG_DIR_ENV} is unset, so the runner "
+            f"resolved no seeded cluster before the run (hack/fleet-kubeconfigs.sh did not run)"
+        )
+    context = _context(root)
+    if not context:
+        raise FleetRoleUnresolved(
+            f"the runner recorded nothing in {root}/{_CONTEXT_FILE}: hack/fleet-kubeconfigs.sh never ran there"
+        )
+    prefix = _CLUSTER_KEY_FORMAT.format(slot="")
+    clusters: dict[str, tuple[str, str]] = {}
+    for key, name in context.items():
+        if key.startswith(prefix) and name:
+            slot = key[len(prefix):]
+            clusters[slot] = (name, context.get(_LOCATION_KEY_FORMAT.format(slot=slot), ""))
+    return clusters
 
 
 def slot_kubeconfig_for_role(role: str, directory: str | os.PathLike[str] | None = None) -> str:

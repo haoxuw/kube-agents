@@ -322,25 +322,34 @@ _CATALOG = json.loads(_FLEET_CATALOG.read_text(encoding="utf-8"))
 _CATALOG_ROLES = _CATALOG["roles"]
 
 
+def _catalog_slots() -> list[str]:
+    return sorted({spec["cluster_slot"] for spec in _catalog_roles().values()})
+
+
 def _catalog_roles() -> dict:
     return _CATALOG_ROLES
 
 
-def _write_fleet_dir(root: Path, reached: list[str]) -> None:
+def _write_fleet_dir(root: Path, reached: list[str], names: dict[str, str] | None = None, location: str = "us-central1-a") -> None:
     """A runner-shaped kubeconfig directory: the context file recording every
-    catalogue role's slot (as the runner does, reached or not), the per-slot
+    catalogue role's slot (as the runner does, reached or not), the cluster
+    and location recorded for each reached slot (what `{cluster:<slot>}`
+    expands to; `seeded-<slot>` unless `names` says otherwise), the per-slot
     credential for the slot carrying each reached role (what `fixture_roles`
     reads), and no role files, since whether a role was planted is not the
     question."""
     (root / "clusters").mkdir(exist_ok=True)
     roles = _catalog_roles()
     lines = ["project=kube-agents-evals"] + [f"slot.{role}={spec['cluster_slot']}" for role, spec in roles.items()]
+    for slot in sorted({roles[role]["cluster_slot"] for role in reached}):
+        name = (names or {}).get(slot, f"seeded-{slot}")
+        lines += [f"cluster.{slot}={name}", f"location.{slot}={location}"]
     (root / ".fleet-context").write_text("\n".join(lines) + "\n", encoding="utf-8")
     for role in reached:
         (root / "clusters" / f"{roles[role]['cluster_slot']}.kubeconfig").write_text("apiVersion: v1\n", encoding="utf-8")
 
 
-def _zonal_case_verdict(objective: str, text: str, reached: list[str] | None = None):
+def _zonal_case_verdict(objective: str, text: str, reached: list[str] | None = None, names: dict[str, str] | None = None):
     # parse_node rather than a hand-built ReportContainsVerifier, for the
     # reason the sibling block gives: a clause the shipped entry grows later
     # must not be silently dropped here. A fresh directory per call stands in
@@ -348,7 +357,7 @@ def _zonal_case_verdict(objective: str, text: str, reached: list[str] | None = N
     v = parse_node(_zonal_case_check(objective))
     _stash(text)
     with tempfile.TemporaryDirectory(prefix="zonal-fleet-") as root:
-        _write_fleet_dir(Path(root), _zonal_case_fixtures() if reached is None else reached)
+        _write_fleet_dir(Path(root), _zonal_case_fixtures() if reached is None else reached, names)
         with mock.patch.dict(os.environ, {fleet.FLEET_KUBECONFIG_DIR_ENV: root}):
             return v.verify(5.0)
 
@@ -434,9 +443,10 @@ _RIGHT_REPORT = "\n".join(_zonal_line(c) for c in _SLOTS)
         "\n".join(_zonal_line(c).replace("zonal;", "zonal\u200b;") for c in _SLOTS),
         "\n".join("\ufeff" + _zonal_line(c) for c in _SLOTS),
         "\n".join(_zonal_line(c).replace("unaffected", "unaffected\u2060") for c in _SLOTS),
-        # A location after the slot, in the forms GKE spells them.
-        "\n".join(_zonal_line(f"{c}-europe-west4") for c in _SLOTS),
-        "\n".join(_zonal_line(f"{c}-northamerica-northeast1-a") for c in _SLOTS),
+        # The recorded location after the name, as a profile id spells it; any
+        # other location is another cluster (see the recorded-cluster tests).
+        "\n".join(_zonal_line(f"{c}-us-central1-a") for c in _SLOTS),
+        "\n".join(_zonal_line(f"kube-agents-evals-{c}-us-central1-a") for c in _SLOTS),
         # Underscore emphasis, and a name in parentheses or braces.
         "\n".join("_" + _zonal_line(c) + "_" for c in _SLOTS),
         "\n".join("__" + _zonal_line(c) + "__" for c in _SLOTS),
@@ -553,34 +563,26 @@ def test_a_directory_an_older_runner_wrote_names_the_missing_record(tmp_path):
 
 
 def test_zonal_case_patterns_name_exactly_the_catalogues_slots():
-    """The slot class in every pattern and the lookahead count in the first
-    objective are the catalogue's slots, so a fleet change fails here first."""
+    """Every pattern names its cluster through the runner's record, never by
+    the name's shape, and the first objective asks for one line per catalogue
+    slot, so a fleet change fails here first."""
     spec = yaml.safe_load(_ZONAL_CASE.read_text(encoding="utf-8"))
-
-    def class_letters(char_class: str) -> set[str]:
-        out: set[str] = set()
-        body = char_class[1:-1]
-        i = 0
-        while i < len(body):
-            if i + 2 < len(body) and body[i + 1] == "-":
-                out.update(chr(c) for c in range(ord(body[i]), ord(body[i + 2]) + 1))
-                i += 3
-            else:
-                out.add(body[i])
-                i += 1
-        return out
-
-    first = _zonal_case_check("every-seeded-cluster-has-a-declared-line")["any_of_patterns"][0]
-    assert first.count("(?=.*") == len(_SLOT_LETTERS)
-    for letter in _SLOT_LETTERS:
-        assert f"seeded-{letter}" in first
-    classes = set()
+    slots = set(_catalog_slots())
+    placeholder = re.compile(r"\{cluster:([a-z0-9-]+)\}")
+    seen_first = None
     for entry in spec["verification_spec"]:
-        for pattern in entry["check"].get("any_of_patterns", []) + entry["check"].get("forbidden_patterns", []):
-            classes.update(re.findall(r"seeded-(\[[a-z-]+\])", pattern))
-    assert classes, "the patterns name the slots by a character class"
-    for char_class in classes:
-        assert class_letters(char_class) == set(_SLOT_LETTERS), char_class
+        check = entry["check"]
+        patterns = check.get("any_of_patterns", []) + check.get("forbidden_patterns", [])
+        if not patterns:
+            continue
+        for pattern in patterns:
+            named = placeholder.findall(pattern)
+            assert named, (entry["name"], pattern)
+            assert set(named) <= slots | {"any"}, (entry["name"], named)
+            assert "seeded-" not in pattern, (entry["name"], "a pattern spells a cluster name instead of naming its slot")
+        if entry["name"] == "every-seeded-cluster-has-a-declared-line":
+            seen_first = set(placeholder.findall(patterns[0]))
+    assert seen_first == slots, seen_first
 
 
 def test_a_cluster_that_merely_starts_with_a_slot_name_is_neither_a_slot_nor_a_wrong_value():
@@ -4568,3 +4570,63 @@ def test_the_ack_voice_objectives_read_the_whole_closing_message(final_message):
 )
 def test_the_ack_voice_objectives_stop_at_the_delivered_sections(final_message):
     assert not _ack_voice_hits(final_message), final_message
+
+
+# ------------------------- the recorded cluster is the slot, not the name's shape
+
+
+def test_a_cluster_sharing_the_slot_token_with_another_location_is_not_the_slot():
+    """`seeded-a-us-west1` is what a leftover second-region cluster is called;
+    the runner reads a slot off a name's end and skips it, so the verifier
+    must too: beside four right lines its wrong values grade nothing, and
+    standing in for seeded-a it is a missing slot."""
+    stray = "seeded-a-us-west1: control plane is regional; API during its upgrade: available; running pods: affected"
+    for objective in _ZONAL_OBJECTIVES:
+        assert _zonal_case_grades(objective, _RIGHT_REPORT + "\n" + stray), objective
+    without_a = "\n".join([_zonal_line(c) for c in _SLOTS if c != "seeded-a"] + [stray.replace("regional", "zonal").replace("available", "unavailable").replace("affected", "unaffected")])
+    assert not _zonal_case_grades("every-seeded-cluster-has-a-declared-line", without_a)
+
+
+def test_the_recorded_location_is_the_only_suffix_the_slot_takes():
+    qualified = "\n".join(f"kube-agents-evals-{c}-us-central1-a: " + _zonal_line(c).split(": ", 1)[1] for c in _SLOTS)
+    for objective in _ZONAL_OBJECTIVES:
+        assert _zonal_case_grades(objective, qualified), objective
+    other_zone = qualified.replace("-us-central1-a:", "-us-central1-b:")
+    assert not _zonal_case_grades("every-seeded-cluster-has-a-declared-line", other_zone)
+
+
+def test_a_fleet_with_another_prefix_is_graded_on_its_recorded_names():
+    names = {s: f"prod-{s}" for s in _SLOT_LETTERS}
+    renamed = "\n".join(_zonal_line(f"prod-{s}") for s in _SLOT_LETTERS)
+    for objective in _ZONAL_OBJECTIVES:
+        assert _zonal_case_verdict(objective, renamed, names=names).status == "pass", objective
+    # and the seeded names, which the runner did not record, are then nobody's
+    assert _zonal_case_verdict("every-seeded-cluster-has-a-declared-line", _RIGHT_REPORT, names=names).status == "fail"
+
+
+def test_a_pattern_naming_an_unrecorded_slot_is_an_error_not_a_miss():
+    v = parse_node({"type": "report_contains", "any_of_patterns": ["(?m)^{cluster:q}: ok$"]})
+    _stash("seeded-q: ok")
+    with tempfile.TemporaryDirectory(prefix="zonal-fleet-") as root:
+        _write_fleet_dir(Path(root), _zonal_case_fixtures())
+        with mock.patch.dict(os.environ, {fleet.FLEET_KUBECONFIG_DIR_ENV: root}):
+            res = v.verify(5.0)
+    assert res.status == "error"
+    assert "slot 'q'" in res.reason
+
+
+def test_cluster_placeholders_expand_to_escaped_recorded_names():
+    frame = verifiers.ReportContainsVerifier.expand_cluster_placeholders("^{cluster:a}: x$", {"a": ("seeded-a", "us-central1-a")})
+    assert re.search(frame, "seeded-a: x")
+    assert re.search(frame, "p-seeded-a-us-central1-a: x")
+    assert re.search(frame, "gke-p-us-central1-a-seeded-a: x")
+    assert not re.search(frame, "seeded-a-us-west1: x")
+    assert not re.search(frame, "unseeded-a: x")
+    assert not re.search(frame, "seeded-a-canary: x")
+    any_frame = verifiers.ReportContainsVerifier.expand_cluster_placeholders("^{cluster:any}: x$", {"a": ("seeded-a", ""), "b": ("seeded-b", "")})
+    assert re.search(any_frame, "seeded-b: x") and not re.search(any_frame, "seeded-c: x")
+    # a name with regex metacharacters is matched literally
+    dotted = verifiers.ReportContainsVerifier.expand_cluster_placeholders("^{cluster:a}$", {"a": ("a.b", "")})
+    assert re.search(dotted, "a.b") and not re.search(dotted, "axb")
+    # a placeholder still compiles at spec load, before any record exists
+    parse_node({"type": "report_contains", "forbidden_patterns": ["{cluster:any}: no$"]})
