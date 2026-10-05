@@ -179,6 +179,12 @@
 # unit_cost_hint figures and three repetitions (~378 without it), against the
 # 480m deadline. Whether that fits is the eval crew's call, on the first nights'
 # record.
+#
+# 2026-10-05 adds upgrades-zonal-control-plane-outage-warned: one case,
+# three units at the 200s default (a read-only chat turn, measured 3-8
+# minutes a repetition on the dev install). Counted after the case above,
+# this file is fifty cases (150 units) of a sixty-four-case, 192-unit
+# matrix.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -563,3 +569,10 @@
 # threshold before it posts the record. Nightly rather than presubmit for that
 # wait.
 ./tasks/autoops-controller-stall-triage/task.yaml
+
+# The first of the upgrade-failure catalogue's scenario cases (entry 11, the
+# zonal control plane's API gap during its own upgrade). Read-only chat prompt
+# against the seeded clusters' own zonal shape; no planted fixture, nothing to
+# mutate. Nightly from its first merge; a presubmit seat is a later pull
+# request that cites its record.
+./tasks/upgrades-zonal-control-plane-outage-warned/task.yaml

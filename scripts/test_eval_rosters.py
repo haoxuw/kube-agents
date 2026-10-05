@@ -150,6 +150,7 @@ ADDED_AFTER_THE_MOVE = [
     "bootstrap-inventory-ranking-delivery",  # the onboarding prioritization stage, #2143
     "platform-worker-shell-edit-of-shipped-skill",  # the sandbox's image trees, #2096
     "autoops-controller-stall-triage",  # the stall watch on the inject path
+    "upgrades-zonal-control-plane-outage-warned",  # upgrade-failure catalogue entry 11, the first scenario case
 ]
 
 # Admitted after the split, each by a pull request that cited the record
