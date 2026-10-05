@@ -684,6 +684,23 @@ class TestTheRulesReject(unittest.TestCase):
             )
         self.assertEqual([p for p in problems if "no cluster slot" in p], [], problems)
 
+    def test_a_cluster_placeholder_must_name_a_catalogue_slot(self):
+        problem = self._only(
+            "a slot the fleet catalogue does not declare",
+            verification_spec=self._entry(check={"type": "report_contains", "any_of_patterns": ["(?m)^{cluster:e}: ok$"]}),
+        )
+        self.assertIn("{cluster:e}", problem)
+        # a declared slot and `any` pass; a parked case is not held to the catalogue
+        self.assertEqual(self._validate(verification_spec=self._entry(check={"type": "report_contains", "any_of_patterns": ["(?m)^{cluster:a}: ok$", "(?m)^{cluster:any}: ok$"]})), [])
+        with unittest.mock.patch.dict(validator.FIXTURE_NOT_READY, {"made-up-case": "#1 plants slot e"}):
+            self.assertEqual([p for p in self._validate(verification_spec=self._entry(check={"type": "report_contains", "any_of_patterns": ["(?m)^{cluster:e}: ok$"]})) if "does not declare" in p], [])
+
+    def test_a_malformed_cluster_placeholder_is_rejected(self):
+        self._only(
+            "malformed cluster placeholder",
+            verification_spec=self._entry(check={"type": "report_contains", "forbidden_patterns": ["{cluster: a}: no"]}),
+        )
+
     def test_a_slotless_overlay_role_is_rejected_in_fixture_roles(self):
         # `orphan-disks` is in the overlay with no slot, so `fixtures:` takes
         # it; the plural asks for a slot the runner never records.

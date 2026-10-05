@@ -490,8 +490,8 @@ write_fleet_kubeconfigs() {
   # in. "role X is unavailable" is a bug report nobody can act on; "role X is
   # unavailable in kube-agents-evals-3" is one sentence from the answer. The
   # `slot.<role>=` line per catalog role comes next, from the rows already
-  # parsed and before any network call, so the record is complete the moment
-  # the file exists: a run that stops partway leaves a file whose missing
+  # parsed and before the cluster listing and every per-slot credential fetch
+  # below, so the record is complete the moment the file exists: a run that stops partway leaves a file whose missing
   # lines are the per-slot `cluster.<slot>=` / `location.<slot>=` records
   # appended below as each slot resolves, never a missing slot record a
   # reader would take for an older runner or an uncatalogued role.

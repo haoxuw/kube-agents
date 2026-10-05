@@ -128,13 +128,31 @@ _REPORT_READ_ATTEMPTS = 3
 # slot. The case then says WHICH cluster, not what a cluster's name looks
 # like, so `seeded-a-us-west1` is slot a only where the runner recorded it.
 _CLUSTER_PLACEHOLDER = re.compile(r"\{cluster:([a-z0-9-]+)\}")
+# Anything that looks like the opener in any case or spacing is a placeholder
+# the author meant, so a near miss is refused rather than compiled literally.
+_CLUSTER_PLACEHOLDER_LOOSE = re.compile(r"\{\s*cluster\s*:", re.IGNORECASE)
 _CLUSTER_ANY = "any"
 _NAME_CHARS = "[a-z0-9/._-]"
 _NAME_JOINERS = "[-_/]"
+# The frame bounds the name itself, so a pattern need not: nothing word-like
+# before it (`unseeded-a` is not `seeded-a`), and after it nothing word-like
+# and no `-` that would make it a longer name (`seeded-a-canary`,
+# `seeded-a-us-west1`); `/`, `.`, a space and punctuation may follow.
+_NAME_LEFT_BOUND = "(?<![a-z0-9])"
+_NAME_RIGHT_BOUND = "(?![a-z0-9-])"
+# Records the spec-load compile check expands a pattern with, in place of the
+# runner's: two slots, so a `{cluster:any}` alternation takes the shape it
+# will have, and every slot the pattern names.
+_PLACEHOLDER_STAND_IN_RECORDS = {"stand-in-1": ("stand-in-1", "stand-in-location"), "stand-in-2": ("stand-in-2", "")}
 _UNRECORDED_SLOT_REASON = (
     "a pattern names a seeded-fleet slot the runner recorded no cluster for, so the line it "
     "requires cannot be told from a line about another cluster"
 )
+_NO_RECORDED_SLOT_REASON = (
+    "a pattern names every recorded seeded-fleet slot and the runner recorded none: no seeded "
+    "cluster was reached before the run"
+)
+_PATTERN_EXPANSION_REASON = "a pattern does not compile once its cluster placeholders are expanded"
 
 
 # Emphasis and code markers, dropped before matching. The agent answers in
@@ -407,21 +425,45 @@ class ReportContainsVerifier(BaseVerifier):
     @classmethod
     def _patterns_compile(cls, patterns: list[str]) -> list[str]:
         for pattern in patterns:
-            # A placeholder expands to a name at verify time; what has to
-            # compile now is the pattern around it.
-            re.compile(_CLUSTER_PLACEHOLDER.sub("x", pattern))
+            # A placeholder the regex does not recognise (`{cluster: a}`,
+            # `{Cluster:a}`) would compile as literal text and never match:
+            # an inert forbid or a miss on every run, with no hint why.
+            if _CLUSTER_PLACEHOLDER_LOOSE.search(_CLUSTER_PLACEHOLDER.sub("", pattern)):
+                raise ValueError(
+                    f"pattern {pattern!r} carries a malformed cluster placeholder; the form is "
+                    f"{{cluster:<slot>}} or {{cluster:{_CLUSTER_ANY}}}, lowercase, no spaces"
+                )
+            # A placeholder expands to a frame at verify time, so what has to
+            # compile now is the pattern around a frame, not around a letter:
+            # a lookbehind or a character class that is legal around `x` is
+            # not around a variable-width group.
+            try:
+                re.compile(cls.expand_cluster_placeholders(pattern, cls._stand_in_records(pattern)))
+            except re.error as exc:
+                raise ValueError(f"pattern {pattern!r} does not compile once its cluster placeholders are expanded: {exc}") from exc
         return patterns
 
     @staticmethod
+    def _stand_in_records(pattern: str) -> dict[str, tuple[str, str]]:
+        records = dict(_PLACEHOLDER_STAND_IN_RECORDS)
+        for slot in _CLUSTER_PLACEHOLDER.findall(pattern):
+            if slot != _CLUSTER_ANY:
+                records.setdefault(slot, (slot, ""))
+        return records
+
+    @staticmethod
     def _cluster_frame(name: str, location: str) -> str:
-        """The regex for one recorded cluster: its name, bare or as the last
-        joined component of a longer id, then nothing or its recorded
-        location, bounded so `seeded-a-canary` is not `seeded-a`."""
+        """The regex for one recorded cluster, as one group: its name, bare or
+        as the last `-`, `_` or `/`-joined component of a longer id, then
+        nothing or its recorded location, bounded on both sides by the frame
+        itself (nothing word-like before, nothing word-like and no `-` after),
+        so `unseeded-a`, `seeded-a-canary` and `seeded-a-us-west1` are not
+        slot a wherever the placeholder sits in a pattern."""
         bare = re.escape(name.lower())
-        frame = f"(?:(?:(?!{bare}(?![a-z0-9])){_NAME_CHARS})*{_NAME_JOINERS})?{bare}"
+        frame = f"{_NAME_LEFT_BOUND}(?:(?:(?!{bare}(?![a-z0-9])){_NAME_CHARS})*{_NAME_JOINERS})?{bare}"
         if location:
             frame += f"(?:-{re.escape(location.lower())})?"
-        return frame + "(?![a-z0-9])"
+        return f"(?:{frame}{_NAME_RIGHT_BOUND})"
 
     @classmethod
     def expand_cluster_placeholders(cls, pattern: str, clusters: dict[str, tuple[str, str]]) -> str:
@@ -431,27 +473,30 @@ class ReportContainsVerifier(BaseVerifier):
         Raises:
             KeyError: the pattern names a slot with no record (the message
                 names it; the caller turns that into ``status: error``).
+            LookupError: ``{cluster:any}`` with no slot recorded at all.
         """
         def frame_for(match: re.Match) -> str:
             slot = match.group(1)
             if slot == _CLUSTER_ANY:
                 if not clusters:
-                    raise KeyError("no slot at all")
+                    raise LookupError(_NO_RECORDED_SLOT_REASON)
                 return "(?:" + "|".join(cls._cluster_frame(n, l) for n, l in clusters.values()) + ")"
             if slot not in clusters:
                 raise KeyError(slot)
             return cls._cluster_frame(*clusters[slot])
         return _CLUSTER_PLACEHOLDER.sub(frame_for, pattern)
 
-    def _expanded_patterns(self) -> tuple[list[str], list[str]]:
+    def _expanded_patterns(self) -> tuple[list[str], list[str], dict[str, tuple[str, str]] | None]:
         """The two pattern lists with their cluster placeholders expanded from
-        the runner's record; the record is read only when a pattern asks."""
+        the runner's record, and the record used (None when no pattern asked,
+        so the record is read only then)."""
         if not any(_CLUSTER_PLACEHOLDER.search(p) for p in self.forbidden_patterns + self.any_of_patterns):
-            return self.forbidden_patterns, self.any_of_patterns
+            return self.forbidden_patterns, self.any_of_patterns, None
         clusters = recorded_clusters()
         return (
             [self.expand_cluster_placeholders(p, clusters) for p in self.forbidden_patterns],
             [self.expand_cluster_placeholders(p, clusters) for p in self.any_of_patterns],
+            clusters,
         )
 
     def verify(self, timeout_sec: float) -> VerificationResult:
@@ -468,13 +513,13 @@ class ReportContainsVerifier(BaseVerifier):
                     success=False, status="error", elapsed_time=time.monotonic() - start, reason=f"{_UNRESOLVED_ROLES_REASON}: {exc}"
                 )
         try:
-            forbidden_patterns, any_of_patterns = self._expanded_patterns()
+            forbidden_patterns, any_of_patterns, clusters = self._expanded_patterns()
         except KeyError as exc:
             return VerificationResult(
                 success=False, status="error", elapsed_time=time.monotonic() - start,
                 reason=f"{_UNRECORDED_SLOT_REASON}: slot {exc.args[0]!r} has no cluster record in the runner's context file",
             )
-        except FleetRoleUnresolved as exc:
+        except (LookupError, FleetRoleUnresolved) as exc:
             return VerificationResult(
                 success=False, status="error", elapsed_time=time.monotonic() - start, reason=f"{_UNRECORDED_SLOT_REASON}: {exc}"
             )
@@ -491,12 +536,19 @@ class ReportContainsVerifier(BaseVerifier):
         missing = [p for p in self.required_phrases if _normalize(p) not in text]
         present = [p for p in self.forbidden_phrases if _normalize(p) in text]
         lines = _normalize_lines(raw, fold_decoration=self.fold_decoration)
-        pattern_hits = [p for p in forbidden_patterns if re.search(p, lines)]
+        try:
+            # Reported in the case's own spelling: the expanded frame is not a
+            # thing a reader of results.json can recognise.
+            pattern_hits = [self.forbidden_patterns[i] for i, p in enumerate(forbidden_patterns) if re.search(p, lines)]
+            any_pattern_miss = bool(any_of_patterns) and not any(
+                re.search(p, lines) for p in any_of_patterns
+            )
+        except re.error as exc:
+            return VerificationResult(
+                success=False, status="error", elapsed_time=time.monotonic() - start, reason=f"{_PATTERN_EXPANSION_REASON}: {exc}"
+            )
         any_of_miss = bool(self.any_of_phrases) and not any(
             _normalize(p) in text for p in self.any_of_phrases
-        )
-        any_pattern_miss = bool(any_of_patterns) and not any(
-            re.search(p, lines) for p in any_of_patterns
         )
         if missing or present or pattern_hits or any_of_miss or any_pattern_miss:
             parts = []
@@ -516,6 +568,11 @@ class ReportContainsVerifier(BaseVerifier):
                 parts.append(
                     f"none of the alternative patterns matched: {self.any_of_patterns}"
                 )
+            if clusters is not None and (pattern_hits or any_pattern_miss):
+                # Which name each slot stood for in this project, so a miss
+                # can be read against what the agent wrote.
+                resolved = {slot: f"{name} ({location})" if location else name for slot, (name, location) in sorted(clusters.items())}
+                parts.append(f"cluster placeholders resolved to {resolved}")
             return VerificationResult(
                 success=False,
                 elapsed_time=time.monotonic() - start,

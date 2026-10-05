@@ -25,9 +25,11 @@ The mapping from role to cluster is NOT here. It lives in
 and at run time ``hack/fleet-kubeconfigs.sh`` is the only thing that reads it:
 for each role it writes ``<dir>/<role>.kubeconfig`` holding credentials for
 whichever cluster of the leased project's fleet carries that role, once the
-role's objects are confirmed there; for each seeded cluster it reached it
-writes ``<dir>/clusters/<slot>.kubeconfig`` first, and it records the slot of
-every catalogue role in ``<dir>/.fleet-context`` (``slot.<role>=<slot>``).
+role's objects are confirmed there; before that, it records the slot of
+every catalogue role in ``<dir>/.fleet-context`` (``slot.<role>=<slot>``), and
+for each seeded cluster it reached it writes ``<dir>/clusters/<slot>.kubeconfig``
+and records the cluster's name and location (``cluster.<slot>=``,
+``location.<slot>=``).
 This module's whole job is the last hop -- role name to file path, by either
 route -- which keeps the resolution single-sourced and makes this side
 testable without a cloud.

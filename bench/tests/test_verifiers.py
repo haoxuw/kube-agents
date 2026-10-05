@@ -4615,6 +4615,64 @@ def test_a_pattern_naming_an_unrecorded_slot_is_an_error_not_a_miss():
     assert "slot 'q'" in res.reason
 
 
+def test_the_frame_bounds_the_name_itself_wherever_the_placeholder_sits():
+    """The contract is the frame's, not the pattern's: an unanchored
+    placeholder still refuses a longer token on either side."""
+    expand = verifiers.ReportContainsVerifier.expand_cluster_placeholders
+    loose = expand("{cluster:a} is down", {"a": ("seeded-a", "us-central1-a")})
+    assert re.search(loose, "seeded-a is down")
+    assert re.search(loose, "p-seeded-a is down")
+    assert re.search(loose, "p-seeded-a-us-central1-a is down")
+    assert not re.search(loose, "unseeded-a is down")
+    assert not re.search(loose, "xseeded-a is down")
+    assert not re.search(loose, "seeded-a-canary is down")
+    assert not re.search(loose, "seeded-a-us-west1 is down")
+    assert not re.search(loose, "seeded-a-us-central1-a-extra is down")
+    # a quantifier after the placeholder binds to the whole frame
+    optional = expand("^{cluster:a}?: x$", {"a": ("seeded-a", "")})
+    assert re.search(optional, ": x") and re.search(optional, "seeded-a: x")
+
+
+@pytest.mark.parametrize(
+    "pattern, needle",
+    [
+        ("(?<={cluster:a}): x", "does not compile once"),
+        ("^[{cluster:a}]$", "does not compile once"),
+        ("{cluster: a}: x", "malformed cluster placeholder"),
+        ("{Cluster:a}: x", "malformed cluster placeholder"),
+        ("{cluster:a: x", "malformed cluster placeholder"),
+    ],
+)
+def test_a_pattern_the_expansion_breaks_or_a_mistyped_placeholder_fails_at_spec_load(pattern, needle):
+    with pytest.raises(Exception) as excinfo:
+        parse_node({"type": "report_contains", "any_of_patterns": [pattern]})
+    assert needle in str(excinfo.value)
+
+
+def test_any_with_no_recorded_slot_says_so_rather_than_naming_a_slot():
+    v = parse_node({"type": "report_contains", "any_of_patterns": ["(?m)^{cluster:any}: ok$"]})
+    _stash("seeded-a: ok")
+    with tempfile.TemporaryDirectory(prefix="zonal-fleet-") as root:
+        _write_fleet_dir(Path(root), [])
+        with mock.patch.dict(os.environ, {fleet.FLEET_KUBECONFIG_DIR_ENV: root}):
+            res = v.verify(5.0)
+    assert res.status == "error"
+    assert "recorded none" in res.reason and "no slot at all" not in res.reason
+
+
+def test_a_miss_is_reported_in_the_cases_spelling_with_the_names_the_slots_resolved_to():
+    forbid = parse_node({"type": "report_contains", "forbidden_patterns": ["(?m)^{cluster:a}: bad$"], "any_of_patterns": ["(?m)^{cluster:b}: good$"]})
+    _stash("seeded-a: bad\nseeded-b: meh")
+    with tempfile.TemporaryDirectory(prefix="zonal-fleet-") as root:
+        _write_fleet_dir(Path(root), _zonal_case_fixtures())
+        with mock.patch.dict(os.environ, {fleet.FLEET_KUBECONFIG_DIR_ENV: root}):
+            res = forbid.verify(5.0)
+    assert res.status == "fail"
+    assert "['(?m)^{cluster:a}: bad$']" in res.reason, res.reason
+    assert "(?<![a-z0-9])" not in res.reason, "the expanded frame is not the case's spelling"
+    assert "'a': 'seeded-a (us-central1-a)'" in res.reason, res.reason
+
+
 def test_cluster_placeholders_expand_to_escaped_recorded_names():
     frame = verifiers.ReportContainsVerifier.expand_cluster_placeholders("^{cluster:a}: x$", {"a": ("seeded-a", "us-central1-a")})
     assert re.search(frame, "seeded-a: x")

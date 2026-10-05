@@ -413,6 +413,66 @@ def known_domains() -> set[str]:
     return {d["slug"] for d in data.get("domains") or []}
 
 
+# `{cluster:<slot>}` in a report_contains pattern, as bench/kube_agents_bench/
+# verifiers.py's _CLUSTER_PLACEHOLDER reads it (this script is stdlib-only, so
+# the regex is restated here; the verifier owns it).
+CLUSTER_PLACEHOLDER = re.compile(r"\{cluster:([a-z0-9-]+)\}")
+CLUSTER_PLACEHOLDER_LOOSE = re.compile(r"\{\s*cluster\s*:", re.IGNORECASE)
+CLUSTER_PLACEHOLDER_OPENER = "{cluster:"
+CLUSTER_PLACEHOLDER_ANY = "any"
+PATTERN_LIST_KEYS = ("forbidden_patterns", "any_of_patterns", "required_patterns")
+REPORT_CHECK_TYPE = "report_contains"
+
+
+def _catalog_slots() -> set[str]:
+    """Cluster slots the catalogue declares, by its `cluster_slots` block and
+    by the slot every role names."""
+    try:
+        data = json.loads(ROLE_CATALOG.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CaseError(f"{ROLE_CATALOG}: could not be parsed as JSON: {exc}") from exc
+    slots = set((data.get("cluster_slots") or {}).keys())
+    for spec in (data.get("roles") or {}).values():
+        if isinstance(spec, dict) and isinstance(spec.get("cluster_slot"), str):
+            slots.add(spec["cluster_slot"])
+    return slots
+
+
+def _cluster_placeholders(node: Any, where: str, problems: list[str], slots: set[str], parked: bool) -> None:
+    """Every `{cluster:...}` in a check subtree names a catalogue slot or
+    `any`, is well-formed, and sits in a report_contains pattern list: the
+    verifier expands it from the runner's record, so anything else errors on
+    every run or compiles as literal text that never matches."""
+    if not isinstance(node, dict):
+        return
+    for key in PATTERN_LIST_KEYS:
+        for pattern in node.get(key) or []:
+            if not isinstance(pattern, str):
+                continue
+            if node.get("type") != REPORT_CHECK_TYPE:
+                if CLUSTER_PLACEHOLDER_LOOSE.search(pattern):
+                    problems.append(
+                        f"{where}: {key!r} on a {node.get('type')!r} check carries {CLUSTER_PLACEHOLDER_OPENER}...}}, "
+                        f"which only {REPORT_CHECK_TYPE} expands; elsewhere it is literal text that never matches"
+                    )
+                continue
+            if CLUSTER_PLACEHOLDER_LOOSE.search(CLUSTER_PLACEHOLDER.sub("", pattern)):
+                problems.append(
+                    f"{where}: {key!r} carries a malformed cluster placeholder; the form is "
+                    f"{{cluster:<slot>}} or {{cluster:{CLUSTER_PLACEHOLDER_ANY}}}, lowercase, no spaces"
+                )
+            if not parked:
+                for slot in CLUSTER_PLACEHOLDER.findall(pattern):
+                    if slot != CLUSTER_PLACEHOLDER_ANY and slot not in slots:
+                        problems.append(
+                            f"{where}: {key!r} names {{cluster:{slot}}}, a slot the fleet catalogue does not "
+                            f"declare ({', '.join(sorted(slots))}); the runner records no cluster for it, so "
+                            "the check would error on every run"
+                        )
+    for child in node.get("checks") or []:
+        _cluster_placeholders(child, where, problems, slots, parked)
+
+
 def _catalog_roles() -> dict[str, Any]:
     """Roles in bench/tf/fleet/fixtures.json, which owns the vocabulary."""
     try:
@@ -805,6 +865,7 @@ def validate_case(name: str, path: pathlib.Path, *, registered: set[str] | None)
                 _fixture_roles_shape(entry["check"], where, problems)
                 _check_types(entry["check"], used_types)
                 _fixture_roles(entry["check"], used_roles, slot_roles)
+                _cluster_placeholders(entry["check"], where, problems, _catalog_slots(), name in FIXTURE_NOT_READY)
 
         # `fixture_roles:` asks whether a role's slot was reached, which the
         # runner records for catalogue roles only; an overlay role with no

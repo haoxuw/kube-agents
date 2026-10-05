@@ -186,8 +186,13 @@ spells a declared line once and should keep `\n` out of its gaps, for what no su
 express: a banned word whose negated uses are legitimate, and a required claim whose
 subject and verb an adverb or a tense can separate; `{cluster:<slot>}` in either list stands for the
 cluster the runner recorded for that slot, bare or as the last joined component of a longer id and
-optionally followed by its recorded location, and `{cluster:any}` for every recorded slot, so a case
-names which cluster rather than what a cluster's name looks like; its `fixture_roles` names the seeded-fleet
+optionally followed by its recorded location, bounded on both sides by the expansion itself (so
+`unseeded-a` and `seeded-a-canary` are never slot a, whatever surrounds the placeholder), and
+`{cluster:any}` for every recorded slot, so a case names which cluster rather than what a cluster's
+name looks like; a placeholder naming a slot the runner recorded no cluster for returns
+`status: "error"`, like an unreached `fixture_roles` slot, and because an unreached slot is absent
+from `{cluster:any}` rather than forbidden, a case that forbids through it lists a `fixture_roles`
+entry for every slot it means; its `fixture_roles` names the seeded-fleet
 roles whose clusters the patterns require a line about, each resolved to its slot's own
 credential (`clusters/<slot>.kubeconfig`, written for every seeded cluster the runner reached,
 before any role on it is confirmed), and a slot the runner did not reach returns

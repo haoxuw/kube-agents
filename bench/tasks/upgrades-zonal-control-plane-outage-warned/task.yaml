@@ -17,10 +17,12 @@
 # for a negation or a generic statement: a value is one of two words, and
 # the line names the cluster it is about.
 #
-# The slot names the patterns anchor on (`seeded-a` to `seeded-d`) are the
-# default-prefix renderings of bench/tf/fleet's slots, as in every sibling
-# case that names a slot: a fleet applied with another prefix renames them,
-# and the patterns here, like the siblings', read the default.
+# The patterns name the four slots through `{cluster:<slot>}`, which the
+# verifier expands to whatever cluster the runner recorded for the slot in
+# the leased project, so a fleet applied with another prefix is graded on
+# its own names; `seeded-a` to `seeded-d` appear below only in the prompt
+# and the expected output, as the default-prefix rendering. The rule is
+# spelled out beside the verification spec.
 #
 # Isolation class: read-only (chat prompt; no audit helper, no GitOps-repo
 # write). Eligible tier: nightly.
