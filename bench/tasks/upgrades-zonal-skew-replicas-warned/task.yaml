@@ -76,7 +76,7 @@ verification_spec:
       fixture_roles:
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: [^\n]+$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: [^\n]+$'
 
   - name: the-declared-line-says-all-replicas-share-a-zone
     role: objective
@@ -87,10 +87,10 @@ verification_spec:
       fixture_roles:
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use 1; all replicas in one zone: yes; cause: [^\n]+$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use 1; all replicas in one zone: yes; cause: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?!yes;)[^;\n]+; cause: [^\n]+$'
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use (?!1;)\d+; all replicas in one zone: [^;\n]+; cause: [^\n]+$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?!yes;)[^;\n]+; cause: [^\n]+$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use (?!1;)\d+; all replicas in one zone: [^;\n]+; cause: [^\n]+$'
 
   # The cause: the required affinity, the spread that only prefers, or the
   # two named together, which is the reading the fixture's own description
@@ -104,9 +104,9 @@ verification_spec:
       fixture_roles:
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: (?:node affinity|spread constraint)(?:(?:,| and| \+|/| with| under) ?(?:node affinity|spread constraint))?$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: (?:node affinity|spread constraint)(?:(?:,| and| \+|/| with| under) ?(?:node affinity|spread constraint))?$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: (?!(?:node affinity|spread constraint)(?:(?:,| and| \+|/| with| under) ?(?:node affinity|spread constraint))?$)[^\n]+$'
+        - '(?m)^{cluster:d}(?:\s*\([^)\n]*\))?/seeded-topology/zone-pinned-api: replicas \d+; zones in use \d+; all replicas in one zone: (?:yes|no); cause: (?!(?:node affinity|spread constraint)(?:(?:,| and| \+|/| with| under) ?(?:node affinity|spread constraint))?$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

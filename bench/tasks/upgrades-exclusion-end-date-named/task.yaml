@@ -73,7 +73,7 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-states-the-scope
     role: objective
@@ -86,9 +86,9 @@ verification_spec:
       # "nominorupgrades" and no_minor_upgrades as "no-minor-upgrades"; the
       # optional separators cover both and a spaced spelling.
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope no[-_ ]?minor[-_ ]?upgrades; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope no[-_ ]?minor[-_ ]?upgrades; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope (?!no[-_ ]?minor[-_ ]?upgrades;)[^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope (?!no[-_ ]?minor[-_ ]?upgrades;)[^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-states-the-end-date
     role: objective
@@ -99,9 +99,9 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends 20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends 20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?; holds the automatic minor upgrade: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends (?!20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?;)[^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends (?!20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?;)[^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-says-it-holds-the-automatic-upgrade
     role: objective
@@ -112,9 +112,9 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: yes$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: yes$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?!yes$)[^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?!yes$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

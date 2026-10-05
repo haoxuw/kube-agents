@@ -76,7 +76,7 @@ verification_spec:
       fixture_roles:
         - readiness-pinned-workload
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: [^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: [^\n]+$'
 
   - name: the-declared-line-says-no-replacement-comes-first
     role: objective
@@ -87,9 +87,9 @@ verification_spec:
       fixture_roles:
         - readiness-pinned-workload
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: no; workloads pinned to this pool: [^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: no; workloads pinned to this pool: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?!no;)[^;\n]+; workloads pinned to this pool: [^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?!no;)[^;\n]+; workloads pinned to this pool: [^\n]+$'
 
   - name: the-declared-line-names-the-pinned-workload
     role: objective
@@ -100,9 +100,9 @@ verification_spec:
       fixture_roles:
         - readiness-pinned-workload
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: (?:[a-z0-9][a-z0-9./_-]*(?:, ?|,? and ))*(?:[a-z0-9][a-z0-9./_-]*/)?pinned-batch-runner(?:(?:, ?|,? and )[a-z0-9][a-z0-9./_-]*)*$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: (?:[a-z0-9][a-z0-9./_-]*(?:, ?|,? and ))*(?:[a-z0-9][a-z0-9./_-]*/)?pinned-batch-runner(?:(?:, ?|,? and )[a-z0-9][a-z0-9./_-]*)*$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: (?!(?:[a-z0-9][a-z0-9./_-]*(?:, ?|,? and ))*(?:[a-z0-9][a-z0-9./_-]*/)?pinned-batch-runner(?:(?:, ?|,? and )[a-z0-9][a-z0-9./_-]*)*$)[^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/no-surge-pool: nodes \d+; replacement node first: (?:yes|no); workloads pinned to this pool: (?!(?:[a-z0-9][a-z0-9./_-]*(?:, ?|,? and ))*(?:[a-z0-9][a-z0-9./_-]*/)?pinned-batch-runner(?:(?:, ?|,? and )[a-z0-9][a-z0-9./_-]*)*$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

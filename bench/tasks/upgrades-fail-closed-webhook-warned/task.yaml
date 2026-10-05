@@ -79,7 +79,7 @@ verification_spec:
       fixture_roles:
         - readiness-failclosed-webhook
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?:yes|no)$'
 
   - name: the-declared-line-says-it-fails-closed
     role: objective
@@ -90,9 +90,9 @@ verification_spec:
       fixture_roles:
         - readiness-failclosed-webhook
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy fail; backend reachable: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy fail; backend reachable: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?!fail;)[^;\n]+; backend reachable: [^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?!fail;)[^;\n]+; backend reachable: [^\n]+$'
 
   # The defect proper: the backend is not there.
   - name: the-declared-line-says-the-backend-is-unreachable
@@ -104,9 +104,9 @@ verification_spec:
       fixture_roles:
         - readiness-failclosed-webhook
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: no$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: no$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?!no$)[^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-fail-closed-gate: failurepolicy (?:fail|ignore); backend reachable: (?!no$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective
