@@ -68,7 +68,7 @@ verification_spec:
       fixture_roles:
         - node-local-state
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: (?:yes|no)$'
 
   - name: the-declared-line-names-the-queue-volume
     role: objective
@@ -79,9 +79,9 @@ verification_spec:
       fixture_roles:
         - node-local-state
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]*(?<![/\w-])queue(?![/\w-])[^;\n]*; survives a node rebuild: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]*(?<![/\w-])queue(?![/\w-])[^;\n]*; survives a node rebuild: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes (?![^;\n]*(?<![/\w-])queue(?![/\w-]))[^;\n]+; survives a node rebuild: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes (?![^;\n]*(?<![/\w-])queue(?![/\w-]))[^;\n]+; survives a node rebuild: (?:yes|no)$'
 
   - name: the-declared-line-says-the-state-does-not-survive
     role: objective
@@ -92,9 +92,9 @@ verification_spec:
       fixture_roles:
         - node-local-state
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: no$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: no$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: (?!no$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/cache-on-emptydir: node-local volumes [^;\n]+; survives a node rebuild: (?!no$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

@@ -67,7 +67,7 @@ verification_spec:
       fixture_roles:
         - containerd-socket-agent
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path [^\n]+$'
 
   - name: the-declared-line-says-the-socket-is-mounted
     role: objective
@@ -78,9 +78,9 @@ verification_spec:
       fixture_roles:
         - containerd-socket-agent
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: yes; path [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: yes; path [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?!yes;)[^;\n]+; path [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?!yes;)[^;\n]+; path [^\n]+$'
 
   - name: the-declared-line-names-the-containerd-socket-path
     role: objective
@@ -91,9 +91,9 @@ verification_spec:
       fixture_roles:
         - containerd-socket-agent
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path /run/containerd/containerd\.sock$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path /run/containerd/containerd\.sock$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path (?!/run/containerd/containerd\.sock$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/node-runtime-probe: runtime socket mounted: (?:yes|no); path (?!/run/containerd/containerd\.sock$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

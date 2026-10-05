@@ -63,7 +63,7 @@ verification_spec:
       fixture_roles:
         - retired-registry-image
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: (?:yes|no)$'
 
   - name: the-declared-line-names-the-retired-host
     role: objective
@@ -74,9 +74,9 @@ verification_spec:
       fixture_roles:
         - retired-registry-image
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host k8s\.gcr\.io; retired: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host k8s\.gcr\.io; retired: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host (?!k8s\.gcr\.io;)[^;\n]+; retired: (?:yes|no)$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host (?!k8s\.gcr\.io;)[^;\n]+; retired: (?:yes|no)$'
 
   - name: the-declared-line-says-the-host-is-retired
     role: objective
@@ -87,9 +87,9 @@ verification_spec:
       fixture_roles:
         - retired-registry-image
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: yes$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: yes$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: (?!yes$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/legacy-registry-pull: image [^;\n]+; registry host [^;\n]+; retired: (?!yes$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

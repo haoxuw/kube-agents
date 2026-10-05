@@ -63,7 +63,7 @@ verification_spec:
       fixture_roles:
         - deprecated-label-selector
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: (?:yes|no); replacement [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: (?:yes|no); replacement [^\n]+$'
 
   - name: the-declared-line-names-the-beta-arch-label
     role: objective
@@ -74,9 +74,9 @@ verification_spec:
       fixture_roles:
         - deprecated-label-selector
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label beta\.kubernetes\.io/arch; deprecated: (?:yes|no); replacement [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label beta\.kubernetes\.io/arch; deprecated: (?:yes|no); replacement [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label (?!beta\.kubernetes\.io/arch;)[^;\n]+; deprecated: (?:yes|no); replacement [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label (?!beta\.kubernetes\.io/arch;)[^;\n]+; deprecated: (?:yes|no); replacement [^\n]+$'
 
   - name: the-declared-line-says-it-is-deprecated-and-names-the-replacement
     role: objective
@@ -87,9 +87,9 @@ verification_spec:
       fixture_roles:
         - deprecated-label-selector
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: yes; replacement kubernetes\.io/arch$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: yes; replacement kubernetes\.io/arch$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: (?!yes; replacement kubernetes\.io/arch$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?/seeded-shapes/arch-pinned-worker: label [^;\n]+; deprecated: (?!yes; replacement kubernetes\.io/arch$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective
