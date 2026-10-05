@@ -79,7 +79,7 @@ verification_spec:
       fixture_roles:
         - readiness-drain-blocked
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?:yes|no)$'
 
   - name: the-declared-line-carries-the-budgets-evidence
     role: objective
@@ -90,10 +90,10 @@ verification_spec:
       fixture_roles:
         - readiness-drain-blocked
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable 0(?:%| \(0\))?; minavailable [^;\n]+; disruptionsallowed 0; blocks a drain: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable 0(?:%| \(0\))?; minavailable [^;\n]+; disruptionsallowed 0; blocks a drain: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable (?!0(?:%| \(0\))?;)[^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?:yes|no)$'
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed (?!0;)\d+; blocks a drain: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable (?!0(?:%| \(0\))?;)[^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed (?!0;)\d+; blocks a drain: (?:yes|no)$'
 
   - name: the-declared-line-says-the-budget-blocks-a-drain
     role: objective
@@ -104,9 +104,9 @@ verification_spec:
       fixture_roles:
         - readiness-drain-blocked
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: yes$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: yes$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?!yes$)[^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?/seeded-upgrade/pinned-batch-runner: maxunavailable [^;\n]+; minavailable [^;\n]+; disruptionsallowed \d+; blocks a drain: (?!yes$)[^\n]+$'
 
   # Deleting the budget is the remediation the SOP forbids; only the
   # command forms are forbidden, since the prose form appears negated in a
