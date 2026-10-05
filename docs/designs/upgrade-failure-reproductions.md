@@ -188,7 +188,9 @@ where to look, mitigation and what reads it today: [catalogue entry
 Harness: `scenarios/08.sh` and the hold `08h`; `bash run.sh 08`. Reproduced: the 1.33 kubelet
 refused the gitRepo volume with FailedMount on the new node.
 
-Fleet: version-bound and not for the fleet: the before-state needs a kubelet below 1.33, which only
+Fleet: `moving-admission-default` on seeded-a (the `seeded-defaults` namespace, Pod Security `baseline`
+pinned to version `latest`, with a compliant worker) carries the shape without a version bound: the
+rule set changes under the namespace at every minor. The gitRepo reproduction itself is version-bound: the before-state needs a kubelet below 1.33, which only
 the EXTENDED channel offers.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/08.sh`, evidence
@@ -216,7 +218,8 @@ Partial: GKE let a 1.35 control plane run over 1.31 nodes, four minors apart, wi
 a new pod, its logs and exec kept working; the add-on half was not planted and kubectl's skew
 warning was not captured.
 
-Fleet: no role on `main`; seeded-b's pool takes its control plane's pin on purpose, so the skew
+Fleet: `stale-client-skew` on seeded-a (`stale-kubectl-client`, `kubectl` v1.29.0 against the control
+plane every ten minutes) carries the client half; seeded-b's pool takes its control plane's pin on purpose, so the node skew
 cannot be planted there.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/10b.sh` (after `10.sh` on the same cluster),
@@ -276,7 +279,7 @@ pool can still be created on a 1.34 cluster, GKE refused its 1.35 upgrade with a
 the migration to v2 first, and after the migration the old JVM was OOMKilled five times while a
 fixed JVM stayed up.
 
-Fleet: no role on `main`, and none would hold for long: GKE migrates a cgroup v1 pool to v2 at 1.33 and refuses v1 at 1.35, so the before-state has a shelf life the fleet's auto-upgrade sets.
+Fleet: `cgroup-blind-runtime` on seeded-a (`cgroup-blind-jvm`, eclipse-temurin 8u302 under a memory limit) carries the runtime half, which no node change heals; a cgroup v1 pool would not hold, since GKE migrates one to v2 at 1.33 and refuses v1 at 1.35.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/14c.sh` (`14.sh` is the symptom alone), evidence
 `bench/upgrade-scenarios/evidence/14c/cgroup.txt`, and item 14 of the harness README. Detection,
@@ -290,7 +293,7 @@ three-process container over its limit was killed whole and crash-looped, and th
 with singleProcessOomKill true kept running; no upgrade crossed the 1.28 boundary, so only the
 symptom is shown.
 
-Fleet: no role on `main`; the symptom needs a multi-process container over its limit, which no
+Fleet: `multi-process-container` on seeded-a (`multi-process-worker`, two forked workers under one 32Mi limit) carries the shape without the symptom; the symptom needs a multi-process container over its limit, which no
 standing fixture should run.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/15.sh`, evidence
@@ -319,7 +322,7 @@ only where a hand-set label was, the rebuilt node lacked the label, the DaemonSe
 the client on the new node got Connection refused, with the operation DONE; GKE's own node agents
 cannot be broken from outside.
 
-Fleet: no role on `main`, and none would hold: the hand-set label the DaemonSet selects on is what a node rebuild drops, so GKE's own patch upgrades would turn the fixture into the after-state.
+Fleet: `node-image-coupled-agent` on seeded-a (`cni-shaped-agent`, host networking plus `/etc/cni/net.d` mounted read-only) carries the coupling without a hand-set label, which a node rebuild would drop and so turn the fixture into the after-state.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/17.sh`, evidence
 `bench/upgrade-scenarios/evidence/17/node-agent.txt`, and item 17 of the harness README. Detection,
@@ -337,7 +340,7 @@ forward-compatibility libraries a planted pod forced (Error 803). The upgrade re
 catalogue's condition rather than creating it, and two runs lost their only GPU node to a stockout
 mid-upgrade while the operation read DONE.
 
-Fleet: never the fleet, which carries no accelerator.
+Fleet: `cuda-pinned-gpu-job` on seeded-a (`cuda-pinned-trainer`, a suspended CronJob requesting one GPU with a CUDA 12.2 image) carries the manifest; the fleet has no accelerator, so the job never runs.
 
 Reproduction: `bench/upgrade-scenarios/scenarios/18k.sh` (`18m.sh` repeats it in another zone; both
 source `18.sh`; the forward-compatibility round is `bench/upgrade-scenarios/compat-probe.sh`),

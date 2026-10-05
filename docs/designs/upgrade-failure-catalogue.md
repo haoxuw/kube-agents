@@ -389,7 +389,7 @@ without anyone changing it.
 - GKE recommender: only where GKE files the default change as a removal, such as `DEPRECATION_K8S_1_25_PODSECURITYPOLICY`, or `EXEC_PROBE_TIMEOUT` for exec probes that overrun their timeout, which GKE enforces from 1.35.
 - Why it is on the list: the PodSecurityPolicy removal in 1.25; the `gitRepo` volume, which the kubelet refuses by
   default from 1.33 (the reproduction's 1.33 node failed the mount) and
-  [1.36](https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/) disables for good.
+  [1.36](https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/) disables for good. The seeded fleet plants its shape on seeded-a as the `moving-admission-default` role.
 
 ### 9. A feature is deprecated but still served
 
@@ -425,7 +425,7 @@ behind the control plane breaks the kubelet's own contract.
 - Read today: the readiness mode grades node-pool skew; add-on skew is unread.
 - GKE recommender: `CLUSTER_VERSION_SKEW_UNSUPPORTED` for node pools too far behind and `CLUSTER_VERSION_END_OF_LIFE` for a control plane past standard support ([versioning](https://docs.cloud.google.com/kubernetes-engine/versioning)); nothing for add-ons.
 - Why it is on the list: the Calico teardown race on GKE 1.22 in the incidents, an add-on known
-  issue.
+  issue. The seeded fleet plants its shape on seeded-a as the `stale-client-skew` role.
 
 ### 11. The control plane is unreachable for minutes on a zonal cluster
 
@@ -500,7 +500,7 @@ so for such a pool the flip does arrive with the minor.
 - Read today: nothing.
 - GKE recommender: none verified.
 - Why it is on the list: the Kubernetes cgroup v2 documentation names the runtime versions; no
-  public incident verified.
+  public incident verified. The seeded fleet plants its shape on seeded-a as the `cgroup-blind-runtime` role.
 
 ### 15. The OOM killer starts killing the whole container
 
@@ -528,7 +528,7 @@ misreads its limit.
   [write-up by the opt-out's authors](https://tech.preferred.jp/en/blog/kubernetes-single-process-oom-kill/)
   the explanation, and 2i2c's
   [EKS 1.32 to 1.34 regression](https://2i2c.org/blog/kubernetes-cgroup-changes/), where a node
-  image change turned cgroup v2 on under a kubelet already past 1.28, the incident.
+  image change turned cgroup v2 on under a kubelet already past 1.28, the incident. The seeded fleet plants its shape on seeded-a as the `multi-process-container` role.
 
 ### 16. The network dataplane changes
 
@@ -564,7 +564,7 @@ CNI's own control components are hit, cluster-wide within minutes.
 - GKE recommender: none.
 - Why it is on the list: Reddit's 1.24 outage was the CNI losing its route reflectors when a node
   label went away; the Datadog and Heroku outages in the incidents are the same shape, triggered by
-  an OS update rather than an upgrade.
+  an OS update rather than an upgrade. The seeded fleet plants its shape on seeded-a as the `node-image-coupled-agent` role.
 
 ### 18. GPU driver mismatch
 
@@ -584,7 +584,7 @@ older driver, stops working once the node's driver is newer than those libraries
 - GKE recommender: none.
 - Why it is on the list: frequent on accelerator pools; no public incident verified. The
   [reproduction](../../bench/upgrade-scenarios/README.md) saw the second direction: the 1.34 node image moved the driver from
-  R535 to R580 and both pods carrying forward-compatibility libraries failed with `Error 803`.
+  R535 to R580 and both pods carrying forward-compatibility libraries failed with `Error 803`. The seeded fleet plants its shape on seeded-a as the `cuda-pinned-gpu-job` role.
 
 ### 19. In-tree volumes lose their CSI path
 

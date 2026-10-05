@@ -306,6 +306,29 @@ def healthy_world(*projects):
                 "status": {"readyReplicas": 1, "replicas": 1},
             },
             "pod?app=legacy-registry-pull": _pods(_pod(restarts=0, last_reason=None)),
+            # the six group-5 shapes: an admission pin to the moving rule set, a stale
+            # client, a pre-cgroup-v2 JVM, a multi-process container, a
+            # network-plugin-shaped agent and a suspended GPU job.
+            "namespace/seeded-defaults": {"metadata": {"name": "seeded-defaults", "labels": {"kubernetes.io/metadata.name": "seeded-defaults", "managed-by": "kube-agents-seeded-fleet", "pod-security.kubernetes.io/enforce": "baseline", "pod-security.kubernetes.io/enforce-version": "latest", "pod-security.kubernetes.io/warn": "baseline", "pod-security.kubernetes.io/warn-version": "latest"}}},
+            "deployment/baseline-edge-worker": {"status": {"readyReplicas": 1, "replicas": 1}},
+            "pod?app=baseline-edge-worker": _pods(_pod(restarts=0, last_reason=None)),
+            "cronjob/stale-kubectl-client": {"spec": {"schedule": "*/10 * * * *", "suspend": False, "jobTemplate": {"spec": {"template": {"spec": {"containers": [{"name": "kubectl", "image": "registry.k8s.io/kubectl:v1.29.0"}]}}}}}},
+            "job?app=stale-kubectl-client": {"items": [{"status": {"succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}]}}]},
+            "deployment/cgroup-blind-jvm": {
+                "spec": {"template": {"spec": {"containers": [{"name": "jvm", "image": "docker.io/library/eclipse-temurin:8u302-b08-jre", "resources": {"limits": {"memory": "192Mi"}}}]}}},
+                "status": {"readyReplicas": 1, "replicas": 1},
+            },
+            "pod?app=cgroup-blind-jvm": _pods(_pod(restarts=0, last_reason=None)),
+            "deployment/multi-process-worker": {
+                "spec": {"template": {"spec": {"containers": [{"name": "supervisor", "command": ["sh", "-c", "sleep infinity & sleep infinity & wait"], "resources": {"limits": {"memory": "32Mi"}}}]}}},
+                "status": {"readyReplicas": 1, "replicas": 1},
+            },
+            "pod?app=multi-process-worker": _pods(_pod(restarts=0, last_reason=None)),
+            "daemonset/cni-shaped-agent": {
+                "spec": {"template": {"spec": {"hostNetwork": True, "volumes": [{"name": "cni-conf", "hostPath": {"path": "/etc/cni/net.d", "type": "Directory"}}]}}},
+                "status": {"desiredNumberScheduled": 2, "numberReady": 2},
+            },
+            "cronjob/cuda-pinned-trainer": {"spec": {"schedule": "0 3 * * *", "suspend": True, "jobTemplate": {"spec": {"template": {"spec": {"nodeSelector": {"cloud.google.com/gke-accelerator": "nvidia-l4"}, "containers": [{"name": "trainer", "image": "docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04"}]}}}}}},
         },
         "describe": {project: {"seeded-b": _cluster_b(), "seeded-c": {"currentMasterVersion": "1.34.1-gke.1"}} for project in projects},
         "server_config": {"channels": [{"channel": "REGULAR", "defaultVersion": "1.34.1-gke.1"}]},
@@ -385,10 +408,10 @@ class HealthyScan(ScanHarness):
         self.assertEqual(set(self.states(doc).values()), {"healthy"})
         self.assertEqual(set(self.states(doc)), set(self.roles))
         entry = doc["projects"][PROJECT]
-        self.assertEqual(entry["summary"], {"healthy": 22, "drifted": 0, "not_checked": 0})
+        self.assertEqual(entry["summary"], {"healthy": 28, "drifted": 0, "not_checked": 0})
         self.assertEqual(entry["reader"], "seeded-fleet-reader@kube-agents-evals-2.iam.gserviceaccount.com")
         self.assertNotIn("error", entry)
-        self.assertEqual(doc["summary"], {"projects": 1, "checked": 1, "drifted_projects": 0, "healthy": 22, "drifted": 0, "not_checked": 0})
+        self.assertEqual(doc["summary"], {"projects": 1, "checked": 1, "drifted_projects": 0, "healthy": 28, "drifted": 0, "not_checked": 0})
         self.assertEqual(doc["previous"], {"scanned_at": None, "drifted": {}})
         self.assertEqual(err, "")
 
@@ -442,7 +465,7 @@ class Drift(ScanHarness):
         doc, _ = self.scan(world, projects=(PROJECT, OTHER))
         self.assertEqual(set(self.states(doc, PROJECT).values()), {"healthy"})
         self.assertEqual(self.states(doc, OTHER)["crashloop-workload"], "drifted")
-        self.assertEqual(doc["summary"], {"projects": 2, "checked": 2, "drifted_projects": 1, "healthy": 43, "drifted": 1, "not_checked": 0})
+        self.assertEqual(doc["summary"], {"projects": 2, "checked": 2, "drifted_projects": 1, "healthy": 55, "drifted": 1, "not_checked": 0})
 
 
 class NotChecked(ScanHarness):

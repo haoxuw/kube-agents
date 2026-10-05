@@ -93,9 +93,9 @@ whose own rule is that the project is registered last.
 
 ## The roles
 
-Twenty-three fixtures: twenty-two across the four cluster slots and one project-scoped. Most in-cluster
-fixtures are on slot `a`, across the eight seeded namespaces `seeded-debug`,
-`seeded-reliability`, `seeded-security`, `seeded-capacity`, `seeded-deprecation`, `seeded-intent`, `seeded-stall` and `seeded-shapes`, plus both
+Twenty-nine fixtures: twenty-eight across the four cluster slots and one project-scoped. Most in-cluster
+fixtures are on slot `a`, across the nine seeded namespaces `seeded-debug`,
+`seeded-reliability`, `seeded-security`, `seeded-capacity`, `seeded-deprecation`, `seeded-intent`, `seeded-stall`, `seeded-shapes` and `seeded-defaults`, plus both
 defect node pools. Slot `c` carries a GKE-level defect only and no workloads at all: it is the
 configuration outlier. Slot `b` is the held-back control plane, and also carries the
 upgrade-readiness drain defects, which belong with the cluster whose subject is upgrading. Slot
@@ -133,6 +133,12 @@ its roles are never published.
 | `containerd-socket-agent`      | a       | 0   | `daemonset/node-runtime-probe` in `seeded-shapes`, the containerd socket mounted read-only from the host                                                                                     |
 | `intree-pd-volume`             | a       | 0   | `persistentvolume/intree-pd` on the in-tree `gcePersistentDisk` plugin, bound by `persistentvolumeclaim/intree-pd` and mounted by `deployment/intree-pd-reader` in `seeded-shapes`           |
 | `retired-registry-image`       | a       | 0   | `deployment/legacy-registry-pull` in `seeded-shapes`, `k8s.gcr.io/pause:3.9` pulled with `imagePullPolicy: Always`                                                                           |
+| `moving-admission-default`     | a       | 0   | `namespace/seeded-defaults` pinned to Pod Security `baseline` at version `latest`, with `deployment/baseline-edge-worker` admitted by today's rule set                                       |
+| `stale-client-skew`            | a       | 0   | `cronjob/stale-kubectl-client` in `seeded-shapes`, `kubectl` v1.29.0 against the control plane every ten minutes                                                                             |
+| `cgroup-blind-runtime`         | a       | 0   | `deployment/cgroup-blind-jvm` in `seeded-shapes`, eclipse-temurin 8u302 under a 192Mi limit                                                                                                  |
+| `multi-process-container`      | a       | 0   | `deployment/multi-process-worker` in `seeded-shapes`, two forked workers under one 32Mi limit                                                                                                |
+| `node-image-coupled-agent`     | a       | 0   | `daemonset/cni-shaped-agent` in `seeded-shapes`, host networking plus `/etc/cni/net.d` mounted read-only                                                                                     |
+| `cuda-pinned-gpu-job`          | a       | 0   | `cronjob/cuda-pinned-trainer` in `seeded-shapes`, suspended, one `nvidia.com/gpu` on an `nvidia-l4` selector with a CUDA 12.2 image                                                          |
 
 The `inference-server` HPA under `hpa-saturated` does not compute a stable desired
 replica count. Read on 2026-08-24, `status.desiredReplicas` on `seeded-a` was 3 in
@@ -247,11 +253,13 @@ provisioning — it is the SOPs' own age rules. A collector that filters on
 `creationTimestamp` returns nothing for a fixture younger than its window, so the audit
 correctly reports no finding and a case asserting one correctly fails.
 
-Twenty of the twenty-two are assertable on apply day: `rbac-overgrant`, `no-pdb-workload`,
+Twenty-six of the twenty-eight are assertable on apply day: `rbac-overgrant`, `no-pdb-workload`,
 `declared-no-pdb-workload`, `stalled-controller`, `crashloop-workload`, `hpa-saturated`, `version-laggard`, `deprecated-api-caller`, the four
-`readiness-*` roles on slot `b`, the three `zonal-skew-*` roles on slot `d` and the five
+`readiness-*` roles on slot `b`, the three `zonal-skew-*` roles on slot `d` and the eleven
 upgrade-failure shapes in `seeded-shapes` (`node-local-state`, `deprecated-label-selector`,
-`containerd-socket-agent`, `intree-pd-volume`, `retired-registry-image`), covering
+`containerd-socket-agent`, `intree-pd-volume`, `retired-registry-image`, `moving-admission-default`,
+`stale-client-skew`, `cgroup-blind-runtime`, `multi-process-container`, `node-image-coupled-agent`,
+`cuda-pinned-gpu-job`), covering
 security, reliability, cluster debugging, remediation, capacity, upgrades, upgrade readiness,
 API deprecation, zonal skew and the upgrade-failure shapes between them. A corpus that leans on these can go green the day the fleet
 applies; the caller's first run is a Job the apply itself waits on, so its audit trail
