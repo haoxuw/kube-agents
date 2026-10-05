@@ -194,6 +194,10 @@
 # The third group adds three more at the 200s default
 # (upgrades-deprecated-api-caller-named, -removed-api-callers-distinguished,
 # -network-policy-enforcement-stated): fifty-eight (174) of seventy-two (216).
+# The fourth group adds five more at the 200s default
+# (upgrades-node-local-state-named, -deprecated-node-label-selector-named,
+# -containerd-socket-agent-named, -intree-volume-named,
+# -retired-registry-image-named): sixty-three (189) of seventy-seven (231).
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -605,3 +609,13 @@
 ./tasks/upgrades-deprecated-api-caller-named/task.yaml
 ./tasks/upgrades-removed-api-callers-distinguished/task.yaml
 ./tasks/upgrades-network-policy-enforcement-stated/task.yaml
+
+# The catalogue's fourth group, five read-only chat cases on the shape
+# fixtures seeded-a carries in seeded-shapes: state on the node (entry 4), a
+# selector on a deprecated node label (12), an agent on the containerd socket
+# (13), an in-tree volume (19), an image on a retired registry (20).
+./tasks/upgrades-node-local-state-named/task.yaml
+./tasks/upgrades-deprecated-node-label-selector-named/task.yaml
+./tasks/upgrades-containerd-socket-agent-named/task.yaml
+./tasks/upgrades-intree-volume-named/task.yaml
+./tasks/upgrades-retired-registry-image-named/task.yaml

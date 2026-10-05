@@ -159,6 +159,11 @@ ADDED_AFTER_THE_MOVE = [
     "upgrades-deprecated-api-caller-named",  # catalogue entries 9, 6 and 16, the third scenario group
     "upgrades-removed-api-callers-distinguished",
     "upgrades-network-policy-enforcement-stated",
+    "upgrades-node-local-state-named",  # catalogue entries 4, 12, 13, 19 and 20, the fourth scenario group
+    "upgrades-deprecated-node-label-selector-named",
+    "upgrades-containerd-socket-agent-named",
+    "upgrades-intree-volume-named",
+    "upgrades-retired-registry-image-named",
 ]
 
 # Admitted after the split, each by a pull request that cited the record
