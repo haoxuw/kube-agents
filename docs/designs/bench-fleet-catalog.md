@@ -160,7 +160,7 @@ neither is going to be obvious from a slug.
 **A role slug is not the `seeded-role` label.** `bench/tf/fleet/main.tf` carries
 `seeded-role=pinned-inference` on the pinned pool's node label and taint, and
 `seeded-role=idle-batch` on the idle pool's taint, and `bench/tf/fleet/defects-b.tf`
-`seeded-role=no-surge` on the no-surge pool's — so three of the twenty-two roles are called one
+`seeded-role=no-surge` on the no-surge pool's — so three of the twenty-eight roles are called one
 thing by the catalogue and another by the Terraform that plants them. They are
 different mechanisms and both are load-bearing: the label and taint are scheduling
 constraints that keep other workloads off those pools, and the role slug is what the
@@ -256,7 +256,7 @@ correctly reports no finding and a case asserting one correctly fails.
 Twenty-six of the twenty-eight are assertable on apply day: `rbac-overgrant`, `no-pdb-workload`,
 `declared-no-pdb-workload`, `stalled-controller`, `crashloop-workload`, `hpa-saturated`, `version-laggard`, `deprecated-api-caller`, the four
 `readiness-*` roles on slot `b`, the three `zonal-skew-*` roles on slot `d` and the eleven
-upgrade-failure shapes in `seeded-shapes` (`node-local-state`, `deprecated-label-selector`,
+upgrade-failure shapes, ten in `seeded-shapes` and one in `seeded-defaults` (`node-local-state`, `deprecated-label-selector`,
 `containerd-socket-agent`, `intree-pd-volume`, `retired-registry-image`, `moving-admission-default`,
 `stale-client-skew`, `cgroup-blind-runtime`, `multi-process-container`, `node-image-coupled-agent`,
 `cuda-pinned-gpu-job`), covering
