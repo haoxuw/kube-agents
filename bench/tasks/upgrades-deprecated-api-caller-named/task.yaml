@@ -83,7 +83,7 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?ms)\A(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-c(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)'
+        - '(?ms)\A(?=.*^^{cluster:a}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^{cluster:b}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^{cluster:c}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)(?=.*^^{cluster:d}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]+; callers: [^\n]+$)'
 
   # Endpoints v1, however spelled (v1 endpoints, core/v1 endpoints, endpoints/v1,
   # the singular), and not EndpointSlice. A hedge mark in the slot is a wrong value.
@@ -99,9 +99,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*; callers: [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*; callers: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: (?![^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*;)[^;\n]+; callers: [^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: deprecated apis in use: (?![^;\n?!]*\bendpoints?\b(?!slice)[^;\n?!]*;)[^;\n]+; callers: [^\n]+$'
 
   # The CronJob or its ServiceAccount: namespace/name, or the audit log's
   # namespace:name, which the fold spaces to "namespace: name". A negated
@@ -118,9 +118,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!(?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: deprecated apis in use: [^;\n]+; callers: (?!(?!not\b)[^\n?!]*seeded-deprecation(?:/|: ?)legacy-endpoints-writer[^\n?!]*$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

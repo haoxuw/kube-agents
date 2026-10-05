@@ -97,7 +97,7 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?ms)\A(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-b(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-c(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-d(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)'
+        - '(?ms)\A(?=.*^^{cluster:a}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^{cluster:b}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^{cluster:c}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)(?=.*^^{cluster:d}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$)'
 
   # The fleet's clusters run the legacy dataplane with the add-on off.
   - name: every-seeded-cluster-runs-the-legacy-dataplane
@@ -112,9 +112,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-[a-d](?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane legacy[^;\n?!]*; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: dataplane legacy[^;\n?!]*; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-[a-d](?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane (?!legacy)[^;\n]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: dataplane (?!legacy)[^;\n]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: [^\n]+$'
 
   - name: no-seeded-cluster-is-said-to-enforce-policy-today
     role: objective
@@ -128,9 +128,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-[a-d](?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: no; namespaces with policies: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: no; namespaces with policies: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-[a-d](?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: (?!no;)[^;\n]+; namespaces with policies: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: (?!no;)[^;\n]+; namespaces with policies: [^\n]+$'
 
   - name: seeded-a-lists-its-four-policy-namespaces
     role: objective
@@ -144,9 +144,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!none\b)(?=[^\n]*\bseeded-reliability(?![a-z0-9-]))(?=[^\n]*\bseeded-debug(?![a-z0-9-]))(?=[^\n]*\bseeded-capacity(?![a-z0-9-]))(?=[^\n]*\bseeded-deprecation(?![a-z0-9-]))[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!none\b)(?=[^\n]*\bseeded-reliability(?![a-z0-9-]))(?=[^\n]*\bseeded-debug(?![a-z0-9-]))(?=[^\n]*\bseeded-capacity(?![a-z0-9-]))(?=[^\n]*\bseeded-deprecation(?![a-z0-9-]))[^\n]+$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-a(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!(?!none\b)(?=[^\n]*\bseeded-reliability(?![a-z0-9-]))(?=[^\n]*\bseeded-debug(?![a-z0-9-]))(?=[^\n]*\bseeded-capacity(?![a-z0-9-]))(?=[^\n]*\bseeded-deprecation(?![a-z0-9-]))[^\n]+$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!(?!none\b)(?=[^\n]*\bseeded-reliability(?![a-z0-9-]))(?=[^\n]*\bseeded-debug(?![a-z0-9-]))(?=[^\n]*\bseeded-capacity(?![a-z0-9-]))(?=[^\n]*\bseeded-deprecation(?![a-z0-9-]))[^\n]+$)[^\n]+$'
 
   # Slot c carries no NetworkPolicy: the drift outlier is a control-plane
   # shape, not a workload.
@@ -162,9 +162,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-c(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: none$'
+        - '(?m)^{cluster:c}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: none$'
       forbidden_patterns:
-        - '(?m)^(?:(?:(?!seeded-[a-d](?![a-z0-9]))[a-z0-9/._-])*[-_/])?seeded-c(?![a-z0-9])(?:-(?:africa|asia|australia|europe|me|northamerica|southamerica|us)-[a-z]+\d+(?:-[a-z])?)?(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!none$)[^\n]+$'
+        - '(?m)^{cluster:c}(?:\s*\([^)\n]*\))?: dataplane [^;\n?!]+; networkpolicy enforced: [^;\n?!]+; namespaces with policies: (?!none$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective
