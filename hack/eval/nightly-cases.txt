@@ -755,3 +755,9 @@
 # clusters upgrade --node-pool, and the no_upgrades limits name the rolling
 # 92-day window. deployer: noop, transcript-only, one delegation round trip.
 ./tasks/upgrades-freeze-runbook-probe/task.yaml
+
+# Upgrade-failure catalogue entry 11 through the readiness report's
+# zonal-control-plane rule: every seeded cluster's zonal control plane is a
+# risk, never a block, on the report. Read-only; no planted fixture. Nightly
+# from its first merge.
+./tasks/upgrades-readiness-zonal-control-plane/task.yaml
