@@ -1,6 +1,6 @@
 ---
 name: fleet-upgrade-verification
-description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, and node-pool version skew. Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
+description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, node-pool version skew, and, from the pod templates, data kept on the node, selectors on removed or deprecated node labels, runtimes and multi-process containers that a move to cgroup v2 breaks, node-image-coupled network agents, CUDA pins the target image's driver does not serve, and images on retired registries. Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
 ---
 
 # Fleet upgrade verification
@@ -13,8 +13,9 @@ fleet is from a release-channel default, or whether the repositories are ready f
 version. Run the version report again during a rollout and it also says, per member, what changed
 since the previous run and which members have stopped moving (see "Track a rollout across runs").
 With `--readiness` it also says, per member, what would stop the upgrade: a PodDisruptionBudget
-that blocks every node drain, a maintenance exclusion or window, or node pools too far below the
-target (see "Check upgrade readiness"). For upgrade plans, runbooks and checklists, use the
+that blocks every node drain, a maintenance exclusion or window, node pools too far below the
+target, or a workload shape the new node image breaks, and what the pod templates put at risk
+(see "Check upgrade readiness"). For upgrade plans, runbooks and checklists, use the
 `gke-upgrades` skill; it links back here when the question is one these two scripts answer.
 
 "Version skew" here is the gap between a member's versions and the target. It is not
@@ -51,7 +52,7 @@ The script runs `gcloud container clusters list`, `gcloud container get-server-c
 `gcloud projects list` and `gcloud config get-value project` (plus `gcloud projects describe` for a
 project whose `clusters list` was refused as API-disabled or whose configured identifier is a
 project number), each with a 60-second timeout, and
-with `--readiness` one `gcloud container clusters get-credentials` and one `kubectl get` per member.
+with `--readiness` one `gcloud container clusters get-credentials` and two `kubectl get` per member.
 It changes nothing in GCP or in any cluster; the only things it writes are its own record under
 `/opt/data/state/fleet-upgrade-verification/`, the per-member kubeconfig files `--readiness`
 needs, and the `--output` file. A failed or timed-out read is listed under the table and sets
@@ -144,8 +145,9 @@ members missing this run.
 the same target as the member's version row, and a `readiness` object per member in the JSON
 (`members[].readiness`, with a top-level `readiness` block holding the instant evaluated and a
 count per verdict). Without the flag nothing changes. Three rules, each derived from a governance
-SOP check and named beside it; the maintenance rule departs from its SOP where the two differ,
-and says so below:
+SOP check and named beside it, then the workload rules of the next list, each derived from an
+entry of the upgrade-failure catalogue (`docs/designs/upgrade-failure-catalogue.md`); the
+maintenance rule departs from its SOP where the two differ, and says so below:
 
 - **Drain-blocking PDBs** (`obtainability_audit_sop.md` §3.4). For each member the script runs
   `gcloud container clusters get-credentials` into a kubeconfig of its own under
@@ -191,11 +193,75 @@ and says so below:
   (GKE keeps nodes within two minors of the control plane); exactly 2 is at the ceiling and
   goes in the note. Autopilot members read `n/a`.
 
+The workload rules read the pod templates, never Pods: the first read's Deployments and
+StatefulSets, and a second `kubectl get daemonset,cronjob,node,pvc,storageclass -A -o json` per
+member. Bare Pods and Jobs are not read, and nothing in the namespaces GKE manages
+(`kube-system`, `gmp-system`, every `gke-*`) is read: GKE upgrades those with the version. Each
+rule is one module under `scripts/readiness_rules/`, and the fact tables they share (runtime
+floors, driver and CUDA branches, dropped and deprecated labels, retired hosts, the cgroup v2
+timeline) sit in `scripts/upgrade_shape_tables.py` with their sources. A rule grades a shape
+`blocking`, `risk` or `unknown`; where its table has no row for the target or the image, the
+grade is `unknown` with the reason, never a guess. The table prints the blockers in
+`workload blockers` and the risks in `risks`, each as `Kind namespace/name: detail`; a shape a
+rule saw and cleared (a pool already on cgroup v2) goes in the note, named, so a reader can check
+the reasoning. The rules, with the catalogue entry each reads:
+
+- **Data on the node** (entry 4, `data-on-the-node`). A Deployment or StatefulSet whose
+  template mounts an `emptyDir`, a `hostPath`, or a claim on a StorageClass whose provisioner is
+  `kubernetes.io/no-provisioner` (how Local SSD becomes a PersistentVolume) is a `risk`, named
+  with the volume; a volume name that suggests state is marked. A StatefulSet is the strongest
+  case: its identity survives the rebuild, its node-local data does not.
+- **Removed node label** (entry 12, `removed-node-label`). Every `nodeSelector` and node
+  affinity term is read against the Node list. A label or label value the target minor drops
+  (`node-role.kubernetes.io/master` from 1.24, `cloud.google.com/gke-container-runtime=docker`
+  from 1.24) is `blocking`; a label no node in the template's pools carries today is a `risk`;
+  a deprecated beta label the kubelet still sets (`beta.kubernetes.io/arch`,
+  `failure-domain.beta.kubernetes.io/zone` and their siblings) is a `risk`, named with its GA
+  replacement. Without Node objects in the read, a selector is `unknown`.
+- **cgroup v2 under an old runtime** (entry 14, `cgroup-v2-runtime`). A Java image tag below
+  JDK 8u372, 11.0.16 or 15, or a .NET image tag below 5.0, on a pool the target moves to
+  cgroup v2 (`effectiveCgroupMode` v1 and a target at or past GKE's 1.33 migration, or a pool
+  pinned to v1 and a target at or past the 1.35 removal) is a `risk`; a known runtime whose tag
+  names no version on such a pool, or a pool whose mode the record does not carry, is
+  `unknown`; a pool already on cgroup v2, or staying on v1 at the target, is a note.
+- **Group OOM kill** (entry 15, `group-oom-kill`). A heuristic, marked as one in every finding,
+  because the process count is not readable from the API: a container whose command or args
+  run `supervisord`, `s6-svscan` or `runsvdir`, whose shell `-c` script forks a background job,
+  or whose image is a documented multi-process base, on a pool where the target turns the group
+  kill on (a move to cgroup v2 at 1.28 or later, or a cgroup v2 pool's kubelet crossing 1.28)
+  is a `risk`, never `blocking`. A pool already group-killing, or one whose node config sets
+  `singleProcessOOMKill`, is a note.
+- **Node-image-coupled agent** (entry 17, `node-image-coupled-agent`). A DaemonSet with
+  `hostNetwork: true`, outside the system and Config Sync namespaces, that selects on a
+  node-image label (`cloud.google.com/gke-os-distribution`,
+  `cloud.google.com/gke-container-runtime`), mounts the kernel module tree or the network
+  plugin's directories (`/etc/cni/net.d`, `/opt/cni/bin`, `/home/kubernetes/bin`), or runs
+  `modprobe`, is a `risk`; the detail names the pools below the target, whose image this
+  upgrade changes.
+- **GPU driver mismatch** (entry 18, `gpu-driver`). For a template requesting
+  `nvidia.com/gpu`, the CUDA version is read from the image tag or a CUDA-named env value, and
+  the driver from the pools carrying the accelerator the template selects: the pool's
+  `imageType` and `gpuDriverVersion` (`DEFAULT` or `LATEST`) pick a branch from GKE's per-minor
+  table at the target's minor. A driver below the CUDA major's floor is `blocking`; one below
+  the toolkit's own minimum is a `risk` (minor version compatibility); an image naming no CUDA
+  version, or an accelerator no pool carries, is a `risk`; a target the driver table does not
+  cover, an operator-installed driver, or a record with no install mode is `unknown`. A pin the
+  driver serves is a note, with the reminder that forward-compatibility packages inside the
+  image are not readable from the tag.
+- **Retired registry** (entry 20, `retired-registry`). A container or init container pulling
+  from `k8s.gcr.io`, `gcr.io/google-containers`, `gcr.io/google_containers` or
+  `gcr.io/kubernetes-helm` is `blocking`, named with the image: a rebuilt node has no image
+  cache and pulls from a host that stopped publishing. The detail names the pools below the
+  target, whose nodes this upgrade rebuilds, or says no pool is below it yet.
+
 A member is `blocked` when any rule blocks, whatever else could not be evaluated; `unknown` when
-nothing blocked but a rule could not be evaluated (the cluster read failed, there is no target,
-an exclusion's scope or a pool's version was unreadable); `ready` only when every rule was
-evaluated and none blocks. A failed `get-credentials` or `kubectl get` is listed under the table
-as a read failure for that member and sets exit code 1, like a failed gcloud read; the member's
+nothing blocked but a rule could not be evaluated (a cluster read failed, there is no target,
+an exclusion's scope or a pool's version was unreadable, a workload rule's table has no row for
+the target or the image); `ready` only when every rule was evaluated and none blocks. A failed
+`get-credentials` or `kubectl get` is listed under the table as a read failure for that member
+and sets exit code 1, like a failed gcloud read: a failed credentials fetch or PDB read leaves
+the PDB and workload rules ungraded (the workload read is skipped, since the API server did not
+answer), a failed workload read alone leaves the workload rules ungraded; the member's
 maintenance and skew rules are still graded, and the other members are unaffected. `--at` with a
 value that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage
 error (exit 2).
@@ -265,9 +331,11 @@ as one that is stuck, and the elapsed time is what lets the user tell them apart
 baseline line means there is nothing to compare yet; say when to run again. When the run printed
 a readiness table, paste it too and name each `blocked` member with what blocks it as the table
 states it: the PDB by `namespace/name` with its field and workload, the exclusion by name with
-its scope and end time and that it holds back automatic upgrades only, the pool with its skew.
-Say what the operator has to change before the upgrade can proceed; do not change it, and do not
-propose deleting an exclusion. When the question is a target version's readiness, paste each
+its scope and end time and that it holds back automatic upgrades only, the pool with its skew,
+the workload blocker by kind and `namespace/name` with the image or label the cell names. Then
+name each member's risks the same way, as what to watch rather than what stops the upgrade, and
+say which rules read as `unknown` and why, from the note. Say what the operator has to change
+before the upgrade can proceed; do not change it, and do not propose deleting an exclusion. When the question is a target version's readiness, paste each
 repository's deprecation section too, with its source line, and state the floor and target the
 scan used. Recommend the upgrade path and the manifest migrations; do not run either. Cite no CVE
 identifiers: there is no vulnerability feed here, and every finding is version currency,
