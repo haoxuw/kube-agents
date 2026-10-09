@@ -200,9 +200,10 @@ PROGRESS_COLUMNS = (
 )
 VERSION_PAIR_SEPARATOR = " / "
 
-# Readiness (`--readiness`). The PDB check needs one kubectl read per member, which needs
-# credentials for that member: `get-credentials` writes a per-target kubeconfig, passed to
-# both commands as KUBECONFIG in the subprocess environment rather than through a flag,
+# Readiness (`--readiness`). The rules need two kubectl reads per member (PDBs with their
+# Deployments and StatefulSets, then the workload rules' kinds), which need credentials for
+# that member: `get-credentials` writes a per-target kubeconfig, passed to the kubectl reads
+# as KUBECONFIG in the subprocess environment rather than through a flag,
 # because the gcloud and kubectl in the agent pod are credential-proxy shims that forward
 # that variable. The directory is `$HERMES_HOME/.kubeconfigs`, the platform AGENTS.md
 # convention, and the file name mirrors `_thread_kubeconfig_path` in

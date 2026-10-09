@@ -236,8 +236,8 @@ the reasoning. The rules, with the catalogue entry each reads:
   node-image label (`cloud.google.com/gke-os-distribution`,
   `cloud.google.com/gke-container-runtime`), mounts the kernel module tree or the network
   plugin's directories (`/etc/cni/net.d`, `/opt/cni/bin`, `/home/kubernetes/bin`), or runs
-  `modprobe`, is a `risk`; the detail names the pools below the target, whose image this
-  upgrade changes.
+  `modprobe` or `insmod`, is a `risk`; the detail names the pools below the target, whose image
+  this upgrade changes.
 - **GPU driver mismatch** (entry 18, `gpu-driver`). For a template requesting
   `nvidia.com/gpu`, the CUDA version is read from the image tag or a CUDA-named env value, and
   the driver from the pools carrying the accelerator the template selects: the pool's
@@ -264,7 +264,9 @@ the PDB and workload rules ungraded (the workload read is skipped, since the API
 answer), a failed workload read alone leaves the workload rules ungraded; the member's
 maintenance and skew rules are still graded, and the other members are unaffected. `--at` with a
 value that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage
-error (exit 2).
+error (exit 2). In the JSON, `readiness.rules` holds each rule's result under its id;
+`workload_blockers`, `risks` and `unknown` hold the findings across rules, each with the `text`
+the cell prints; `workload_read_error` holds the second read's failure.
 
 ## Scan the GitOps manifests
 

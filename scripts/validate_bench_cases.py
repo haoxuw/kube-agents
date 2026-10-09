@@ -259,50 +259,52 @@ FIXTURE_NOT_READY = {
     # The readiness report's workload rules, one case per upgrade-failure
     # catalogue entry, each on a seeded-shapes role the fleet-shape fixture
     # branch designs on slot a; none is in bench/tf/fleet/fixtures.json yet.
-    # The pull request that lands a role leaves its entry here (merging
-    # plants nothing); the later one that moves the case to the nightly file
-    # cites the reconcile and the fixture-state scan.
+    # #2275 tracks the fixtures to merge; the scenario issue beside each entry
+    # is the catalogue's per-entry record. The pull request that lands a role
+    # leaves its entry here (merging plants nothing); the later one that moves
+    # the case to the nightly file cites the reconcile and the fixture-state
+    # scan.
     "upgrades-fleet-readiness-node-local-state": (
-        "#2653: needs the node-local-state role (Deployment cache-on-emptydir in "
+        "#2275: needs the node-local-state role (Deployment cache-on-emptydir in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2653)"
     ),
     "upgrades-fleet-readiness-deprecated-node-label": (
-        "#2661: needs the deprecated-label-selector role (Deployment arch-pinned-worker in "
+        "#2275: needs the deprecated-label-selector role (Deployment arch-pinned-worker in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2661)"
     ),
     "upgrades-fleet-readiness-cgroup-blind-runtime": (
-        "#2663: needs the cgroup-blind-runtime role (Deployment cgroup-blind-jvm in "
+        "#2275: needs the cgroup-blind-runtime role (Deployment cgroup-blind-jvm in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2663)"
     ),
     "upgrades-fleet-readiness-multi-process-container": (
-        "#2664: needs the multi-process-container role (Deployment multi-process-worker in "
+        "#2275: needs the multi-process-container role (Deployment multi-process-worker in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2664)"
     ),
     "upgrades-fleet-readiness-node-image-coupled-agent": (
-        "#2666: needs the node-image-coupled-agent role (DaemonSet cni-shaped-agent in "
+        "#2275: needs the node-image-coupled-agent role (DaemonSet cni-shaped-agent in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2666)"
     ),
     "upgrades-fleet-readiness-cuda-pinned-gpu-job": (
-        "#2667: needs the cuda-pinned-gpu-job role (CronJob cuda-pinned-trainer in "
+        "#2275: needs the cuda-pinned-gpu-job role (CronJob cuda-pinned-trainer in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2667)"
     ),
     "upgrades-fleet-readiness-retired-registry-image": (
-        "#2669: needs the retired-registry-image role (Deployment legacy-registry-pull in "
+        "#2275: needs the retired-registry-image role (Deployment legacy-registry-pull in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
-        "designed on the fleet-shape fixture branch and is not in "
-        "bench/tf/fleet/fixtures.json yet"
+        "designed on the fleet-shape fixture branch, which #2275 tracks to merge, "
+        "and is not in bench/tf/fleet/fixtures.json yet (scenario issue #2669)"
     ),
 }
 

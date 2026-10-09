@@ -2,11 +2,10 @@
 """
 upgrade_shape_tables.py — the facts behind the upgrade-failure catalogue's static shapes.
 
-One home for the tables the readiness rules under `readiness_rules/` read, and that the
-retrospective collector (`fleet-audit/scripts/upgrade_retrospective.py`) reads the same
-shapes with after the fact; the constant names here are the collector's where the
-collector has one, so it can import this module instead of carrying copies. Every table
-names its source. The tables are deliberately small: a rule whose input has no row here
+One home for the tables the readiness rules under `readiness_rules/` read. Every constant
+is named for the catalogue shape it serves, so any other reader of the same shapes (a review
+of what an upgrade did, after the fact) imports this module instead of carrying a copy. Every
+table names its source. The tables are deliberately small: a rule whose input has no row here
 grades `unknown` with the reason rather than guessing
 (docs/designs/upgrade-readiness-checks.md, "What a run produces").
 
@@ -110,7 +109,7 @@ JDK11_CGROUP_V2_PATCH = (0, 16)
 JDK_FIRST_MAJOR_WITH_CGROUP_V2 = 15
 # .NET read cgroup v2 from 5.0: dotnet/runtime#30337 ("Add cgroup v2 support to .NET Core",
 # milestone 5.0.0) and its runtime change dotnet/runtime#34334; .NET Core 3.1 and 2.1 read
-# cgroup v1 only. The collector's copy of this constant says (3, 1); this is the sourced value.
+# cgroup v1 only.
 DOTNET_IMAGE_REPO_MARKERS = ("mcr.microsoft.com/dotnet/", "microsoft/dotnet")
 DOTNET_TAG_RE = re.compile(r"^(\d+)\.(\d+)")
 DOTNET_CGROUP_V2_VERSION = (5, 0)
