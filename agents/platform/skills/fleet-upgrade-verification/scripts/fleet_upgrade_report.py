@@ -18,16 +18,19 @@ With `--readiness`, each member is also graded on whether it can take the upgrad
 target: drain-blocking PodDisruptionBudgets (read with one `kubectl get` per member after
 `gcloud container clusters get-credentials` into a per-target kubeconfig), a maintenance
 exclusion in effect whose scope covers the upgrade, the maintenance window's state at
-`--at`, and node-pool version skew against the target control plane. The rules live in
-`upgrade_readiness.py`; this file reads and renders.
+`--at`, and node-pool version skew against the target control plane; then the rules
+registered in `upgrade_readiness.EXTRA_RULES` (`readiness_rules/`), which read the same
+objects and, for the audit-log rules, one `gcloud logging read` per member over the last
+seven days. The rules live in `upgrade_readiness.py` and `readiness_rules/`; this file
+reads and renders.
 
 Read-only against GCP: the gcloud commands it runs are `container clusters list`,
 `container get-server-config`, `projects list`, `config get-value project`, `projects
 describe` (to tie an API-disabled refusal to its project or resolve a numeric project
 number to its projectId) and, with
-`--readiness`, `container clusters get-credentials`. The only things it writes are its
-own state file, the per-target kubeconfig files `get-credentials` produces, and the
-optional `--output` JSON.
+`--readiness`, `container clusters get-credentials` and `logging read`. The only things it
+writes are its own state file, the per-target kubeconfig files `get-credentials` produces,
+and the optional `--output` JSON.
 """
 
 import argparse
@@ -40,6 +43,7 @@ import tempfile
 from datetime import datetime, timezone
 
 import upgrade_readiness as readiness
+from readiness_rules import audit_log
 
 # Project resolution: explicit --project flags are the whole scope. Otherwise the
 # per-profile project variables are unioned with the fleet's monitored-project list
@@ -208,7 +212,11 @@ VERSION_PAIR_SEPARATOR = " / "
 # workspace, which is why the default is not /tmp. `--kubeconfig-dir` overrides it.
 KUBECTL = "kubectl"
 KUBECTL_TIMEOUT_SECONDS = 60
-KUBECTL_RESOURCES = "pdb,deploy,statefulset"
+# One read per member, whatever the rule count: the PDB rule matches budgets to the two
+# workload kinds it grades; the registered rules read the rest from the same call,
+# DaemonSets and CronJobs for client and add-on images and gitRepo volumes, Namespaces for
+# their Pod Security Admission labels. kubectl ignores `-A` for the cluster-scoped kind.
+KUBECTL_RESOURCES = "pdb,deploy,statefulset,daemonset,cronjob,namespace"
 KUBECONFIG_ENV = "KUBECONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
 DEFAULT_HERMES_HOME = "/opt/data"
@@ -234,12 +242,33 @@ READINESS_COLUMNS = (
     "drain-blocking PDBs",
     "maintenance",
     "node-pool skew",
+    "other rules",
     "note",
 )
 READINESS_NONE_CELL = "none"
 READINESS_READ_FAILED_CELL = "read failed"
 READINESS_NOT_EVALUATED_CELL = "not evaluated"
 READINESS_NO_OPENING_CELL = f"none within {readiness.DAYS_PER_WEEK} days"
+# The "other rules" cell: every registered rule's findings, tier first, then the rule's
+# own description of the finding; `none` when no rule filed anything.
+RULES_CELL_BLOCKS = "blocks"
+RULES_CELL_RISK = "risk"
+RULES_CELL_UNKNOWN = "unknown"
+RULES_CELL_FORMAT = "{tier}: {text}"
+RULE_NOTE_FORMAT = "{rule}: {note}"
+# A failed audit-log read is a read failure like a failed kubectl: listed under the table
+# with the member it belongs to, exit code 1, the member's audit-log rules `unknown`.
+AUDIT_LOG_ERROR_FORMAT = "audit log not read: {error}"
+# The readiness context the registered rules share per member: the project, location and
+# cluster name a log filter needs, this module's runner (its default timeout is the
+# per-call cap), the instant, and a cache a rule fills so another rule reads it once.
+CONTEXT_PROJECT = "project"
+CONTEXT_LOCATION = "location"
+CONTEXT_CLUSTER = "cluster_name"
+CONTEXT_RUNNER = "run_cmd"
+CONTEXT_TIMEOUT = "timeout_seconds"
+CONTEXT_AT = "at"
+CONTEXT_CACHE = "cache"
 
 # Exit codes. A failed gcloud call is reported per project and per location and does
 # not abort the run; the exit code only says whether every requested read succeeded.
@@ -586,8 +615,21 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> tu
     return items, None, path
 
 
-def assess_readiness(cluster: dict, member: dict, items: list | None, read_error: str | None, at: datetime, kubeconfig: str) -> dict:
-    """The member's `readiness` object: the three rules against the row's target."""
+def readiness_context(member: dict, at: datetime) -> dict:
+    """The per-member read context the registered rules share (see the CONTEXT_* keys)."""
+    return {
+        CONTEXT_PROJECT: member["project"],
+        CONTEXT_LOCATION: member["location"],
+        CONTEXT_CLUSTER: member["cluster"],
+        CONTEXT_RUNNER: run_cmd,
+        CONTEXT_TIMEOUT: GCLOUD_TIMEOUT_SECONDS,
+        CONTEXT_AT: at,
+        CONTEXT_CACHE: {},
+    }
+
+
+def assess_readiness(cluster: dict, member: dict, items: list | None, read_error: str | None, at: datetime, kubeconfig: str, context: dict | None = None) -> dict:
+    """The member's `readiness` object: the three rules, then the registered ones, against the row's target."""
     target = parse_version(member["target_version"]) if member["target_version"] else None
     master = parse_version(member["control_plane_version"])
     pools = [{"name": p["name"], "version": p["version"], "parsed": parse_version(p["version"])} for p in member["node_pools"]]
@@ -595,7 +637,10 @@ def assess_readiness(cluster: dict, member: dict, items: list | None, read_error
     pdbs = None if items is None else readiness.grade_pdbs(*readiness.split_items(items))
     maintenance = readiness.evaluate_maintenance(cluster.get("maintenancePolicy"), at, member["target_version"], target, master, pools)
     skew = readiness.evaluate_skew(target, pools, autopilot)
-    status = readiness.readiness_status(pdbs, maintenance, skew, target is not None)
+    context = readiness_context(member, at) if context is None else context
+    rules = readiness.evaluate_extra_rules(cluster, member, items, target, context)
+    status = readiness.readiness_status(pdbs, maintenance, skew, target is not None, rules)
+    audit = (context.get(CONTEXT_CACHE) or {}).get(audit_log.CACHE_KEY) or {}
 
     notes = []
     if read_error:
@@ -617,6 +662,9 @@ def assess_readiness(cluster: dict, member: dict, items: list | None, read_error
         notes.append(f"pool(s) at the skew ceiling: {readiness.LIST_SEPARATOR.join(skew['at_ceiling'])}")
     if skew["applicable"] and skew["unknown"] and target is not None:
         notes.append(f"pool version unparsable, skew unknown: {readiness.LIST_SEPARATOR.join(skew['unknown'])}")
+    for rule_id, result in rules.items():
+        if result.get(readiness.RULE_RESULT_NOTE):
+            notes.append(RULE_NOTE_FORMAT.format(rule=rule_id, note=result[readiness.RULE_RESULT_NOTE]))
 
     return {
         "status": status,
@@ -627,6 +675,13 @@ def assess_readiness(cluster: dict, member: dict, items: list | None, read_error
         "pdbs": pdbs,
         "maintenance": maintenance,
         "skew": skew,
+        "rules": rules,
+        "audit_log": {
+            "command": audit.get("command"),
+            "entries": audit.get("entries"),
+            "truncated": audit.get("truncated"),
+            "error": audit.get("error"),
+        },
         "note": NOTE_SEPARATOR.join(notes),
     }
 
@@ -659,7 +714,11 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
                 items, read_error, path = read_cluster_objects(cluster, project, readiness_options["kubeconfig_dir"])
                 if read_error is not None:
                     errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": read_error})
-                member["readiness"] = assess_readiness(cluster, member, items, read_error, readiness_options["at"], path)
+                context = readiness_context(member, readiness_options["at"])
+                member["readiness"] = assess_readiness(cluster, member, items, read_error, readiness_options["at"], path, context)
+                audit_error = member["readiness"]["audit_log"]["error"]
+                if audit_error:
+                    errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": AUDIT_LOG_ERROR_FORMAT.format(error=audit_error)})
             members.append(member)
     errors.extend(cache.errors)
     members.sort(key=lambda m: (m["project"], m["location"], m["cluster"]))
@@ -675,6 +734,7 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
             "evaluated_at": readiness_options["at"].astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT),
             "kubeconfig_dir": readiness_options["kubeconfig_dir"],
             "summary": {status: sum(1 for m in members if m["readiness"]["status"] == status) for status in readiness.READINESS_ORDER},
+            "risks": sum(len(r.get(readiness.RULE_RESULT_RISKS, [])) for m in members for r in m["readiness"]["rules"].values()),
         }
     return report
 
@@ -772,6 +832,15 @@ def _skew_cell(r: dict) -> str:
     return f"{readiness.SKEW_OK} (at most {max(behind)} minor(s) behind the target)" if behind else readiness.SKEW_OK
 
 
+def _rules_cell(r: dict) -> str:
+    parts = []
+    for rule_id, result in (r.get("rules") or {}).items():
+        for tier, key in ((RULES_CELL_BLOCKS, readiness.RULE_RESULT_BLOCKING), (RULES_CELL_RISK, readiness.RULE_RESULT_RISKS), (RULES_CELL_UNKNOWN, readiness.RULE_RESULT_UNKNOWN)):
+            for item in result.get(key, []):
+                parts.append(RULES_CELL_FORMAT.format(tier=tier, text=readiness.describe_rule_finding(rule_id, item)))
+    return NOTE_SEPARATOR.join(parts) if parts else READINESS_NONE_CELL
+
+
 def render_readiness(report: dict) -> str:
     """The readiness table printed after the version table, with its own summary line."""
     lines = [
@@ -780,14 +849,15 @@ def render_readiness(report: dict) -> str:
     ]
     for m in report["members"]:
         r = m["readiness"]
-        row = (m["project"], m["cluster"], m["location"], r["status"], _pdb_cell(r), _maintenance_cell(r), _skew_cell(r), r["note"])
+        row = (m["project"], m["cluster"], m["location"], r["status"], _pdb_cell(r), _maintenance_cell(r), _skew_cell(r), _rules_cell(r), r["note"])
         lines.append("| " + " | ".join(_cell(v) for v in row) + " |")
     summary = report["readiness"]["summary"]
     lines.append("")
     lines.append(
         f"Readiness at {report['readiness']['evaluated_at']}: "
         + ", ".join(f"{summary[s]} {s}" for s in readiness.READINESS_ORDER)
-        + "; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB or skew any upgrade."
+        + f", {report['readiness']['risks']} risk(s) from the other rules"
+        + "; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, skew or a removed-API caller any upgrade; a risk changes no verdict."
     )
     return "\n".join(lines)
 

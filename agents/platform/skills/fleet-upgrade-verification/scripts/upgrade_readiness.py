@@ -15,10 +15,20 @@ three rules are the ones the governance SOPs define in prose:
   instant, §3.7;
 - node-pool version skew against the target control plane, §3.2: more than two minors, or
   a different major, blocks the control-plane upgrade until the pool moves.
+
+After those three, `evaluate_extra_rules` runs every module registered in EXTRA_RULES
+(`readiness_rules/`): one module per rule, each grading from the same cluster record and
+object read, or from a read it performs through the context the report hands it (the
+audit-log rules share one `gcloud logging read` per member). Their blocking findings make
+a member `blocked` and their unknown findings `unknown`, as the three rules' own do; a
+risk is reported and changes no verdict.
 """
 
 import re
 from datetime import datetime, time, timedelta, timezone
+
+# group C: the audit-log, client-skew and changed-defaults rules registered in EXTRA_RULES.
+from readiness_rules import changed_defaults, client_addon_skew, deprecated_api_callers, removed_api_callers
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -123,6 +133,25 @@ SKEW_NOT_APPLICABLE = "n/a"
 SKEW_AUTOPILOT_REASON = "Autopilot: Google owns the node pools"
 SKEW_NO_TARGET_REASON = "no target to measure against"
 SKEW_MAJOR_DIFFERS = "major version differs from the target"
+
+# The rules evaluated after the three above, in this order, by `evaluate_extra_rules`.
+# Each is a module exposing RULE_ID, evaluate(cluster, member, items, target, context)
+# and describe(finding); readiness_rules/__init__.py is the contract. A result is
+# {"blocking": [...], "risks": [...], "unknown": [...], "note": ""}.
+EXTRA_RULES = [
+    # group C
+    removed_api_callers,
+    deprecated_api_callers,
+    client_addon_skew,
+    changed_defaults,
+]
+RULE_RESULT_BLOCKING = "blocking"
+RULE_RESULT_RISKS = "risks"
+RULE_RESULT_UNKNOWN = "unknown"
+RULE_RESULT_NOTE = "note"
+RULE_TIER_UNKNOWN = "unknown"
+RULE_ID_ATTRIBUTE = "RULE_ID"
+RULE_CRASHED_REASON = "rule {rule} raised {error}; not evaluated"
 
 
 # ---------------------------------------------------------------------------- PDBs
@@ -578,14 +607,55 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
     }
 
 
+# --------------------------------------------------------------------- extra rules
+
+
+def _rule_id(rule) -> str:
+    return getattr(rule, RULE_ID_ATTRIBUTE, rule.__name__)
+
+
+def evaluate_extra_rules(cluster: dict, member: dict, items: list | None, target, context: dict) -> dict:
+    """{rule id: result} for every module in EXTRA_RULES, in registration order.
+
+    A rule that raises is filed as one `unknown` finding naming the error, so a defect in
+    one rule degrades its own cell to `unknown` and never the table: the three rules above
+    and the other registered rules still grade the member.
+    """
+    results = {}
+    for rule in EXTRA_RULES:
+        rule_id = _rule_id(rule)
+        try:
+            result = rule.evaluate(cluster, member, items, target, context)
+        except Exception as e:  # noqa: BLE001 - a rule's defect is its own unknown cell, not a crashed report
+            result = {
+                RULE_RESULT_BLOCKING: [],
+                RULE_RESULT_RISKS: [],
+                RULE_RESULT_UNKNOWN: [{"rule": rule_id, "tier": RULE_TIER_UNKNOWN, "reason": RULE_CRASHED_REASON.format(rule=rule_id, error=repr(e))}],
+                RULE_RESULT_NOTE: "",
+            }
+        results[rule_id] = result
+    return results
+
+
+def describe_rule_finding(rule_id: str, item: dict) -> str:
+    """The registered rule's own `describe`; the reason alone for a finding no rule claims."""
+    for rule in EXTRA_RULES:
+        if _rule_id(rule) == rule_id:
+            return rule.describe(item)
+    return item.get("reason") or str(item)
+
+
 # ------------------------------------------------------------------------- verdict
 
 
-def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool) -> str:
+def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool, rules: dict | None = None) -> str:
     """`blocked` beats `unknown` beats `ready`: a definite blocker is reported whatever else
-    could not be evaluated, and a member is `ready` only when every rule was evaluated."""
-    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"]:
+    could not be evaluated, and a member is `ready` only when every rule was evaluated.
+    `rules` is `evaluate_extra_rules`'s result: a blocking finding there blocks, an unknown
+    one is unknown, a risk is neither."""
+    rules = rules or {}
+    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"] or any(r.get(RULE_RESULT_BLOCKING) for r in rules.values()):
         return READINESS_BLOCKED
-    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"]:
+    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"] or any(r.get(RULE_RESULT_UNKNOWN) for r in rules.values()):
         return READINESS_UNKNOWN
     return READINESS_READY

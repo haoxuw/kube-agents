@@ -4,6 +4,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -879,17 +880,26 @@ if __name__ == "__main__":
 
 
 class FakeReadinessCommands(FakeGcloud):
-    """FakeGcloud plus `get-credentials` and `kubectl get`, recording the KUBECONFIG each ran with."""
+    """FakeGcloud plus `get-credentials`, `kubectl get` and `logging read`, recording the KUBECONFIG each ran with."""
 
-    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=()):
+    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), audit_by_cluster=None, failing_logging=()):
         super().__init__(clusters_by_project, config_by_location)
         self.objects_by_cluster = objects_by_cluster
         self.failing_kubectl = set(failing_kubectl)
         self.failing_credentials = set(failing_credentials)
+        self.audit_by_cluster = audit_by_cluster or {}
+        self.failing_logging = set(failing_logging)
         self.kubeconfigs = []
         self.current_cluster = None
 
     def __call__(self, cmd, timeout=None, env=None):
+        if cmd[:3] == ["gcloud", "logging", "read"]:
+            self.calls.append(cmd)
+            match = re.search(r'cluster_name="([^"]+)"', cmd[3])
+            name = match.group(1) if match else None
+            if name in self.failing_logging:
+                return -1, "", "timed out after 60 seconds"
+            return 0, json.dumps(self.audit_by_cluster.get(name, [])), ""
         if cmd[:4] == ["gcloud", "container", "clusters", "get-credentials"]:
             self.calls.append(cmd)
             self.current_cluster = cmd[4]
@@ -1036,7 +1046,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(all(k and k.startswith(self.kubeconfig_dir + os.sep) for k in fake.kubeconfigs))
         self.assertTrue(os.path.isdir(self.kubeconfig_dir))
         kubectl = [c for c in fake.calls if c[:1] == ["kubectl"]]
-        self.assertEqual(kubectl, [["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]] * 3)
+        self.assertEqual(kubectl, [["kubectl", "get", "pdb,deploy,statefulset,daemonset,cronjob,namespace", "-A", "-o", "json"]] * 3)
         self.assertEqual(data["readiness"]["kubeconfig_dir"], self.kubeconfig_dir)
         self.assertEqual({m["cluster"]: m["readiness"]["kubeconfig"] for m in data["members"]}["seeded-b"], expected)
 
@@ -1060,7 +1070,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(by_name["robot-host"]["status"], "blocked")
         self.assertEqual(by_name["seeded-b"]["status"], "blocked")
         self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
-        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: kubectl get pdb,deploy,statefulset -A -o json failed (1)", text)
+        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: kubectl get pdb,deploy,statefulset,daemonset,cronjob,namespace -A -o json failed (1)", text)
         self.assertIn("| read failed |", text)
         # The version row is unaffected, and the rollout record does not treat the project as unread.
         self.assertEqual({m["cluster"]: m["status"] for m in data["members"]}["seeded-a"], report.STATUS_CURRENT)
@@ -1086,6 +1096,65 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(rc, report.EXIT_OK)
         self.assertIn("| unknown | none |", stdout.getvalue())
         self.assertIn("no target; exclusion scope and skew not graded", stdout.getvalue())
+
+    def test_logging_read_is_one_per_member_with_the_window_and_limit(self):
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects)
+        rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_OK)
+        reads = [c for c in fake.calls if c[:3] == ["gcloud", "logging", "read"]]
+        self.assertEqual(len(reads), 3)
+        by_cluster = {re.search(r'cluster_name="([^"]+)"', c[3]).group(1): c for c in reads}
+        b = by_cluster["seeded-b"]
+        self.assertIn('resource.type="k8s_cluster"', b[3])
+        self.assertIn('resource.labels.location="us-central1-a"', b[3])
+        self.assertIn('labels."k8s.io/removed-release":*', b[3])
+        self.assertIn('labels."k8s.io/deprecated"="true"', b[3])
+        self.assertEqual(b[4:], ["--project=p1", "--freshness=7d", "--limit=1000", "--format=json"])
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual(a["audit_log"]["entries"], 0)
+        self.assertIsNone(a["audit_log"]["error"])
+        self.assertEqual(list(a["rules"]), ["removed-api-callers", "deprecated-api-callers", "client-addon-skew", "changed-defaults"])
+        self.assertEqual(a["status"], "ready")
+        self.assertIn("| other rules |", text)
+        self.assertIn("0 risk(s) from the other rules", text)
+
+    def test_audit_log_read_failure_is_unknown_and_an_error_row(self):
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects, failing_logging=["seeded-a"])
+        rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_PARTIAL)
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual(a["status"], "unknown")
+        self.assertIn("timed out after 60 seconds", a["audit_log"]["error"])
+        self.assertEqual(a["rules"]["removed-api-callers"]["blocking"], [])
+        self.assertIn("timed out after 60 seconds", a["rules"]["removed-api-callers"]["unknown"][0]["reason"])
+        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
+        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: audit log not read: `gcloud logging read` failed (rc=-1): timed out after 60 seconds", text)
+        self.assertIn("unknown: removed-API callers not read", text)
+        # The other members read their logs and are graded as before.
+        self.assertEqual({m["cluster"]: m["readiness"]["status"] for m in data["members"] if m["cluster"] != "seeded-a"}, {"seeded-b": "blocked", "robot-host": "blocked"})
+
+    def test_stamped_callers_from_the_captured_sample_block_or_warn(self):
+        with open(os.path.join(os.path.dirname(__file__), "testdata", "audit_log_sample.json"), encoding="utf-8") as f:
+            sample = json.load(f)
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects, audit_by_cluster={"seeded-a": sample})
+        rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_OK)
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual(a["status"], "blocked")
+        blocking = a["rules"]["removed-api-callers"]["blocking"]
+        self.assertEqual([b["principal"] for b in blocking], ["system:serviceaccount:kubeagents-system:legacy-flowcontrol-tuner"])
+        self.assertEqual(blocking[0]["removed_release"], "1.32")
+        deprecated = {r["principal"] for r in a["rules"]["deprecated-api-callers"]["risks"]}
+        self.assertIn("system:serviceaccount:seeded-deprecation:legacy-endpoints-writer", deprecated)
+        self.assertEqual(a["audit_log"]["entries"], 8)
+        self.assertEqual(data["readiness"]["summary"], {"blocked": 3, "ready": 0, "unknown": 0})
+        self.assertEqual(data["readiness"]["risks"], 3)
+        row = next(l for l in text.splitlines() if l.startswith("| p1 | seeded-a |") and "blocks:" in l)
+        self.assertIn("blocks: system:serviceaccount:kubeagents-system:legacy-flowcontrol-tuner via legacy-flowcontrol-tuner/0.3 calls flowcontrol.apiserver.k8s.io/v1beta3 flowschemas, removed in 1.32", row)
+        self.assertIn("risk: system:serviceaccount:seeded-deprecation:legacy-endpoints-writer via Python-urllib/3.12 calls core/v1 endpoints", row)
+        self.assertIn("risk: kubectl v1.29 from principal system:serviceaccount:seeded-shapes:stale-kubectl-client", row)
+        self.assertIn("deprecated-api-callers: 1 GKE-managed caller of deprecated APIs not filed", row)
+        self.assertIn("3 risk(s) from the other rules", text)
 
     def test_default_kubeconfig_dir_follows_hermes_home(self):
         with patch.dict(os.environ, {"HERMES_HOME": "/home/hermes"}):

@@ -393,6 +393,16 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(r.readiness_status(None, {"blocking_exclusions": ["x"], "undecided_exclusions": []}, self.NO_SKEW, True), "blocked")
         self.assertEqual(r.readiness_status(None, self.CLEAR, {"blocking": ["p"], "unknown": []}, True), "blocked")
 
+    def test_registered_rules_block_or_unknown_and_a_risk_does_neither(self):
+        pdbs = {"blocking": []}
+        risk = {"x": {"blocking": [], "risks": [{"rule": "x"}], "unknown": []}}
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, risk), "ready")
+        blocking = {"x": {"blocking": [{"rule": "x"}], "risks": [], "unknown": []}}
+        self.assertEqual(r.readiness_status(None, self.CLEAR, self.NO_SKEW, False, blocking), "blocked")
+        unknown = {"x": {"blocking": [], "risks": [], "unknown": [{"rule": "x", "reason": "r"}]}}
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, unknown), "unknown")
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {}), "ready")
+
 
 if __name__ == "__main__":
     unittest.main()
