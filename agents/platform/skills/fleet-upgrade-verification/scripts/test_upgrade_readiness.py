@@ -376,6 +376,34 @@ class SkewTest(unittest.TestCase):
         self.assertEqual(result["unknown"], ["weird"])
 
 
+class ExtraRulesTest(unittest.TestCase):
+    """The registry: every rule runs over one member, findings carry their text, and the
+    verdict reads the flattened lists."""
+
+    CONTEXT = {"at": AT, "target_text": TARGET_TEXT, "master": MASTER, "pools": [pool("default-pool", "1.34.11-gke.1000")], "autopilot": False}
+
+    def test_every_registered_rule_reports_and_findings_carry_text(self):
+        items = [
+            {"kind": "Deployment", "metadata": {"namespace": "shop", "name": "legacy"}, "spec": {"template": {"metadata": {}, "spec": {"containers": [{"name": "c", "image": "k8s.gcr.io/pause:3.9"}]}}}},
+        ]
+        out = r.evaluate_extra_rules({}, {"node_pools": []}, items, TARGET, self.CONTEXT)
+        self.assertEqual(sorted(out["results"]), sorted(rule.RULE_ID for rule in r.EXTRA_RULES))
+        self.assertEqual([f["rule"] for f in out["blocking"]], ["retired-registry"])
+        self.assertTrue(out["blocking"][0]["text"].startswith("Deployment shop/legacy: container c pulls k8s.gcr.io/pause:3.9"))
+        self.assertEqual(out["risks"], [])
+        self.assertEqual(out["unknown"], [])
+
+    def test_a_failed_workload_read_is_one_rule_level_unknown(self):
+        out = r.evaluate_extra_rules({}, {"node_pools": []}, None, TARGET, self.CONTEXT)
+        self.assertEqual(out["results"], {})
+        self.assertEqual(out["blocking"], [])
+        self.assertEqual([(u["rule"], u["object"], u["text"]) for u in out["unknown"]], [("workload-rules", None, "workload read failed; not graded")])
+
+    def test_rules_param_selects_the_rules(self):
+        out = r.evaluate_extra_rules({}, {"node_pools": []}, [], TARGET, self.CONTEXT, rules=[r.EXTRA_RULES[0]])
+        self.assertEqual(list(out["results"]), [r.EXTRA_RULES[0].RULE_ID])
+
+
 class VerdictTest(unittest.TestCase):
     CLEAR = {"blocking_exclusions": [], "undecided_exclusions": []}
     NO_SKEW = {"blocking": [], "unknown": []}
@@ -387,6 +415,18 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, False), "unknown")
         self.assertEqual(r.readiness_status(pdbs, {"blocking_exclusions": [], "undecided_exclusions": ["x"]}, self.NO_SKEW, True), "unknown")
         self.assertEqual(r.readiness_status(pdbs, self.CLEAR, {"blocking": [], "unknown": ["p"]}, True), "unknown")
+
+    def test_workload_rules_enter_the_verdict(self):
+        maintenance = r.evaluate_maintenance(None, AT, TARGET_TEXT, TARGET, MASTER, [])
+        skew = r.evaluate_skew(TARGET, [pool("p", "1.34.11-gke.1000")], False)
+        pdbs = {"blocking": []}
+        clean = {"blocking": [], "risks": [], "unknown": [], "notes": [], "results": {}}
+        self.assertEqual(r.readiness_status(pdbs, maintenance, skew, True, clean), r.READINESS_READY)
+        self.assertEqual(r.readiness_status(pdbs, maintenance, skew, True, {**clean, "risks": [{"rule": "x"}]}), r.READINESS_READY)
+        self.assertEqual(r.readiness_status(pdbs, maintenance, skew, True, {**clean, "unknown": [{"rule": "x"}]}), r.READINESS_UNKNOWN)
+        self.assertEqual(r.readiness_status(pdbs, maintenance, skew, True, {**clean, "blocking": [{"rule": "x"}], "unknown": [{"rule": "y"}]}), r.READINESS_BLOCKED)
+        # None means the workload rules did not run; the three rules decide alone.
+        self.assertEqual(r.readiness_status(pdbs, maintenance, skew, True, None), r.READINESS_READY)
 
     def test_blocked_beats_unknown(self):
         self.assertEqual(r.readiness_status({"blocking": [{"pdb": "a/b"}]}, self.CLEAR, self.NO_SKEW, False), "blocked")

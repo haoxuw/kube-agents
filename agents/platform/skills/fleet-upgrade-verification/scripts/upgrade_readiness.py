@@ -15,10 +15,28 @@ three rules are the ones the governance SOPs define in prose:
   instant, §3.7;
 - node-pool version skew against the target control plane, §3.2: more than two minors, or
   a different major, blocks the control-plane upgrade until the pool moves.
+
+After those three, `EXTRA_RULES` runs the workload rules under `readiness_rules/`, one
+module per upgrade-failure catalogue entry (data on the node, a removed node label,
+cgroup v2 under an old runtime, the group OOM kill, a node-image-coupled agent, a GPU
+driver mismatch, images on a retired registry); their `blocking` findings join the blocked
+verdict, their `unknown` the unknown one, and their `risks` a list of their own. The
+package's docstring is the contract a rule module meets.
 """
 
 import re
 from datetime import datetime, time, timedelta, timezone
+
+import readiness_rules
+from readiness_rules import (
+    cgroup_v2_runtime,
+    gpu_driver_mismatch,
+    group_oom_kill,
+    node_image_coupled_agent,
+    node_local_state,
+    removed_node_label,
+    retired_registry,
+)
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -27,6 +45,26 @@ READINESS_READY = "ready"
 READINESS_BLOCKED = "blocked"
 READINESS_UNKNOWN = "unknown"
 READINESS_ORDER = (READINESS_BLOCKED, READINESS_READY, READINESS_UNKNOWN)
+
+# The workload rules, run after the three rules above, one module each under
+# readiness_rules/ (its docstring is the contract). Their `blocking` findings join the
+# blocked verdict, their `unknown` the unknown one, their `risks` the risks list the table
+# prints; `notes` go to the member's note column. Listed in the order the table prints them.
+# group B
+EXTRA_RULES = [
+    node_local_state,  # catalogue entry 4
+    removed_node_label,  # entry 12
+    cgroup_v2_runtime,  # entry 14
+    group_oom_kill,  # entry 15
+    node_image_coupled_agent,  # entry 17
+    gpu_driver_mismatch,  # entry 18
+    retired_registry,  # entry 20
+]
+RULE_RESULT_KEYS = ("blocking", "risks", "unknown")
+RULE_TEXT_KEY = "text"
+# What stands in for every rule when the workload read failed.
+RULES_UNREAD_ID = "workload-rules"
+RULES_UNREAD_DETAIL = "workload read failed; not graded"
 
 # The workload kinds a PDB is matched against. A DaemonSet is never here: a drain deletes
 # its pods rather than evicting them, so a PDB on one blocks nothing (SOP §3.3).
@@ -578,14 +616,43 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
     }
 
 
+# ------------------------------------------------------------------- workload rules
+
+
+def evaluate_extra_rules(cluster: dict, member: dict, items: list | None, target, context: dict, rules: list | None = None) -> dict:
+    """Every registered rule over one member: per-rule results under `results`, plus the
+    flattened `blocking`, `risks`, `unknown` and `notes` across rules.
+
+    `items` is the member's kubectl read (both commands' objects); None means the workload
+    read failed, and every rule is then one rule-level `unknown` entry. Each finding gains
+    `text`, the rule's own rendering, so the JSON reads without the module.
+    """
+    flattened = {key: [] for key in RULE_RESULT_KEYS}
+    out = {"results": {}, "notes": [], **flattened}
+    if items is None:
+        out["unknown"].append({**readiness_rules.rule_unknown(RULES_UNREAD_ID, None, RULES_UNREAD_DETAIL), RULE_TEXT_KEY: RULES_UNREAD_DETAIL})
+        return out
+    for rule in EXTRA_RULES if rules is None else rules:
+        result = rule.evaluate(cluster, member, items, target, context)
+        for key in RULE_RESULT_KEYS:
+            for finding in result.get(key) or []:
+                finding.setdefault(RULE_TEXT_KEY, rule.describe(finding))
+                out[key].append(finding)
+        out["notes"].extend(result.get("notes") or [])
+        out["results"][rule.RULE_ID] = result
+    return out
+
+
 # ------------------------------------------------------------------------- verdict
 
 
-def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool) -> str:
+def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool, rules: dict | None = None) -> str:
     """`blocked` beats `unknown` beats `ready`: a definite blocker is reported whatever else
-    could not be evaluated, and a member is `ready` only when every rule was evaluated."""
-    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"]:
+    could not be evaluated, and a member is `ready` only when every rule was evaluated.
+    `rules` is `evaluate_extra_rules`' result; None means the workload rules did not run
+    and leaves the verdict to the three rules."""
+    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"] or (rules and rules["blocking"]):
         return READINESS_BLOCKED
-    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"]:
+    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"] or (rules and rules["unknown"]):
         return READINESS_UNKNOWN
     return READINESS_READY
