@@ -15,10 +15,18 @@ three rules are the ones the governance SOPs define in prose:
   instant, §3.7;
 - node-pool version skew against the target control plane, §3.2: more than two minors, or
   a different major, blocks the control-plane upgrade until the pool moves.
+
+After those three, `assess_readiness` runs every module in `EXTRA_RULES`, one per entry of
+docs/designs/upgrade-failure-catalogue.md (readiness_rules/__init__.py is the contract):
+a rule's `blocking` folds into the `blocked` verdict, its `unknown` into `unknown`, its
+`risks` into the member's risks list, which the table and the report print under "risks",
+and its `notes` into the note.
 """
 
 import re
 from datetime import datetime, time, timedelta, timezone
+
+from readiness_rules import capacity, container_runtime, dataplane, intree_volumes, zonal_control_plane
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -123,6 +131,24 @@ SKEW_NOT_APPLICABLE = "n/a"
 SKEW_AUTOPILOT_REASON = "Autopilot: Google owns the node pools"
 SKEW_NO_TARGET_REASON = "no target to measure against"
 SKEW_MAJOR_DIFFERS = "major version differs from the target"
+
+# The per-entry rules, run after the three rules above. Each group adds its rules as its
+# own commented block; the order is the order the table and the JSON list them in.
+EXTRA_RULES = [
+    # group A: catalogue entries 2, 11, 13, 16 and 19.
+    capacity,
+    zonal_control_plane,
+    container_runtime,
+    dataplane,
+    intree_volumes,
+]
+RULES_BY_ID = {module.RULE_ID: module for module in EXTRA_RULES}
+# The key a folded finding carries its rule's id under, so a cell can be rendered by the
+# module that produced it.
+RULE_KEY = "rule"
+RULE_RESULT_KEYS = ("blocking", "risks", "unknown", "notes")
+RULE_FAILED = "rule failed ({error}); not evaluated"
+RULE_REASON_FORMAT = "{rule}: {reason}"
 
 
 # ---------------------------------------------------------------------------- PDBs
@@ -578,14 +604,52 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
     }
 
 
+# --------------------------------------------------------------------- extra rules
+
+
+def evaluate_extra_rules(cluster: dict, member: dict, items, target, context: dict) -> dict:
+    """Every `EXTRA_RULES` module over one member, folded.
+
+    Returns `rules` (each module's result under its `RULE_ID`) and the four result lists
+    joined across modules, each finding stamped with its rule's id so
+    `describe_extra_finding` can render it, each reason and note prefixed with it. A
+    module that raises is reported as a reason the verdict is unknown rather than
+    aborting the report: one rule's defect must not hide the other rules' findings.
+    """
+    folded = {key: [] for key in RULE_RESULT_KEYS}
+    folded["rules"] = {}
+    for module in EXTRA_RULES:
+        try:
+            result = module.evaluate(cluster, member, items, target, context)
+        except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
+            result = {"unknown": [RULE_FAILED.format(error=e)]}
+        entry = {key: list((result or {}).get(key) or []) for key in RULE_RESULT_KEYS}
+        for finding in entry["blocking"] + entry["risks"]:
+            finding[RULE_KEY] = module.RULE_ID
+        entry["unknown"] = [RULE_REASON_FORMAT.format(rule=module.RULE_ID, reason=r) for r in entry["unknown"]]
+        entry["notes"] = [RULE_REASON_FORMAT.format(rule=module.RULE_ID, reason=n) for n in entry["notes"]]
+        folded["rules"][module.RULE_ID] = entry
+        for key in RULE_RESULT_KEYS:
+            folded[key].extend(entry[key])
+    return folded
+
+
+def describe_extra_finding(finding: dict) -> str:
+    """One folded finding as a table cell, rendered by the module that produced it."""
+    module = RULES_BY_ID.get(finding.get(RULE_KEY))
+    return module.describe(finding) if module else str(finding)
+
+
 # ------------------------------------------------------------------------- verdict
 
 
-def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool) -> str:
+def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool, extra: dict | None = None) -> str:
     """`blocked` beats `unknown` beats `ready`: a definite blocker is reported whatever else
-    could not be evaluated, and a member is `ready` only when every rule was evaluated."""
-    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"]:
+    could not be evaluated, and a member is `ready` only when every rule was evaluated.
+    `extra` is `evaluate_extra_rules`' result; its `blocking` and `unknown` count the same
+    way, and its `risks` never move the verdict."""
+    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"] or (extra and extra["blocking"]):
         return READINESS_BLOCKED
-    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"]:
+    if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"] or (extra and extra["unknown"]):
         return READINESS_UNKNOWN
     return READINESS_READY

@@ -1020,6 +1020,82 @@ class ReadinessTest(unittest.TestCase):
         # The version table is still printed first and unchanged in shape.
         self.assertTrue(lines[0].startswith("| " + " | ".join(report.TABLE_COLUMNS)))
 
+    def test_extra_rules_fill_the_blocker_and_risk_columns_and_the_json(self):
+        # seeded-b gains the seeded fleet's no-surge-pool shape: the pool removes its only
+        # node first, and the one pod on it can run nowhere else. The read also carries the
+        # fleet's unenforced default-deny policy, and every zonal member is a risk.
+        b = self.clusters["p1"][0]
+        b["nodePools"].append({"name": "no-surge-pool", "version": "1.34.11-gke.1000", "status": "RUNNING", "upgradeSettings": {"maxUnavailable": 1, "strategy": "SURGE"}})
+        pin = {"seeded-role": "no-surge"}
+        taint = {"key": "seeded-role", "value": "no-surge", "effect": "NoSchedule"}
+        self.objects["seeded-b"] = [
+            {"kind": "Node", "metadata": {"name": "gke-b-default-1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {}, "status": {"allocatable": {"cpu": "940m", "memory": "2Gi"}, "conditions": [{"type": "Ready", "status": "True"}]}},
+            {"kind": "Node", "metadata": {"name": "gke-b-nosurge-1", "labels": {"cloud.google.com/gke-nodepool": "no-surge-pool", **pin}}, "spec": {"taints": [taint]}, "status": {"allocatable": {"cpu": "940m", "memory": "2Gi"}, "conditions": [{"type": "Ready", "status": "True"}]}},
+            {
+                "kind": "Pod",
+                "metadata": {"namespace": "seeded-upgrade", "name": "pinned-batch-runner-7d9f-x1", "labels": {"app": "pinned-batch-runner", "pod-template-hash": "7d9f"}, "ownerReferences": [{"kind": "ReplicaSet", "name": "pinned-batch-runner-7d9f"}]},
+                "spec": {"nodeName": "gke-b-nosurge-1", "nodeSelector": pin, "tolerations": [{"key": "seeded-role", "operator": "Equal", "value": "no-surge", "effect": "NoSchedule"}], "containers": [{"name": "pause", "resources": {"requests": {"cpu": "250m", "memory": "256Mi"}}}]},
+                "status": {"phase": "Running"},
+            },
+            {"kind": "NetworkPolicy", "metadata": {"namespace": "seeded-upgrade", "name": "default-deny"}, "spec": {"podSelector": {}}},
+        ]
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects)
+        rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_OK)
+        by_name = {m["cluster"]: m["readiness"] for m in data["members"]}
+
+        b = by_name["seeded-b"]
+        self.assertEqual(b["status"], "blocked")
+        self.assertEqual([f["rule"] for f in b["rule_blocking"]], ["surge-capacity"])
+        self.assertEqual(b["rule_blocking"][0]["workloads"][0]["owner"], "Deployment seeded-upgrade/pinned-batch-runner")
+        self.assertEqual([f["rule"] for f in b["risks"]], ["zonal-control-plane", "network-dataplane"])
+        self.assertEqual(b["risks"][1]["namespaces"], {"seeded-upgrade": 1})
+        self.assertEqual(sorted(b["rules"]), ["container-runtime", "in-tree-volumes", "network-dataplane", "surge-capacity", "zonal-control-plane"])
+        self.assertEqual(b["rules"]["surge-capacity"]["blocking"], b["rule_blocking"])
+
+        a = by_name["seeded-a"]
+        self.assertEqual(a["status"], "ready")  # a risk never moves the verdict
+        self.assertEqual([f["rule"] for f in a["risks"]], ["zonal-control-plane"])
+        self.assertEqual(a["rule_blocking"], [])
+        host = by_name["robot-host"]
+        self.assertEqual(host["risks"], [])  # regional, Dataplane V2 by default on Autopilot
+        self.assertEqual(data["readiness"]["members_with_risks"], 2)
+        self.assertEqual(data["readiness"]["summary"], {"blocked": 2, "ready": 1, "unknown": 0})
+
+        lines = text.splitlines()
+        self.assertTrue(("| " + " | ".join(report.READINESS_COLUMNS) + " |").endswith("| other blockers | risks | note |"))
+        self.assertIn("| " + " | ".join(report.READINESS_COLUMNS) + " |", lines)
+        b_row = next(l for l in lines if l.startswith("| p1 | seeded-b |") and "| blocked |" in l)
+        self.assertIn("pool no-surge-pool (maxSurge 0, maxUnavailable 1; 1 node(s), not autoscaled) removes a node before its replacement exists", b_row)
+        self.assertIn("Deployment seeded-upgrade/pinned-batch-runner (250m / 256Mi, pinned to the pool)", b_row)
+        self.assertIn("control plane is zonal (us-central1-a)", b_row)
+        self.assertIn("NetworkPolicies in seeded-upgrade (1)", b_row)
+        host_row = next(l for l in lines if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
+        self.assertIn("| none | none |", host_row)
+        self.assertIn("2 blocked, 1 ready, 0 unknown; 2 with risks", text)
+
+    def test_the_whole_run_is_listed_before_any_member_is_graded(self):
+        # The dataplane rule names the Dataplane V2 peers of a legacy member; a peer in a
+        # project listed later still counts, so the listing has to finish first.
+        legacy = cluster("legacy", "us-central1-a", self.TARGET, [("p", self.TARGET)])
+        v2 = cluster("v2-host", "us-central1", self.TARGET, [("p", self.TARGET)])
+        v2["networkConfig"] = {"datapathProvider": "ADVANCED_DATAPATH"}
+        objects = {"legacy": [{"kind": "NetworkPolicy", "metadata": {"namespace": "shop", "name": "deny"}, "spec": {}}], "v2-host": []}
+        fake = FakeReadinessCommands({"p1": [legacy], "p2": [v2]}, {}, objects)
+        out_path = os.path.join(tempfile.mkdtemp(), "report.json")
+        with patch.object(report, "run_cmd", fake), redirect_stdout(io.StringIO()):
+            rc = report.main(["--state-dir", self.state_dir, "--project", "p1", "--project", "p2", "--target-version", self.TARGET, "--readiness", "--at", self.AT, "--kubeconfig-dir", self.kubeconfig_dir, "--output", out_path])
+        self.assertEqual(rc, report.EXIT_OK)
+        with open(out_path, encoding="utf-8") as f:
+            data = json.load(f)
+        legacy_risks = next(m for m in data["members"] if m["cluster"] == "legacy")["readiness"]["risks"]
+        self.assertEqual([f["rule"] for f in legacy_risks], ["zonal-control-plane", "network-dataplane"])
+        self.assertEqual(legacy_risks[1]["peers_on_v2"], ["v2-host"])
+        # Listing both projects came before the first member's credentials.
+        kinds = [c[1] if c[0] == "gcloud" and c[1] == "container" and c[2] == "clusters" and c[3] == "list" else ("get-credentials" if c[3:4] == ["get-credentials"] else None) for c in fake.calls if c[:1] == ["gcloud"]]
+        kinds = [k for k in kinds if k]
+        self.assertEqual(kinds[:2], ["container", "container"])
+
     def test_kubeconfig_per_target_and_dns_endpoint_only_when_allowed(self):
         fake = FakeReadinessCommands(self.clusters, {}, self.objects)
         rc, _, data = self._run(fake)
@@ -1036,7 +1112,8 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(all(k and k.startswith(self.kubeconfig_dir + os.sep) for k in fake.kubeconfigs))
         self.assertTrue(os.path.isdir(self.kubeconfig_dir))
         kubectl = [c for c in fake.calls if c[:1] == ["kubectl"]]
-        self.assertEqual(kubectl, [["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]] * 3)
+        self.assertEqual(kubectl, [["kubectl", "get", report.KUBECTL_RESOURCES, "-A", "-o", "json"]] * 3)
+        self.assertEqual(report.KUBECTL_RESOURCES, "pdb,deploy,statefulset,daemonset,pods,nodes,pv,networkpolicy")
         self.assertEqual(data["readiness"]["kubeconfig_dir"], self.kubeconfig_dir)
         self.assertEqual({m["cluster"]: m["readiness"]["kubeconfig"] for m in data["members"]}["seeded-b"], expected)
 
@@ -1060,7 +1137,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(by_name["robot-host"]["status"], "blocked")
         self.assertEqual(by_name["seeded-b"]["status"], "blocked")
         self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
-        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: kubectl get pdb,deploy,statefulset -A -o json failed (1)", text)
+        self.assertIn(f"- read failed for p1 (us-central1-a) cluster seeded-a: kubectl get {report.KUBECTL_RESOURCES} -A -o json failed (1)", text)
         self.assertIn("| read failed |", text)
         # The version row is unaffected, and the rollout record does not treat the project as unread.
         self.assertEqual({m["cluster"]: m["status"] for m in data["members"]}["seeded-a"], report.STATUS_CURRENT)

@@ -1,6 +1,6 @@
 ---
 name: fleet-upgrade-verification
-description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, and node-pool version skew. Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
+description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, node-pool version skew, a pool that removes a node before its replacement exists, and in-tree PersistentVolumes the PD CSI driver add-on cannot attach, and lists the risks that do not block: a zonal control plane, a containerd major change under agents on the runtime socket, and NetworkPolicies no dataplane enforces. Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
 ---
 
 # Fleet upgrade verification
@@ -13,8 +13,11 @@ fleet is from a release-channel default, or whether the repositories are ready f
 version. Run the version report again during a rollout and it also says, per member, what changed
 since the previous run and which members have stopped moving (see "Track a rollout across runs").
 With `--readiness` it also says, per member, what would stop the upgrade: a PodDisruptionBudget
-that blocks every node drain, a maintenance exclusion or window, or node pools too far below the
-target (see "Check upgrade readiness"). For upgrade plans, runbooks and checklists, use the
+that blocks every node drain, a maintenance exclusion or window, node pools too far below the
+target, a pool that removes a node before its replacement exists with no room for its pods, or an
+in-tree PersistentVolume the PD CSI driver add-on cannot attach, and, as risks that do not block, a
+zonal control plane, a containerd major change under agents on the runtime socket, and
+NetworkPolicies that apply nowhere today (see "Check upgrade readiness"). For upgrade plans, runbooks and checklists, use the
 `gke-upgrades` skill; it links back here when the question is one these two scripts answer.
 
 "Version skew" here is the gap between a member's versions and the target. It is not
@@ -144,15 +147,17 @@ members missing this run.
 the same target as the member's version row, and a `readiness` object per member in the JSON
 (`members[].readiness`, with a top-level `readiness` block holding the instant evaluated and a
 count per verdict). Without the flag nothing changes. Three rules, each derived from a governance
-SOP check and named beside it; the maintenance rule departs from its SOP where the two differ,
-and says so below:
+SOP check and named beside it, then five per-entry rules from the upgrade-failure catalogue; the
+maintenance rule departs from its SOP where the two differ, and says so below:
 
 - **Drain-blocking PDBs** (`obtainability_audit_sop.md` §3.4). For each member the script runs
   `gcloud container clusters get-credentials` into a kubeconfig of its own under
   `${HERMES_HOME:-/opt/data}/.kubeconfigs/` (`kubeconfig_<project>_<cluster>_<location>.yaml`, one file per
   target so concurrent reads never share a current-context; `--kubeconfig-dir` moves the
   directory), adding `--dns-endpoint` when the cluster record says its DNS endpoint accepts
-  external traffic, then one `kubectl get pdb,deploy,statefulset -A -o json`. A PDB is matched to
+  external traffic, then one
+  `kubectl get pdb,deploy,statefulset,daemonset,pods,nodes,pv,networkpolicy -A -o json`, the one
+  read every rule below shares (the kinds after the first three are the per-entry rules'). A PDB is matched to
   the Deployments and StatefulSets in its namespace whose pod-template labels satisfy its
   selector (`matchLabels` and `matchExpressions`), and it blocks every drain when
   `maxUnavailable` is `0` or `0%`, or when `minAvailable` demands every expected pod: an integer
@@ -191,12 +196,61 @@ and says so below:
   (GKE keeps nodes within two minors of the control plane); exactly 2 is at the ceiling and
   goes in the note. Autopilot members read `n/a`.
 
+The per-entry rules (`upgrade_readiness.EXTRA_RULES`, one module each under `readiness_rules/`,
+numbered by their entry in the upgrade-failure catalogue of the repository's design docs) run
+after those three. Each returns blockers, risks, reasons it could not decide, and notes; a blocker
+joins the verdict, a risk never does, and the table prints them under `other blockers` and
+`risks`:
+
+- **Surge capacity** (`surge-capacity`, entry 2). A pool whose upgrade settings take a node away
+  before its replacement exists (`maxUnavailable` above 0 on the surge strategy, or a blue-green
+  upgrade with the autoscaled rollout policy), measured against the room its largest node's pods
+  need: allocatable minus requests, summed over the pool's other nodes for a pod only this pool's
+  nodes can take (a selector, affinity or taint no other node satisfies) and over every other
+  schedulable node for the rest, DaemonSet and mirror pods excepted. It blocks when `maxSurge` is 0,
+  `maxUnavailable` above 0, the autoscaler cannot grow the pool (at its ceiling, or not autoscaled)
+  and the room is short; the same shortfall with some surge left, a growable autoscaler or an
+  autoscaled blue-green rollout is a risk; a pool with the room is a note. The cell names the pool,
+  its settings, the node, the requests and the largest workloads. A pool at or above the target is
+  not graded; no target, an unparsable pool version or quantity, or a failed cluster read is
+  unknown. GKE's defaults (`maxSurge` 1, `maxUnavailable` 0) never trigger it.
+- **Zonal control plane** (`zonal-control-plane`, entry 11). A cluster whose `location` is a zone
+  is a risk on every report, never a blocker: the API is unavailable for minutes while GKE
+  replaces the one replica, the pods keep running, and the cell carries the retry advice. A
+  location that is neither a zone nor a region is unknown.
+- **Container runtime** (`container-runtime`, entry 13). For each pool below the target, the
+  containerd major its nodes report (`status.nodeInfo.containerRuntimeVersion`, or the table by the
+  pool's minor when the nodes were not read) against the major the target's node image ships
+  (`upgrade_shape_tables.CONTAINERD_MAJOR_BY_GKE_MINOR`: Linux images at 1.33, Windows Server at
+  1.35, GKE's containerd 2 page as the source), paired with every pod or template that mounts a
+  runtime socket (`/run/containerd/containerd.sock`, `/var/run/docker.sock`, either spelling) through
+  a `hostPath` volume. A pool whose major changes under socket clients is a risk naming the pool,
+  both majors and the clients' owners; a change with no client, and clients with no change, are
+  notes; a change on a cluster whose read failed is unknown.
+- **Network dataplane** (`network-dataplane`, entry 16). A cluster on the legacy dataplane
+  (`networkConfig.datapathProvider` absent or `LEGACY_DATAPATH`) whose network policy add-on is off
+  and whose namespaces carry NetworkPolicies is a risk naming the namespaces and their counts: the
+  policies apply nowhere today and start to apply the moment enforcement turns on, at the node
+  rebuild after enabling the add-on or on the Dataplane V2 cluster that replaces this one, which is
+  the shape GKE's recommender files as `NETWORK_POLICIES_UNRECONCILED`; the cell names the run's
+  Dataplane V2 members, where the same policies would be enforced. Policies the add-on enforces
+  are a note; a Dataplane V2 member is clean; a failed read on a legacy member is unknown.
+- **In-tree volumes** (`in-tree-volumes`, entry 19). Every PersistentVolume with an in-tree
+  `gcePersistentDisk` source, its claim, and the pods and templates that mount the claim, against
+  `addonsConfig.gcePersistentDiskCsiDriverConfig.enabled`. With the add-on off, a volume a workload
+  mounts blocks (the attach fails when a drain moves the pod), naming the volume and the workload,
+  and an unmounted one is a risk; with the add-on on, every in-tree volume is a risk, since it
+  attaches through CSI migration rather than the driver. A failed read is unknown.
+
 A member is `blocked` when any rule blocks, whatever else could not be evaluated; `unknown` when
 nothing blocked but a rule could not be evaluated (the cluster read failed, there is no target,
-an exclusion's scope or a pool's version was unreadable); `ready` only when every rule was
-evaluated and none blocks. A failed `get-credentials` or `kubectl get` is listed under the table
+an exclusion's scope or a pool's version was unreadable, a per-entry rule said so); `ready` only
+when every rule was evaluated and none blocks. A risk never moves the verdict. In the JSON each
+member carries `readiness.rules` (every per-entry rule's result under its id), `rule_blocking` and
+`risks`; the top-level `readiness` block counts the members with risks. A failed `get-credentials` or `kubectl get` is listed under the table
 as a read failure for that member and sets exit code 1, like a failed gcloud read; the member's
-maintenance and skew rules are still graded, and the other members are unaffected. `--at` with a
+maintenance, skew and zonal-control-plane rules are still graded, the other per-entry rules
+read as unknown, and the other members are unaffected. `--at` with a
 value that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage
 error (exit 2).
 
@@ -265,7 +319,11 @@ as one that is stuck, and the elapsed time is what lets the user tell them apart
 baseline line means there is nothing to compare yet; say when to run again. When the run printed
 a readiness table, paste it too and name each `blocked` member with what blocks it as the table
 states it: the PDB by `namespace/name` with its field and workload, the exclusion by name with
-its scope and end time and that it holds back automatic upgrades only, the pool with its skew.
+its scope and end time and that it holds back automatic upgrades only, the pool with its skew,
+the pool that removes a node first with the workloads it strands, the in-tree volume with its
+workload and the add-on's state. Name each member's risks from the `risks` column as risks, not
+blockers: the zonal control plane with the retry advice, the pool whose containerd major changes
+with the agents on the socket, the namespaces whose NetworkPolicies no dataplane enforces.
 Say what the operator has to change before the upgrade can proceed; do not change it, and do not
 propose deleting an exclusion. When the question is a target version's readiness, paste each
 repository's deprecation section too, with its source line, and state the floor and target the

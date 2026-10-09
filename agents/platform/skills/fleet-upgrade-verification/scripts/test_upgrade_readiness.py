@@ -392,6 +392,13 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(r.readiness_status({"blocking": [{"pdb": "a/b"}]}, self.CLEAR, self.NO_SKEW, False), "blocked")
         self.assertEqual(r.readiness_status(None, {"blocking_exclusions": ["x"], "undecided_exclusions": []}, self.NO_SKEW, True), "blocked")
         self.assertEqual(r.readiness_status(None, self.CLEAR, {"blocking": ["p"], "unknown": []}, True), "blocked")
+        extra = {"blocking": [{"rule": "in-tree-volumes"}], "unknown": [], "risks": []}
+        self.assertEqual(r.readiness_status(None, self.CLEAR, self.NO_SKEW, False, extra), "blocked")
+
+    def test_extra_rules_fold_the_same_way(self):
+        pdbs = {"blocking": []}
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {"blocking": [], "unknown": ["surge-capacity: no target"], "risks": []}), "unknown")
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {"blocking": [], "unknown": [], "risks": [{"rule": "zonal-control-plane"}]}), "ready")
 
 
 if __name__ == "__main__":
