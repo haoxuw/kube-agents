@@ -167,6 +167,9 @@ ADDED_AFTER_THE_MOVE = [
     "chat-fanout-fleet-restarts-rows",  # a fleet question fanned out one titled card per cluster
     "backup-dr-cmek-selected-namespaces-probe",  # the gke-backup-dr skill sync
     "findings-decision-covers-item",  # the findings queue's item-wide decision
+    "upgrades-readiness-surge-capacity",  # catalogue entries 2, 11 and 16 through the readiness report's per-entry rules
+    "upgrades-readiness-zonal-control-plane",
+    "upgrades-readiness-legacy-dataplane",
 ]
 
 # Admitted after the split, each by a pull request that cited the record

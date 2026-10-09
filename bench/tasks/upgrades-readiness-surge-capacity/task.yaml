@@ -1,0 +1,169 @@
+# Upgrade-failure catalogue entry 2 (docs/designs/upgrade-failure-catalogue.md):
+# no spare capacity for the displaced pods. The seeded fleet plants the shape on
+# slot b: no-surge-pool, maxSurge 0 with maxUnavailable 1 and one node, so GKE
+# takes its only node away before a replacement exists (role
+# readiness-surge-blocked), and pinned-batch-runner, the one workload pinned to
+# it by node selector and taint (role readiness-pinned-workload). The readiness
+# mode of fleet-upgrade-verification grades the pair with its surge-capacity
+# rule: the pool removes a node first, is not autoscaled, and the pinned pod has
+# no room on the pool's other nodes, so the pool is an other blocker. Every other
+# seeded pool is on GKE's default surge settings and is not named.
+#
+# What the case grades is the join: not the setting alone (a configuration), not
+# the pinned pod alone, but the pool named as what takes the workload down during
+# the node upgrade. The prompt asks for one declared line per seeded cluster in a
+# fixed vocabulary; the deterministic objectives read those lines and nothing
+# else, the prose is the judge's. The report is graded, not the tool path: an
+# agent that reads the pool's upgrade settings and the pod's placement any other
+# way and declares the same lines passes.
+#
+# The patterns name the slots through `{cluster:<slot>}`, which the verifier
+# expands to the cluster the runner recorded for the slot, so a fleet applied
+# with another prefix is graded on its own names; `seeded-a` to `seeded-d`
+# appear only in the expected output, as the default-prefix rendering.
+#
+# Isolation class: read-only (chat prompt; the script reads with gcloud
+# container and kubectl get and writes only its own record and per-member
+# kubeconfig files; no audit helper, no GitOps-repo write). Eligible tier:
+# nightly from its first merge; a presubmit seat is a later pull request that
+# cites its record.
+#
+# Mutation safeguard: the planted workload is a Kubernetes object, so the case
+# carries a fleet_resource_property check on the pin that makes the pool's
+# setting an outage; the pool's upgrade settings are a GKE-level facet the
+# fleet's scheduled reconcile owns, as the readiness-surge-blocked role's own
+# state assertions record.
+id: upgrades-readiness-surge-capacity
+name: Upgrade readiness names the pool that removes a node before its replacement exists
+
+prompt: >-
+  For every cluster in this project, run the upgrade readiness check against
+  each cluster's release channel default and tell me which node pools would take
+  a node away before its replacement exists during the node upgrade (a surge
+  setting that allows unavailability, or an autoscaled blue-green rollout),
+  whether the pods on such a pool have room elsewhere, and which workloads go
+  down when the node is removed. Read only; change and upgrade nothing. End your
+  answer with one line per seeded cluster in exactly this form, no other words on
+  the line: "<cluster>: pool that removes a node first: <pool name|none>; blocks
+  the upgrade: <yes|no>".
+
+expected_output: >-
+  The version table and the readiness table read during this run. seeded-b is
+  reported with its pool no-surge-pool at maxSurge 0 and maxUnavailable 1, not
+  autoscaled, one node: GKE removes that node before a replacement exists, and
+  the pod of pinned-batch-runner in seeded-upgrade (250m CPU, 256Mi) can run only
+  on that pool, so it has nowhere to go and is down for the whole node recreate;
+  the pool blocks the upgrade. The answer says what to change (return the pool
+  to maxSurge 1 and maxUnavailable 0, or give the pool a second node) and does
+  not change it. The other seeded clusters are reported as having no pool that
+  removes a node first, since their pools are on GKE's default surge settings.
+  It ends with the declared lines: "seeded-b: pool that removes a node first:
+  no-surge-pool; blocks the upgrade: yes" and, for seeded-a, seeded-c and
+  seeded-d, "pool that removes a node first: none; blocks the upgrade: no". It
+  cites no CVE identifiers and performs no upgrade.
+
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: upgrades
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: haoxuw
+
+# Named by ROLE, not cluster: bench/tf/fleet/fixtures.json;
+# docs/designs/bench-fleet-catalog.md is the rule. The first two are the
+# planted pair on slot b. The other three are one per remaining slot, so the
+# declared-line objectives can tell a cluster the agent missed from a cluster
+# the project does not have: a slot without a credential is an `error` about
+# the environment, never a `fail` charged to the agent.
+fixtures:
+  - readiness-surge-blocked
+  - readiness-pinned-workload
+  - crashloop-workload
+  - drift-outlier
+  - zonal-skew-scheduling
+
+verification_spec:
+  # The declared lines are what the deterministic objectives read: one line per
+  # seeded cluster, fixed vocabulary, the cluster named at the start of the
+  # line. Every pattern matches the whole declared frame, anchored at both ends
+  # of the line, so prose that happens to open with a slot name is neither
+  # accepted nor forbidden: it is the judge's. `fold_decoration: true` has the
+  # verifier strip a line's bullet, quotes, link or trailing stop before any
+  # pattern runs; a parenthetical after the cluster's name is allowed.
+  - name: every-seeded-cluster-has-a-declared-line
+    role: objective
+    # assert, not converge: the transcript is immutable once the run ends.
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - crashloop-workload
+        - readiness-surge-blocked
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: pool that removes a node first: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:b}(?:\s*\([^)\n]*\))?: pool that removes a node first: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: pool that removes a node first: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: pool that removes a node first: [^;\n]+; blocks the upgrade: [^\n]+$)'
+
+  # The planted pair: slot b's line names no-surge-pool and says it blocks. A
+  # line for slot b naming any other pool, or none, or not blocking, is the
+  # wrong read whatever the prose says.
+  - name: the-laggard-names-no-surge-pool-as-a-blocker
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - readiness-surge-blocked
+        - readiness-pinned-workload
+      any_of_patterns:
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: pool that removes a node first: no-surge-pool; blocks the upgrade: yes$'
+      forbidden_patterns:
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: pool that removes a node first: (?!no-surge-pool;)[^;\n]+; blocks the upgrade: [^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: pool that removes a node first: no-surge-pool; blocks the upgrade: (?!yes$)[^\n]+$'
+
+  # The other three slots are on GKE's default surge settings: a report that
+  # names a pool there, or blocks them, has read a setting that is not there.
+  - name: the-other-clusters-declare-no-such-pool
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - crashloop-workload
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: pool that removes a node first: none; blocks the upgrade: no$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: pool that removes a node first: none; blocks the upgrade: no$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: pool that removes a node first: none; blocks the upgrade: no$)'
+      forbidden_patterns:
+        - '(?m)^(?:{cluster:a}|{cluster:c}|{cluster:d})(?:\s*\([^)\n]*\))?: pool that removes a node first: (?!none;)[^;\n]+; blocks the upgrade: [^\n]+$'
+        - '(?m)^(?:{cluster:a}|{cluster:c}|{cluster:d})(?:\s*\([^)\n]*\))?: pool that removes a node first: [^;\n]+; blocks the upgrade: (?!no$)[^\n]+$'
+
+  - name: no-invented-cves
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      # No vulnerability feed; a CVE id in a readiness report is an invention.
+      forbidden_phrases: ["CVE-"]
+
+  # The pin is what turns the pool's setting into an outage; dropping the
+  # selector heals the fixture while every probe still passes. A run that
+  # "fixes" the workload instead of reporting it fails here.
+  - name: the-pinned-workload-is-still-pinned
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: fleet_resource_property
+      fixture_role: readiness-pinned-workload
+      kind: deployment
+      resource_name: pinned-batch-runner
+      namespace: seeded-upgrade
+      path: spec.template.spec.nodeSelector.seeded-role
+      op: eq
+      value: no-surge

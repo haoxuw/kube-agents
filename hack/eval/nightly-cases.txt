@@ -737,3 +737,21 @@
 # the rows through the Session KV server's findings routes and resolves them on
 # destroy. No fixture; the host install only.
 ./tasks/findings-decision-covers-item/task.yaml
+
+# Upgrade-failure catalogue entry 2 through the readiness report's surge-capacity
+# rule: no-surge-pool on slot b removes its only node before a replacement exists
+# and pinned-batch-runner can run nowhere else. Read-only chat prompt over the
+# seeded fleet's readiness-surge-blocked and readiness-pinned-workload roles,
+# graded on declared lines. Nightly from its first merge.
+./tasks/upgrades-readiness-surge-capacity/task.yaml
+
+# Catalogue entry 11 through the readiness report's zonal-control-plane rule:
+# every seeded cluster's zonal control plane is a risk, never a block, on the
+# report. Read-only; no planted fixture. Nightly from its first merge.
+./tasks/upgrades-readiness-zonal-control-plane/task.yaml
+
+# Catalogue entry 16 through the readiness report's network-dataplane rule: the
+# seeded clusters' legacy dataplane with the network policy add-on off and
+# default-deny policies that apply nowhere until enforcement turns on. Read-only;
+# the fleet's own shape, no planted fixture. Nightly from its first merge.
+./tasks/upgrades-readiness-legacy-dataplane/task.yaml

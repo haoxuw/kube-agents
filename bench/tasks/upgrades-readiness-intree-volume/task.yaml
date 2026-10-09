@@ -1,0 +1,103 @@
+# Upgrade-failure catalogue entry 19 (docs/designs/upgrade-failure-catalogue.md):
+# in-tree volumes lose their CSI path. The fixture is the intree-pd-volume role
+# on slot a: intree-pd, a PersistentVolume written against the in-tree
+# gcePersistentDisk plugin over the fleet's own disk, bound by the intree-pd
+# claim in seeded-shapes and mounted by the intree-pd-reader Deployment, so the
+# attach goes through CSI migration. The role is designed and not yet on the
+# pool projects, so this case waits in scripts/validate_bench_cases.py's
+# FIXTURE_NOT_READY under #2668 and runs nowhere until the pull request that
+# moves it to the nightly file cites a reconcile that planted the role on every
+# pool project.
+#
+# The readiness mode of fleet-upgrade-verification grades the entry with its
+# in-tree-volumes rule: every PersistentVolume with an in-tree source, its
+# claim, and the workloads mounting the claim, against the cluster's PD CSI
+# driver add-on. seeded-a's add-on is on (the fleet's other volumes are CSI
+# volumes on pd.csi.storage.gke.io), so the volume is a risk that attaches
+# through the migration shim, not a blocker; with the add-on off it would block
+# the reader's reschedule. What the case grades is that the volume is named
+# with the add-on's state and the right grade; the workload and the migration
+# advice are the judge's. The prompt asks for one declared line per in-tree
+# volume in a fixed vocabulary; the deterministic objectives read those lines
+# and nothing else.
+#
+# `{cluster:a}` expands to the cluster the runner recorded for slot a.
+#
+# Isolation class: read-only (chat prompt; the script reads with gcloud
+# container and kubectl get and writes only its own record and per-member
+# kubeconfig files). Eligible tier: nightly once the fixture is on the pool.
+#
+# No deterministic mutation safeguard yet: the role is not in the fleet
+# catalogue on main, so a fleet_resource_property check on the volume's source
+# has no probe to ground on; the pull request that unparks the case adds the
+# check with the role's probe list.
+id: upgrades-readiness-intree-volume
+name: Upgrade readiness names the in-tree PersistentVolume and the add-on it depends on
+
+prompt: >-
+  For every cluster in this project, run the upgrade readiness check against
+  each cluster's release channel default and tell me which PersistentVolumes
+  still use the in-tree gcePersistentDisk source, whether each cluster's PD CSI
+  driver add-on is on, which workloads mount those volumes, and whether any of
+  it stops the upgrade. Read only; change and upgrade nothing. End your answer
+  with one line per in-tree volume, in exactly this form, no other words on the
+  line: "<cluster>/<volume>: kind PersistentVolume; pd csi driver add-on:
+  <on|off>; blocks the upgrade: <yes|no>", and for a cluster with no in-tree
+  volume the line "<cluster>: no in-tree volumes".
+
+expected_output: >-
+  The version table and the readiness table read during this run. On seeded-a
+  the PersistentVolume intree-pd is named as an in-tree gcePersistentDisk
+  volume over the disk seeded-a-intree-pd, bound by the claim intree-pd in
+  seeded-shapes and mounted by the Deployment intree-pd-reader; seeded-a's PD
+  CSI driver add-on is on, so the volume attaches through CSI migration and is
+  a risk rather than a blocker, with the advice to move it to
+  pd.csi.storage.gke.io, and the answer says that with the add-on off the
+  reader's pod would not reattach after a drain. It ends with the declared line
+  "seeded-a/intree-pd: kind PersistentVolume; pd csi driver add-on: on; blocks
+  the upgrade: no" and "no in-tree volumes" lines for the clusters with none.
+  It cites no CVE identifiers and performs no upgrade.
+
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: upgrades
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: haoxuw
+
+# Named by ROLE, not cluster: the role this case's issue plants, which the
+# fixture catalogue on main does not define yet (FIXTURE_NOT_READY, #2668).
+fixtures:
+  - intree-pd-volume
+
+verification_spec:
+  # The declared line for the planted volume: its cluster and name, its kind,
+  # the add-on's state and that it does not block. A line with the add-on off,
+  # or calling it a blocker, or a "no in-tree volumes" line for its cluster, is
+  # the wrong read whatever the prose says.
+  - name: the-planted-volume-is-named-with-the-addon-on-and-does-not-block
+    role: objective
+    # assert, not converge: the transcript is immutable once the run ends.
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - intree-pd-volume
+      any_of_patterns:
+        - "(?m)^{cluster:a}/intree-pd: kind persistentvolume; pd csi driver add-on: on; blocks the upgrade: no$"
+      forbidden_patterns:
+        - '(?m)^{cluster:a}/intree-pd: kind [^;\n]+; pd csi driver add-on: (?!on;)[^;\n]+; blocks the upgrade: [^\n]+$'
+        - '(?m)^{cluster:a}/intree-pd: kind [^;\n]+; pd csi driver add-on: [^;\n]+; blocks the upgrade: (?!no$)[^\n]+$'
+        - '(?m)^{cluster:a}(?:\s*\([^)\n]*\))?: no in-tree volumes$'
+
+  - name: no-invented-cves
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      # No vulnerability feed; a CVE id in a readiness report is an invention.
+      forbidden_phrases: ["CVE-"]

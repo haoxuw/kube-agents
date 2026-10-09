@@ -243,6 +243,20 @@ FIXTURE_NOT_READY = {
         "project; fixture defined in #1893, waiting on fleet re-apply and pool "
         "verification sweep"
     ),
+    "upgrades-readiness-containerd-socket": (
+        "#2662: needs the containerd-socket-agent role (node-runtime-probe, a "
+        "DaemonSet mounting the containerd socket in seeded-shapes on slot a) "
+        "applied to every pool project; the role is designed on the fleet-shape "
+        "fixture branch and the catalogue on main does not define it, so the "
+        "case's planted-object line has nothing to read"
+    ),
+    "upgrades-readiness-intree-volume": (
+        "#2668: needs the intree-pd-volume role (the in-tree gcePersistentDisk "
+        "volume intree-pd, its claim and the intree-pd-reader Deployment in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and the catalogue on main "
+        "does not define it, so the case's planted-object line has nothing to read"
+    ),
     "gitops-drift-noise-filtered-triage": (
         "#911: needs an audit ingress on the eval install -- a drift-audit "
         "topic, a subscription and a detector enabled to pull from it, none of "
