@@ -167,6 +167,7 @@ ADDED_AFTER_THE_MOVE = [
     "chat-fanout-fleet-restarts-rows",  # a fleet question fanned out one titled card per cluster
     "backup-dr-cmek-selected-namespaces-probe",  # the gke-backup-dr skill sync
     "findings-decision-covers-item",  # the findings queue's item-wide decision
+    "upgrades-deprecated-api-caller-named",  # upgrade-failure catalogue entry 9, the audit-log read on the deprecated-api-caller role
 ]
 
 # Admitted after the split, each by a pull request that cited the record

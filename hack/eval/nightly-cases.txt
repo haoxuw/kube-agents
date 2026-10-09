@@ -224,6 +224,13 @@
 # infra lock, so it is the thirteenth tofu case: ~10 more serial minutes
 # there. With oobe-first-run-audits, the twelfth (~120 at its 2400s hint),
 # the thirteen come to ~583 serial minutes against the 480m deadline.
+#
+# 2026-10-09 adds upgrades-deprecated-api-caller-named: one case, three units
+# at the 200s default (a read-only chat turn; the readiness report adds one
+# `gcloud logging read` per cluster, under its 60-second cap). deployer: noop,
+# so the infra lock is untouched. It is the last entry below. Counted from the
+# lists rather than the paragraph above, which had fallen one behind:
+# sixty-seven cases (201 units) here, of an eighty-one-case, 243-unit matrix.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -737,3 +744,12 @@
 # the rows through the Session KV server's findings routes and resolves them on
 # destroy. No fixture; the host install only.
 ./tasks/findings-decision-covers-item/task.yaml
+
+# Upgrade-failure catalogue entry 9 (a feature is deprecated but still served):
+# the audit log's k8s.io/deprecated stamps on seeded-a's legacy-endpoints-writer,
+# read through the readiness report's deprecated-api-callers rule or by hand,
+# graded on a declared line per seeded cluster. deployer: noop; reads the
+# deprecated-api-caller role and the three slot roles beside it, mutates
+# nothing. Nightly from its first merge; a presubmit seat is a later pull
+# request that cites its record.
+./tasks/upgrades-deprecated-api-caller-named/task.yaml

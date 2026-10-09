@@ -243,6 +243,30 @@ FIXTURE_NOT_READY = {
         "project; fixture defined in #1893, waiting on fleet re-apply and pool "
         "verification sweep"
     ),
+    "upgrades-removed-api-caller-named": (
+        "#2655: needs a removed-api-caller role, a writer that calls an API "
+        "version the cluster's next minor stops serving, which no standing fleet "
+        "role can carry: no Kubernetes minor after 1.32 removes a served API "
+        "version, and 1.31, the last minor that serves one, leaves GKE's Extended "
+        "channel on 2026-10-22 (catalogue entry 6). The deprecated-api-caller role "
+        "is stamped deprecated, not removed, and stands in for entry 9. The "
+        "readiness report's removed-api-callers rule is covered by unit tests on "
+        "a captured log sample; the case waits for the issue to plant the role on "
+        "a purpose-built cluster, or for the next minor that removes a served API"
+    ),
+    "upgrades-pod-security-latest-pinned-named": (
+        "#2657: needs the moving-admission-default role, the seeded-defaults "
+        "namespace enforcing baseline at enforce-version latest with "
+        "baseline-edge-worker in it, applied to every pool project; the role is "
+        "designed in the catalogue and is not in bench/tf/fleet/fixtures.json on "
+        "main"
+    ),
+    "upgrades-stale-client-skew-named": (
+        "#2659: needs the stale-client-skew role, the stale-kubectl-client CronJob "
+        "running kubectl v1.29.0 against seeded-a every ten minutes, applied to "
+        "every pool project; the role is designed in the catalogue and is not in "
+        "bench/tf/fleet/fixtures.json on main"
+    ),
     "gitops-drift-noise-filtered-triage": (
         "#911: needs an audit ingress on the eval install -- a drift-audit "
         "topic, a subscription and a detector enabled to pull from it, none of "
