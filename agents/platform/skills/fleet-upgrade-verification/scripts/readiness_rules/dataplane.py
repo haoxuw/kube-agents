@@ -12,20 +12,17 @@ enabling the add-on or on the Dataplane V2 cluster that replaces this one. The r
 (`networkPolicy.enabled`, which `addonsConfig.networkPolicyConfig.disabled` turns off)
 and the NetworkPolicy objects, and reports that shape as a risk naming the namespaces
 and their policy counts, with the clusters in the run already on Dataplane V2 where a
-rehearsal would enforce the same policies. A legacy cluster whose add-on enforces its
-policies is a note; a Dataplane V2 cluster is nothing.
+rehearsal would enforce the same policies. Every other legacy cluster gets a note stating
+its dataplane and enforcement, with its policies enforced by the add-on or with none to
+enforce, so a report states the fact for every legacy member; a Dataplane V2 cluster is
+nothing.
 
 Sources: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dataplane-v2 (the
 no-migration rule) and the recommender's network-policy insight,
 https://docs.cloud.google.com/kubernetes-engine/docs/how-to/optimize-with-recommenders.
 """
 
-from readiness_rules import (
-    KIND_NETWORK_POLICY,
-    LIST_SEPARATOR,
-    items_of_kind,
-    new_result,
-)
+from readiness_rules import KIND_NETWORK_POLICY, LIST_SEPARATOR, get_path, items_of_kind, new_result
 
 RULE_ID = "network-dataplane"
 ENTRY = 16
@@ -46,22 +43,18 @@ FINDING_TEXT = (
 )
 PEERS_TEXT = " ({peers} already enforce them)"
 NOTE_ENFORCED = "legacy dataplane; NetworkPolicies in {namespaces} are enforced by the network policy add-on"
+NOTE_NO_POLICIES = "legacy dataplane, policy enforcement {enforcement}; network policies: none, nothing to enforce"
+ENFORCEMENT_ON = "on (network policy add-on)"
+ENFORCEMENT_OFF = "off"
 UNKNOWN_READ = "cluster read failed, so its NetworkPolicies were not read"
 
 
-def _get(record: dict, path: tuple) -> object:
-    value = record
-    for key in path:
-        value = (value or {}).get(key) if isinstance(value, dict) else None
-    return value
-
-
 def datapath_provider(cluster: dict) -> str:
-    return str(_get(cluster, DATAPATH_PROVIDER_PATH) or DATAPATH_LEGACY)
+    return str(get_path(cluster, DATAPATH_PROVIDER_PATH) or DATAPATH_LEGACY)
 
 
 def policy_enforced(cluster: dict) -> bool:
-    return bool(_get(cluster, NETWORK_POLICY_PATH)) and not bool(_get(cluster, NETWORK_POLICY_ADDON_DISABLED_PATH))
+    return bool(get_path(cluster, NETWORK_POLICY_PATH)) and not bool(get_path(cluster, NETWORK_POLICY_ADDON_DISABLED_PATH))
 
 
 def policies_by_namespace(items) -> dict[str, int]:
@@ -84,16 +77,19 @@ def evaluate(cluster: dict, member: dict, items, target, context) -> dict:
         out["unknown"].append(UNKNOWN_READ)
         return out
     namespaces = policies_by_namespace(items)
+    enforced = policy_enforced(cluster)
     if not namespaces:
+        out["notes"].append(NOTE_NO_POLICIES.format(enforcement=ENFORCEMENT_ON if enforced else ENFORCEMENT_OFF))
         return out
-    if policy_enforced(cluster):
+    if enforced:
         out["notes"].append(NOTE_ENFORCED.format(namespaces=_namespaces_text(namespaces)))
         return out
-    name = cluster.get("name", "")
+    # Peers by identity, not by name: two clusters named alike in two projects are two
+    # records, and each is the other's peer.
     peers = sorted(
         str(other.get("name", ""))
         for other in (context or {}).get("clusters") or []
-        if isinstance(other, dict) and other is not cluster and other.get("name") != name and datapath_provider(other) == DATAPATH_ADVANCED
+        if isinstance(other, dict) and other is not cluster and datapath_provider(other) == DATAPATH_ADVANCED
     )
     out["risks"].append({"datapath": datapath_provider(cluster), "enforced": False, "namespaces": namespaces, "policies": sum(namespaces.values()), "peers_on_v2": peers})
     return out

@@ -6,20 +6,26 @@ On GKE's default surge settings (maxSurge 1, maxUnavailable 0) the replacement n
 exists before a node is drained, so the entry needs a pool that removes a node first:
 `maxUnavailable` above 0 on the surge strategy, or a blue-green upgrade with the
 autoscaled rollout policy, whose green pool starts empty. On such a pool the pods of
-the node being drained need room elsewhere. The rule measures that room from the
-nodes' allocatable and the pods' requests, per dimension (CPU and memory): a pod only
-this pool's nodes can take (a node selector, a required affinity or a taint no other
-schedulable node satisfies) needs room on the pool's other nodes; any other pod needs
-room on any other schedulable node. The pool's largest node, by the requests of the
-pods it holds, is the one measured. DaemonSet and mirror pods are left out: the kubelet
-recreates them on the rebuilt node, so a drain never has to find them room.
+the node being drained need a node to land on. The rule measures that by placing them:
+for each node of the pool in turn, taken as the one drained, it places the node's pods,
+largest first, onto the schedulable nodes left in the cluster that each pod may schedule
+on (its node selector, its required node affinity and the taints it tolerates decide
+which; a tainted accelerator pool's spare capacity never counts for a pod without the
+toleration), each onto the eligible node with the most room left, by CPU and memory
+requests against allocatable minus what runs there. A pod no eligible node can take is
+stranded. DaemonSet and mirror pods are left out: the kubelet recreates them on the
+rebuilt node, so a drain never has to find them room. The node measured is the one
+whose stranded pods are the largest in either resource, so a memory-bound node is
+measured as well as a CPU-bound one; the finding names every other node of the pool
+that strands pods too.
 
 Blocking: maxUnavailable above 0 with maxSurge 0 on a pool the autoscaler cannot grow
-(at its ceiling, or not autoscaled), with less room than its largest node's pods. Risk:
-the same shortfall on a pool that keeps some surge or can still grow, or on an
-autoscaled blue-green pool. A pool that removes a node first and has the room is a
-note, so the setting stays visible. The room is summed across nodes, so a finding says
-the pods fit in aggregate, not that each fits on one node.
+(at its ceiling, or not autoscaled) that strands a pod. Risk: a stranded pod on a pool
+that keeps some surge or can still grow, or on an autoscaled blue-green pool. A pool
+that removes a node first and places every node's pods is a note, so the setting stays
+visible. Placement is a heuristic (largest pod first, most room first), so a finding
+says a drain strands these pods under that placement, and a note says one placement
+exists. Autopilot members are not graded: GKE owns their pools and their surge settings.
 
 Source for the settings and the strategies:
 https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies
@@ -31,6 +37,7 @@ from readiness_rules import (
     active_pods,
     format_cpu,
     format_memory,
+    get_path,
     is_daemonset_pod,
     is_mirror_pod,
     items_of_kind,
@@ -68,6 +75,7 @@ MAX_NODES_PER_ZONE_KEY = "maxNodeCount"
 POOL_LOCATIONS_KEY = "locations"
 CLUSTER_LOCATIONS_KEY = "locations"
 SINGLE_ZONE = 1
+AUTOPILOT_PATH = ("autopilot", "enabled")
 # Scheduling vocabulary, as the pod and node APIs spell it.
 NODE_SELECTOR_KEY = "nodeSelector"
 REQUIRED_NODE_AFFINITY_PATH = ("affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms")
@@ -79,7 +87,7 @@ OP_EXISTS = "Exists"
 OP_DOES_NOT_EXIST = "DoesNotExist"
 TOLERATION_EQUAL = "Equal"
 REPELLING_TAINT_EFFECTS = ("NoSchedule", "NoExecute")
-# How many of the largest displaced workloads a finding names.
+# How many of the largest stranded pods a finding names.
 NAMED_WORKLOADS = 3
 NODE_COUNT_UNREAD = "?"
 
@@ -91,14 +99,14 @@ SCALING_AT_CEILING = "autoscaler at its ceiling of {ceiling}"
 SCALING_CAN_GROW = "autoscaler can grow to {ceiling}"
 POOL_SUMMARY = "pool {pool} ({why}; {node_count} node(s), {scaling})"
 FINDING_TEXT = (
-    "{summary} removes a node before its replacement exists; its largest node {node} holds "
-    "{cpu} CPU / {memory} of pods and the room elsewhere is {room_cpu} / {room_memory}{pinned}: {workloads}"
+    "{summary} removes a node before its replacement exists; draining its node {node} leaves "
+    "{cpu} CPU / {memory} of pods with no node to take them ({room_cpu} / {room_memory} free on the nodes they may schedule on): {workloads}{also}"
 )
-PINNED_TEXT = " ({cpu} / {memory} of them can run only on this pool, against {room_cpu} / {room_memory} free on its other nodes)"
 WORKLOAD_TEXT = "{owner} ({cpu} / {memory}{pinned})"
 WORKLOAD_PINNED_SUFFIX = ", pinned to the pool"
-NO_WORKLOADS = "no pods"
-NOTE_HEADROOM = "{summary} removes a node before its replacement exists; the room elsewhere covers its largest node's pods"
+MORE_WORKLOADS = " and {count} more"
+ALSO_SHORT_TEXT = "; node(s) {nodes} strand pods as well"
+NOTE_HEADROOM = "{summary} removes a node before its replacement exists; the nodes its pods may schedule on have room for every node's pods"
 NOTE_EMPTY = "{summary} removes a node before its replacement exists and has no node"
 UNKNOWN_NO_TARGET = "{summary}: no target, so whether a node upgrade is pending is unknown"
 UNKNOWN_VERSION = "{summary}: version unparsable, so whether a node upgrade is pending is unknown"
@@ -198,17 +206,15 @@ def _tolerates(tolerations: list, taint: dict) -> bool:
 def node_fits_pod(node: dict, spec: dict) -> bool:
     """Whether the pod's selector, required affinity and tolerations admit this node.
 
-    Resources are not compared here; the room is measured in aggregate by the caller. An
-    affinity operator or field this does not evaluate reads as not fitting, so the pod
-    counts as pinned rather than as free to move.
+    Resources are not compared here; the placement does that. An affinity operator or
+    field this does not evaluate reads as not fitting, so the pod counts as stranded
+    rather than as placed somewhere it may not go.
     """
     labels = (node.get("metadata") or {}).get("labels") or {}
     for key, value in (spec.get(NODE_SELECTOR_KEY) or {}).items():
         if labels.get(key) != value:
             return False
-    terms = spec
-    for key in REQUIRED_NODE_AFFINITY_PATH:
-        terms = (terms or {}).get(key) if isinstance(terms, dict) else None
+    terms = get_path(spec, REQUIRED_NODE_AFFINITY_PATH)
     if terms and not any(isinstance(term, dict) and _term_matches(term, labels) for term in terms):
         return False
     tolerations = spec.get("tolerations") or []
@@ -222,10 +228,10 @@ def _node_name(node: dict) -> str:
     return (node.get("metadata") or {}).get("name", "")
 
 
-def _room(nodes: list[dict], pods_by_node: dict) -> tuple[int, int] | str:
-    """Allocatable minus every active pod's requests, summed over `nodes`; a string names
-    what did not parse."""
-    cpu_total = memory_total = 0
+def _free_capacity(nodes: list[dict], pods_by_node: dict) -> dict[str, tuple[int, int]] | str:
+    """Per node, allocatable minus every active pod's requests, floored at 0; a string
+    names the quantity that did not parse."""
+    free: dict[str, tuple[int, int]] = {}
     for node in nodes:
         cpu, memory = node_allocatable(node)
         if cpu is None or memory is None:
@@ -237,63 +243,111 @@ def _room(nodes: list[dict], pods_by_node: dict) -> tuple[int, int] | str:
                 return QUANTITY_POD.format(namespace=meta.get("namespace", ""), name=meta.get("name", ""))
             cpu -= pod_cpu
             memory -= pod_memory
-        cpu_total += max(cpu, 0)
-        memory_total += max(memory, 0)
-    return cpu_total, memory_total
+        free[_node_name(node)] = (max(cpu, 0), max(memory, 0))
+    return free
 
 
-def measure(pool_nodes: list[dict], nodes: list[dict], pods: list[dict]) -> dict | str:
-    """The pool's largest node, what a drain of it displaces, and the room for that.
+def _displaced(node: dict, pods_by_node: dict) -> list[dict] | str:
+    """The pods a drain of `node` has to find room for, with their requests."""
+    displaced = []
+    for pod in pods_by_node.get(_node_name(node), []):
+        if is_daemonset_pod(pod) or is_mirror_pod(pod):
+            continue
+        spec = pod.get("spec") or {}
+        cpu, memory = pod_requests(spec)
+        if cpu is None or memory is None:
+            meta = pod.get("metadata") or {}
+            return QUANTITY_POD.format(namespace=meta.get("namespace", ""), name=meta.get("name", ""))
+        displaced.append({"owner": owner_label(pod_owner(pod)), "cpu_m": cpu, "memory_bytes": memory, "spec": spec})
+    return displaced
 
-    Returns the measurement, or a string naming the quantity that did not parse.
+
+def place(displaced: list[dict], candidates: list[dict], free: dict[str, tuple[int, int]], pool_name: str) -> list[dict]:
+    """First-fit placement of the displaced pods, largest first, each onto the eligible
+    candidate with the most room left; returns the pods no node could take.
+
+    A stranded pod carries `pinned` (no schedulable node outside the pool admits it,
+    whatever the room) and `room`, the free capacity the nodes it may schedule on had
+    before any placement.
     """
+    remaining = dict(free)
+    stranded = []
+    for pod in sorted(displaced, key=lambda d: (-d["cpu_m"], -d["memory_bytes"], d["owner"])):
+        eligible = [n for n in candidates if node_fits_pod(n, pod["spec"])]
+        placed = False
+        for node in sorted(eligible, key=lambda n: remaining[_node_name(n)], reverse=True):
+            cpu, memory = remaining[_node_name(node)]
+            if cpu >= pod["cpu_m"] and memory >= pod["memory_bytes"]:
+                remaining[_node_name(node)] = (cpu - pod["cpu_m"], memory - pod["memory_bytes"])
+                placed = True
+                break
+        if placed:
+            continue
+        stranded.append(
+            {
+                "owner": pod["owner"],
+                "cpu_m": pod["cpu_m"],
+                "memory_bytes": pod["memory_bytes"],
+                "pinned": not any(node_pool(n) != pool_name for n in eligible),
+                "eligible_nodes": [_node_name(n) for n in eligible],
+                "room": {"cpu_m": sum(free[_node_name(n)][0] for n in eligible), "memory_bytes": sum(free[_node_name(n)][1] for n in eligible)},
+            }
+        )
+    return stranded
+
+
+def measure(pool_name: str, pool_nodes: list[dict], nodes: list[dict], pods: list[dict]) -> dict | str:
+    """Every node of the pool drained in turn; the one whose stranded pods are the largest
+    in either resource is the measurement. A string names a quantity that did not parse."""
     pods_by_node: dict[str, list[dict]] = {}
     for pod in pods:
         pods_by_node.setdefault((pod.get("spec") or {}).get("nodeName", ""), []).append(pod)
-    pool_names = {_node_name(n) for n in pool_nodes}
-    others = [n for n in nodes if _node_name(n) not in pool_names and node_schedulable(n)]
+    schedulable = [n for n in nodes if node_schedulable(n)]
+    free = _free_capacity(schedulable, pods_by_node)
+    if isinstance(free, str):
+        return free
 
-    best = None
+    results = []
     for node in pool_nodes:
-        displaced = []
-        for pod in pods_by_node.get(_node_name(node), []):
-            if is_daemonset_pod(pod) or is_mirror_pod(pod):
-                continue
-            spec = pod.get("spec") or {}
-            cpu, memory = pod_requests(spec)
-            if cpu is None or memory is None:
-                meta = pod.get("metadata") or {}
-                return QUANTITY_POD.format(namespace=meta.get("namespace", ""), name=meta.get("name", ""))
-            pinned = not any(node_fits_pod(other, spec) for other in others)
-            displaced.append({"owner": owner_label(pod_owner(pod)), "cpu_m": cpu, "memory_bytes": memory, "pinned": pinned})
-        total = (sum(d["cpu_m"] for d in displaced), sum(d["memory_bytes"] for d in displaced))
-        if best is None or total > best[0]:
-            best = (total, node, displaced)
-    (cpu, memory), node, displaced = best
+        displaced = _displaced(node, pods_by_node)
+        if isinstance(displaced, str):
+            return displaced
+        candidates = [n for n in schedulable if _node_name(n) != _node_name(node)]
+        stranded = place(displaced, candidates, free, pool_name)
+        results.append(
+            {
+                "node": _node_name(node),
+                "displaced": {"cpu_m": sum(d["cpu_m"] for d in displaced), "memory_bytes": sum(d["memory_bytes"] for d in displaced)},
+                "stranded": {"cpu_m": sum(s["cpu_m"] for s in stranded), "memory_bytes": sum(s["memory_bytes"] for s in stranded)},
+                "stranded_pods": stranded,
+            }
+        )
+    short = [r for r in results if r["stranded_pods"]]
+    if not short:
+        return {"short": False, "nodes_measured": [r["node"] for r in results]}
+    # The worst node in any resource: its stranded requests relative to the largest
+    # stranded requests in that resource across the pool's nodes, the larger ratio deciding.
+    worst_cpu = max(r["stranded"]["cpu_m"] for r in short) or 1
+    worst_memory = max(r["stranded"]["memory_bytes"] for r in short) or 1
 
-    pool_others = [n for n in pool_nodes if _node_name(n) != _node_name(node) and node_schedulable(n)]
-    room_pool = _room(pool_others, pods_by_node)
-    if isinstance(room_pool, str):
-        return room_pool
-    room_others = _room(others, pods_by_node)
-    if isinstance(room_others, str):
-        return room_others
-    pinned_cpu = sum(d["cpu_m"] for d in displaced if d["pinned"])
-    pinned_memory = sum(d["memory_bytes"] for d in displaced if d["pinned"])
-    free_cpu, free_memory = cpu - pinned_cpu, memory - pinned_memory
-    # The pinned pods take the pool's other nodes first; what is left there joins the
-    # rest of the cluster as room for the pods that can move anywhere.
-    room_free_cpu = room_others[0] + max(room_pool[0] - pinned_cpu, 0)
-    room_free_memory = room_others[1] + max(room_pool[1] - pinned_memory, 0)
-    short = pinned_cpu > room_pool[0] or pinned_memory > room_pool[1] or free_cpu > room_free_cpu or free_memory > room_free_memory
+    def severity(r: dict) -> tuple:
+        return (max(r["stranded"]["cpu_m"] / worst_cpu, r["stranded"]["memory_bytes"] / worst_memory), len(r["stranded_pods"]), r["node"])
+
+    chosen = max(short, key=severity)
+    eligible = {n for s in chosen["stranded_pods"] for n in s["eligible_nodes"]}
+    room = {"cpu_m": sum(free[n][0] for n in eligible), "memory_bytes": sum(free[n][1] for n in eligible)}
     return {
-        "node": _node_name(node),
-        "displaced": {"cpu_m": cpu, "memory_bytes": memory},
-        "pinned": {"cpu_m": pinned_cpu, "memory_bytes": pinned_memory},
-        "room_pool": {"cpu_m": room_pool[0], "memory_bytes": room_pool[1]},
-        "room_elsewhere": {"cpu_m": room_free_cpu, "memory_bytes": room_free_memory},
-        "short": short,
-        "workloads": sorted(displaced, key=lambda d: (-d["cpu_m"], -d["memory_bytes"], d["owner"]))[:NAMED_WORKLOADS],
+        "short": True,
+        "node": chosen["node"],
+        "displaced": chosen["displaced"],
+        "stranded": chosen["stranded"],
+        "room": room,
+        "stranded_count": len(chosen["stranded_pods"]),
+        "workloads": [
+            {key: s[key] for key in ("owner", "cpu_m", "memory_bytes", "pinned")}
+            for s in sorted(chosen["stranded_pods"], key=lambda s: (-s["cpu_m"], -s["memory_bytes"], s["owner"]))[:NAMED_WORKLOADS]
+        ],
+        "other_short_nodes": [r["node"] for r in short if r["node"] != chosen["node"]],
     }
 
 
@@ -310,6 +364,8 @@ def _summary(name: str, settings: dict, node_count, autoscaled: bool, ceiling: i
 
 def evaluate(cluster: dict, member: dict, items, target, context) -> dict:
     out = new_result()
+    if get_path(cluster, AUTOPILOT_PATH):
+        return out
     pools_parsed = {p.get("name"): p.get("parsed") for p in (context or {}).get("pools") or []}
     nodes = items_of_kind(items, KIND_NODE) if items is not None else None
     pods = active_pods(items) if items is not None else []
@@ -340,7 +396,7 @@ def evaluate(cluster: dict, member: dict, items, target, context) -> dict:
         if not pool_nodes:
             out["notes"].append(NOTE_EMPTY.format(summary=summary))
             continue
-        measured = measure(pool_nodes, nodes, pods)
+        measured = measure(name, pool_nodes, nodes, pods)
         if isinstance(measured, str):
             out["unknown"].append(UNKNOWN_QUANTITY.format(summary=summary, what=measured))
             continue
@@ -368,22 +424,18 @@ def describe(finding: dict) -> str:
     workloads = LIST_SEPARATOR.join(
         WORKLOAD_TEXT.format(owner=w["owner"], cpu=format_cpu(w["cpu_m"]), memory=format_memory(w["memory_bytes"]), pinned=WORKLOAD_PINNED_SUFFIX if w["pinned"] else "")
         for w in finding["workloads"]
-    ) or NO_WORKLOADS
-    pinned = ""
-    if finding["pinned"]["cpu_m"] or finding["pinned"]["memory_bytes"]:
-        pinned = PINNED_TEXT.format(
-            cpu=format_cpu(finding["pinned"]["cpu_m"]),
-            memory=format_memory(finding["pinned"]["memory_bytes"]),
-            room_cpu=format_cpu(finding["room_pool"]["cpu_m"]),
-            room_memory=format_memory(finding["room_pool"]["memory_bytes"]),
-        )
+    )
+    more = finding["stranded_count"] - len(finding["workloads"])
+    if more > 0:
+        workloads += MORE_WORKLOADS.format(count=more)
+    also = ALSO_SHORT_TEXT.format(nodes=LIST_SEPARATOR.join(finding["other_short_nodes"])) if finding["other_short_nodes"] else ""
     return FINDING_TEXT.format(
         summary=finding["summary"],
         node=finding["node"],
-        cpu=format_cpu(finding["displaced"]["cpu_m"]),
-        memory=format_memory(finding["displaced"]["memory_bytes"]),
-        room_cpu=format_cpu(finding["room_elsewhere"]["cpu_m"]),
-        room_memory=format_memory(finding["room_elsewhere"]["memory_bytes"]),
-        pinned=pinned,
+        cpu=format_cpu(finding["stranded"]["cpu_m"]),
+        memory=format_memory(finding["stranded"]["memory_bytes"]),
+        room_cpu=format_cpu(finding["room"]["cpu_m"]),
+        room_memory=format_memory(finding["room"]["memory_bytes"]),
         workloads=workloads,
+        also=also,
     )

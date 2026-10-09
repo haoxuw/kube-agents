@@ -26,6 +26,7 @@ from readiness_rules import (
     KIND_NODE,
     LIST_SEPARATOR,
     active_pods,
+    get_path,
     hostpath_volumes,
     items_of_kind,
     new_result,
@@ -72,15 +73,8 @@ def socket_clients(items) -> list[dict]:
     return [clients[label] for label in sorted(clients)]
 
 
-def _get(record: dict, path: tuple) -> object:
-    value = record
-    for key in path:
-        value = (value or {}).get(key) if isinstance(value, dict) else None
-    return value
-
-
 def _image_type(pool: dict) -> str:
-    return str(_get(pool, IMAGE_TYPE_PATH) or "").upper()
+    return str(get_path(pool, IMAGE_TYPE_PATH) or "").upper()
 
 
 def observed_runtime(nodes: list[dict], pool: str) -> tuple[str, int] | None:
@@ -89,7 +83,7 @@ def observed_runtime(nodes: list[dict], pool: str) -> tuple[str, int] | None:
     for node in nodes:
         if node_pool(node) != pool:
             continue
-        version = str(_get(node, RUNTIME_VERSION_PATH) or "")
+        version = str(get_path(node, RUNTIME_VERSION_PATH) or "")
         m = RUNTIME_VERSION_RE.match(version)
         if m and (lowest is None or int(m.group("major")) < lowest[1]):
             lowest = (version, int(m.group("major")))

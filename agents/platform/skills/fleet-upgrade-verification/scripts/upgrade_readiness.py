@@ -149,6 +149,7 @@ RULE_KEY = "rule"
 RULE_RESULT_KEYS = ("blocking", "risks", "unknown", "notes")
 RULE_FAILED = "rule failed ({error}); not evaluated"
 RULE_REASON_FORMAT = "{rule}: {reason}"
+RULE_RENDER_FAILED = "{rule}: finding could not be rendered ({error}): {finding}"
 
 
 # ---------------------------------------------------------------------------- PDBs
@@ -635,9 +636,19 @@ def evaluate_extra_rules(cluster: dict, member: dict, items, target, context: di
 
 
 def describe_extra_finding(finding: dict) -> str:
-    """One folded finding as a table cell, rendered by the module that produced it."""
+    """One folded finding as a table cell, rendered by the module that produced it.
+
+    Guarded like `evaluate`: the renderer runs after every read has been paid for, so a
+    `describe` that raises on a finding its `evaluate` wrote yields a cell naming the
+    failure rather than aborting the report.
+    """
     module = RULES_BY_ID.get(finding.get(RULE_KEY))
-    return module.describe(finding) if module else str(finding)
+    if module is None:
+        return str(finding)
+    try:
+        return module.describe(finding)
+    except Exception as e:  # noqa: BLE001 - a cell that cannot be rendered is reported as such, not a crash
+        return RULE_RENDER_FAILED.format(rule=module.RULE_ID, error=e, finding=finding)
 
 
 # ------------------------------------------------------------------------- verdict

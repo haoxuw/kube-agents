@@ -204,19 +204,27 @@ joins the verdict, a risk never does, and the table prints them under `other blo
 
 - **Surge capacity** (`surge-capacity`, entry 2). A pool whose upgrade settings take a node away
   before its replacement exists (`maxUnavailable` above 0 on the surge strategy, or a blue-green
-  upgrade with the autoscaled rollout policy), measured against the room its largest node's pods
-  need: allocatable minus requests, summed over the pool's other nodes for a pod only this pool's
-  nodes can take (a selector, affinity or taint no other node satisfies) and over every other
-  schedulable node for the rest, DaemonSet and mirror pods excepted. It blocks when `maxSurge` is 0,
-  `maxUnavailable` above 0, the autoscaler cannot grow the pool (at its ceiling, or not autoscaled)
-  and the room is short; the same shortfall with some surge left, a growable autoscaler or an
-  autoscaled blue-green rollout is a risk; a pool with the room is a note. The cell names the pool,
-  its settings, the node, the requests and the largest workloads. A pool at or above the target is
+  upgrade with the autoscaled rollout policy), measured by placing the pods of each of its nodes
+  in turn, largest first, onto the schedulable nodes left that each pod may schedule on (its node
+  selector, its required node affinity and the taints it tolerates decide which; a tainted pool's
+  spare capacity never counts for a pod without the toleration), each onto the eligible node with
+  the most room left by CPU and memory, DaemonSet and mirror pods excepted; a pod no eligible node
+  can take is stranded. It blocks when `maxSurge` is 0, `maxUnavailable` above 0, the autoscaler
+  cannot grow the pool (at its ceiling, or not autoscaled) and a pod is stranded; a stranded pod
+  with some surge left, a growable autoscaler or an autoscaled blue-green rollout is a risk; a pool
+  whose every node's pods are placed is a note. The node measured is the one whose stranded pods
+  are the largest in either resource, so a memory-bound node counts as a CPU-bound one does, and
+  the cell names the pool, its settings, that node, the stranded requests, the room on the nodes
+  the pods may schedule on, the largest stranded workloads and any other node of the pool that
+  strands pods. Autopilot members are not graded. A pool at or above the target is
   not graded; no target, an unparsable pool version or quantity, or a failed cluster read is
   unknown. GKE's defaults (`maxSurge` 1, `maxUnavailable` 0) never trigger it.
 - **Zonal control plane** (`zonal-control-plane`, entry 11). A cluster whose `location` is a zone
   is a risk on every report, never a blocker: the API is unavailable for minutes while GKE
-  replaces the one replica, the pods keep running, and the cell carries the retry advice. A
+  replaces the one replica, the pods keep running, and the cell carries the retry advice. It is a
+  standing property of the cluster rather than a pending-upgrade finding, reported whether or not
+  the control plane is below the target, because the exposure is the same at every control-plane
+  upgrade. A
   location that is neither a zone nor a region is unknown.
 - **Container runtime** (`container-runtime`, entry 13). For each pool below the target, the
   containerd major its nodes report (`status.nodeInfo.containerRuntimeVersion`, or the table by the
@@ -234,7 +242,9 @@ joins the verdict, a risk never does, and the table prints them under `other blo
   rebuild after enabling the add-on or on the Dataplane V2 cluster that replaces this one, which is
   the shape GKE's recommender files as `NETWORK_POLICIES_UNRECONCILED`; the cell names the run's
   Dataplane V2 members, where the same policies would be enforced. Policies the add-on enforces
-  are a note; a Dataplane V2 member is clean; a failed read on a legacy member is unknown.
+  are a note, and so is a legacy member with no policy at all (`network policies: none, nothing to
+enforce`), so every legacy member states its dataplane and enforcement; a Dataplane V2 member is
+  clean; a failed read on a legacy member is unknown.
 - **In-tree volumes** (`in-tree-volumes`, entry 19). Every PersistentVolume with an in-tree
   `gcePersistentDisk` source, its claim, and the pods and templates that mount the claim, against
   `addonsConfig.gcePersistentDiskCsiDriverConfig.enabled`. With the add-on off, a volume a workload

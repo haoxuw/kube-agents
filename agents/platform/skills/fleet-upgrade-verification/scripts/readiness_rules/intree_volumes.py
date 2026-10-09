@@ -21,6 +21,7 @@ from readiness_rules import (
     LIST_SEPARATOR,
     active_pods,
     claim_names,
+    get_path,
     items_of_kind,
     new_result,
     owner_label,
@@ -34,8 +35,6 @@ ENTRY = 19
 IN_TREE_SOURCE_KEY = "gcePersistentDisk"
 DISK_NAME_KEY = "pdName"
 CSI_ADDON_PATH = ("addonsConfig", "gcePersistentDiskCsiDriverConfig", "enabled")
-# The annotation CSI migration stamps on a volume it carries.
-MIGRATED_TO_ANNOTATION = "pv.kubernetes.io/migrated-to"
 CSI_DRIVER = "pd.csi.storage.gke.io"
 CLAIM_FORMAT = "{namespace}/{name}"
 NO_CLAIM = "unbound"
@@ -49,15 +48,8 @@ PHASE_UNKNOWN = "phase unknown"
 UNKNOWN_READ = "cluster read failed, so its PersistentVolumes were not read"
 
 
-def _get(record: dict, path: tuple) -> object:
-    value = record
-    for key in path:
-        value = (value or {}).get(key) if isinstance(value, dict) else None
-    return value
-
-
 def csi_addon_enabled(cluster: dict) -> bool:
-    return bool(_get(cluster, CSI_ADDON_PATH))
+    return bool(get_path(cluster, CSI_ADDON_PATH))
 
 
 def in_tree_volumes(items) -> list[dict]:
@@ -98,7 +90,6 @@ def evaluate(cluster: dict, member: dict, items, target, context) -> dict:
             "phase": (pv.get("status") or {}).get("phase"),
             "workloads": workloads,
             "addon_enabled": addon_on,
-            "migrated_to": (meta.get("annotations") or {}).get(MIGRATED_TO_ANNOTATION),
         }
         if not addon_on and workloads:
             out["blocking"].append(finding)

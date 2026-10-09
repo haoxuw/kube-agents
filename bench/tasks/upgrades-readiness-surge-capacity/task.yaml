@@ -9,6 +9,14 @@
 # no room on the pool's other nodes, so the pool is an other blocker. Every other
 # seeded pool is on GKE's default surge settings and is not named.
 #
+# The rule grades a pool only while it is below the target, and the target here is
+# each cluster's channel default: no-surge-pool is below it because the fleet pins
+# it, with slot b's control plane, one minor behind the REGULAR default under the
+# version-laggard role's exclusion. That role is therefore a precondition of the
+# planted "yes" and is declared below with the pair; a fleet whose pool has caught
+# up with the channel default makes the slot-b objective an environment error, not
+# a wrong answer charged to the agent.
+#
 # What the case grades is the join: not the setting alone (a configuration), not
 # the pinned pod alone, but the pool named as what takes the workload down during
 # the node upgrade. The prompt asks for one declared line per seeded cluster in a
@@ -74,13 +82,15 @@ owner: haoxuw
 
 # Named by ROLE, not cluster: bench/tf/fleet/fixtures.json;
 # docs/designs/bench-fleet-catalog.md is the rule. The first two are the
-# planted pair on slot b. The other three are one per remaining slot, so the
-# declared-line objectives can tell a cluster the agent missed from a cluster
-# the project does not have: a slot without a credential is an `error` about
-# the environment, never a `fail` charged to the agent.
+# planted pair on slot b; version-laggard is the version precondition the
+# header describes, on the same slot. The other three are one per remaining
+# slot, so the declared-line objectives can tell a cluster the agent missed
+# from a cluster the project does not have: a slot without a credential is an
+# `error` about the environment, never a `fail` charged to the agent.
 fixtures:
   - readiness-surge-blocked
   - readiness-pinned-workload
+  - version-laggard
   - crashloop-workload
   - drift-outlier
   - zonal-skew-scheduling
@@ -120,6 +130,7 @@ verification_spec:
       fixture_roles:
         - readiness-surge-blocked
         - readiness-pinned-workload
+        - version-laggard
       any_of_patterns:
         - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: pool that removes a node first: no-surge-pool; blocks the upgrade: yes$'
       forbidden_patterns:

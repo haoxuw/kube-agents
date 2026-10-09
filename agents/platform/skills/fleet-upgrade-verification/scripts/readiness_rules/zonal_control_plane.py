@@ -9,7 +9,10 @@ plane, a region (`us-central1`) a regional one. A multi-zonal cluster, nodes in 
 zones under one zonal control plane, reads as zonal, which it is. Whether the cluster's
 API clients retry is not readable from the cluster, so the finding is a risk on every
 report and never a block: the upgrade completes; what fails is a client that does not
-retry.
+retry. The risk is a standing property of the cluster rather than a pending-upgrade
+finding, so it is reported whether or not the control plane is below the target: the
+exposure is the same at every control-plane upgrade, and a member at the target today
+takes the next one.
 
 Source: https://docs.cloud.google.com/kubernetes-engine/docs/concepts/types-of-clusters
 """

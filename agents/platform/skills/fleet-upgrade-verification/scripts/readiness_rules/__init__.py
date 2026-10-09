@@ -65,6 +65,14 @@ def new_result() -> dict:
     return {key: [] for key in RESULT_KEYS}
 
 
+def get_path(record, path: tuple):
+    """The value at a dotted path of nested dicts, None where any step is missing."""
+    value = record
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
 def items_of_kind(items, kind: str) -> list[dict]:
     return [item for item in items or [] if isinstance(item, dict) and item.get("kind") == kind]
 

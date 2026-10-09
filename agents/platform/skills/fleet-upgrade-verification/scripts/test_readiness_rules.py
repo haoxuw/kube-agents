@@ -154,6 +154,12 @@ class SharedHelpersTest(unittest.TestCase):
         orphan_rs = pod("ns", "p", "n1", owner=("ReplicaSet", "web-abc"))  # no hash label: stays a ReplicaSet
         self.assertEqual(shared.pod_owner(orphan_rs)["kind"], "ReplicaSet")
 
+    def test_get_path(self):
+        self.assertEqual(shared.get_path({"a": {"b": {"c": 1}}}, ("a", "b", "c")), 1)
+        self.assertIsNone(shared.get_path({"a": {"b": 2}}, ("a", "b", "c")))
+        self.assertIsNone(shared.get_path(None, ("a",)))
+        self.assertEqual(shared.get_path({"a": {}}, ()), {"a": {}})
+
     def test_node_helpers(self):
         self.assertTrue(shared.node_schedulable(node("n", "p")))
         self.assertFalse(shared.node_schedulable(node("n", "p", ready=False)))
@@ -200,14 +206,15 @@ class CapacityRuleTest(unittest.TestCase):
         self.assertEqual(finding["pool"], "no-surge-pool")
         self.assertEqual((finding["max_surge"], finding["max_unavailable"], finding["autoscaled"], finding["at_ceiling"]), (0, 1, False, True))
         self.assertEqual(finding["node"], "gke-b-nosurge-1")
-        # The DaemonSet pod is not displaced; the runner is, and it is pinned.
+        # The DaemonSet pod is not displaced; the runner is, and no node admits it.
         self.assertEqual(finding["displaced"], {"cpu_m": 250, "memory_bytes": 256 * 1024**2})
-        self.assertEqual(finding["pinned"], {"cpu_m": 250, "memory_bytes": 256 * 1024**2})
-        self.assertEqual(finding["room_pool"], {"cpu_m": 0, "memory_bytes": 0})
+        self.assertEqual(finding["stranded"], {"cpu_m": 250, "memory_bytes": 256 * 1024**2})
+        self.assertEqual(finding["room"], {"cpu_m": 0, "memory_bytes": 0})
         self.assertEqual(finding["workloads"], [{"owner": "Deployment seeded-upgrade/pinned-batch-runner", "cpu_m": 250, "memory_bytes": 256 * 1024**2, "pinned": True}])
+        self.assertEqual(finding["other_short_nodes"], [])
         text = capacity.describe(finding)
         self.assertIn("pool no-surge-pool (maxSurge 0, maxUnavailable 1; 1 node(s), not autoscaled) removes a node before its replacement exists", text)
-        self.assertIn("250m CPU / 256Mi", text)
+        self.assertIn("draining its node gke-b-nosurge-1 leaves 250m CPU / 256Mi of pods with no node to take them (0m / 0Mi free on the nodes they may schedule on)", text)
         self.assertIn("Deployment seeded-upgrade/pinned-batch-runner (250m / 256Mi, pinned to the pool)", text)
 
     def test_free_pod_with_room_elsewhere_is_a_note_not_a_finding(self):
@@ -215,14 +222,87 @@ class CapacityRuleTest(unittest.TestCase):
         out = capacity.evaluate(record, {}, items, TARGET, context(record))
         self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
         self.assertEqual(len(out["notes"]), 1)
-        self.assertIn("the room elsewhere covers its largest node's pods", out["notes"][0])
+        self.assertIn("the nodes its pods may schedule on have room for every node's pods", out["notes"][0])
 
     def test_free_pod_with_no_room_anywhere_blocks(self):
         record, items = self._seeded(pinned=False, default_room=False)
         out = capacity.evaluate(record, {}, items, TARGET, context(record))
         self.assertEqual(len(out["blocking"]), 1)
-        self.assertEqual(out["blocking"][0]["pinned"], {"cpu_m": 0, "memory_bytes": 0})
-        self.assertNotIn("can run only on this pool", capacity.describe(out["blocking"][0]))
+        self.assertEqual(out["blocking"][0]["workloads"][0]["pinned"], False)
+        self.assertNotIn("pinned to the pool", capacity.describe(out["blocking"][0]))
+
+    def test_a_tainted_nodes_spare_capacity_never_counts_for_a_pod_without_the_toleration(self):
+        # The adversarial review's repro: the only room is behind a GPU taint.
+        gpu_taint = {"key": "nvidia.com/gpu", "value": "present", "effect": "NoSchedule"}
+        record = cluster(pools=[pool("default-pool", LAGGING), pool("batch", LAGGING, upgrade=NO_SURGE), pool("gpu", LAGGING)])
+        items = [
+            node("batch-1", "batch", cpu="4000m", memory="16Gi"),
+            node("batch-2", "batch", cpu="1000m", memory="4Gi"),
+            node("default-1", "default-pool", cpu="200m", memory="1Gi"),
+            node("gpu-1", "gpu", cpu="32", memory="128Gi", taints=[gpu_taint]),
+            deployment_pod("jobs", "big-batch", "batch-1", cpu="3800m", memory="15Gi"),
+        ]
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(len(out["blocking"]), 1, out)
+        finding = out["blocking"][0]
+        self.assertEqual(finding["node"], "batch-1")
+        self.assertEqual(finding["stranded"], {"cpu_m": 3800, "memory_bytes": 15 * 1024**3})
+        self.assertEqual(finding["room"], {"cpu_m": 1200, "memory_bytes": 5 * 1024**3})
+        self.assertEqual(finding["workloads"][0]["pinned"], False)
+        # With the toleration the GPU node is eligible and takes the pod.
+        items[-1]["spec"]["tolerations"] = [{"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}]
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(out["blocking"], [])
+        self.assertEqual(len(out["notes"]), 1)
+
+    def test_a_memory_bound_node_is_measured_too(self):
+        # The adversarial review's second repro: node a is CPU-heavy, node b memory-heavy.
+        # batch-a has 3Gi of memory free and default-1 5Gi, so the 60Gi pod of batch-b has no
+        # node to take it, while the 1Gi pod of batch-a fits batch-b. A CPU-first choice of
+        # the node to measure would pick batch-a and find room.
+        record = cluster(pools=[pool("default-pool", LAGGING), pool("batch", LAGGING, upgrade=NO_SURGE)])
+        items = [
+            node("batch-a", "batch", cpu="4000m", memory="4Gi"),
+            node("batch-b", "batch", cpu="4000m", memory="64Gi"),
+            node("default-1", "default-pool", cpu="1000m", memory="5Gi"),
+            deployment_pod("jobs", "cpu-job", "batch-a", cpu="200m", memory="1Gi"),
+            deployment_pod("jobs", "memory-job", "batch-b", cpu="100m", memory="60Gi"),
+        ]
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(len(out["blocking"]), 1, out)
+        finding = out["blocking"][0]
+        self.assertEqual(finding["node"], "batch-b")
+        self.assertEqual(finding["workloads"][0]["owner"], "Deployment jobs/memory-job")
+        self.assertEqual(finding["other_short_nodes"], [])
+        # Both nodes short: the finding names the other as short as well.
+        items[-2]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "4000m"
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(sorted([out["blocking"][0]["node"]] + out["blocking"][0]["other_short_nodes"]), ["batch-a", "batch-b"])
+        self.assertIn("strand pods as well", capacity.describe(out["blocking"][0]))
+
+    def test_placement_is_per_node_not_in_aggregate(self):
+        # Two nodes with 400m free each cannot take a 600m pod, though 800m is free in total.
+        record = cluster(pools=[pool("default-pool", LAGGING), pool("batch", LAGGING, upgrade=NO_SURGE)])
+        items = [
+            node("batch-1", "batch", cpu="1000m", memory="4Gi"),
+            node("default-1", "default-pool", cpu="400m", memory="4Gi"),
+            node("default-2", "default-pool", cpu="400m", memory="4Gi"),
+            deployment_pod("jobs", "wide", "batch-1", cpu="600m", memory="1Gi"),
+        ]
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(len(out["blocking"]), 1)
+        self.assertEqual(out["blocking"][0]["room"], {"cpu_m": 800, "memory_bytes": 8 * 1024**3})
+        # Largest first: a 400m and a 300m pod fit one per node, where a naive order might not.
+        items[-1]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "300m"
+        items.append(deployment_pod("jobs", "tall", "batch-1", cpu="400m", memory="1Gi"))
+        out = capacity.evaluate(record, {}, items, TARGET, context(record))
+        self.assertEqual(out["blocking"], [])
+        self.assertEqual(len(out["notes"]), 1)
+
+    def test_autopilot_members_are_not_graded(self):
+        record, items = self._seeded()
+        record["autopilot"] = {"enabled": True}
+        self.assertEqual(capacity.evaluate(record, {}, items, TARGET, context(record)), shared.new_result())
 
     def test_surge_left_or_a_growable_autoscaler_is_a_risk(self):
         record, items = self._seeded(upgrade={"maxSurge": 1, "maxUnavailable": 1, "strategy": "SURGE"})
@@ -249,6 +329,7 @@ class CapacityRuleTest(unittest.TestCase):
         self.assertEqual(out["blocking"], [])
         self.assertEqual(out["risks"][0]["strategy"], "BLUE_GREEN")
         self.assertIn("autoscaled blue-green, whose green pool starts empty", capacity.describe(out["risks"][0]))
+        self.assertEqual(out["risks"][0]["stranded_count"], 1)
         standard = {"strategy": "BLUE_GREEN", "blueGreenSettings": {"standardRolloutPolicy": {"batchNodeCount": 1}}}
         record, items = self._seeded(upgrade=standard)
         self.assertEqual(capacity.evaluate(record, {}, items, TARGET, context(record)), shared.new_result())
@@ -271,8 +352,6 @@ class CapacityRuleTest(unittest.TestCase):
         record["nodePools"][1]["version"] = "latest"
         self.assertIn("version unparsable", capacity.evaluate(record, {}, items, TARGET, context(record))["unknown"][0])
         record, items = self._seeded()
-        # The drained node's own allocatable is never read (only its pods' requests are);
-        # a peer node's unparsable allocatable is what stops the measurement.
         items[0]["status"]["allocatable"]["cpu"] = "many"
         bad = capacity.evaluate(record, {}, items, TARGET, context(record))
         self.assertIn("the allocatable of node gke-b-default-1 did not parse", bad["unknown"][0])
@@ -445,12 +524,24 @@ class DataplaneRuleTest(unittest.TestCase):
         record["addonsConfig"]["networkPolicyConfig"]["disabled"] = True
         self.assertEqual(len(dataplane.evaluate(record, {}, self._items(), TARGET, context(record))["risks"]), 1)
 
-    def test_dataplane_v2_and_policy_free_clusters_are_clean(self):
+    def test_dataplane_v2_clusters_are_clean_and_policy_free_legacy_clusters_get_a_note(self):
         v2 = cluster(name="host", networkConfig={"datapathProvider": "ADVANCED_DATAPATH"})
         self.assertEqual(dataplane.evaluate(v2, {}, self._items(), TARGET, context(v2)), shared.new_result())
         self.assertEqual(dataplane.evaluate(v2, {}, None, TARGET, context(v2)), shared.new_result())
         legacy = cluster(name="seeded-c", networkConfig={"datapathProvider": "LEGACY_DATAPATH"})
-        self.assertEqual(dataplane.evaluate(legacy, {}, [], TARGET, context(legacy)), shared.new_result())
+        out = dataplane.evaluate(legacy, {}, [], TARGET, context(legacy))
+        self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
+        self.assertEqual(out["notes"], ["legacy dataplane, policy enforcement off; network policies: none, nothing to enforce"])
+        legacy["networkPolicy"] = {"enabled": True}
+        self.assertIn("policy enforcement on (network policy add-on); network policies: none", dataplane.evaluate(legacy, {}, [], TARGET, context(legacy))["notes"][0])
+
+    def test_peers_are_told_apart_by_identity_not_name(self):
+        record = cluster(name="prod")
+        twin = cluster(name="prod", networkConfig={"datapathProvider": "ADVANCED_DATAPATH"})
+        out = dataplane.evaluate(record, {}, self._items(), TARGET, context(record, clusters=[record, twin]))
+        self.assertEqual(out["risks"][0]["peers_on_v2"], ["prod"])
+        alone = dataplane.evaluate(record, {}, self._items(), TARGET, context(record, clusters=[record]))
+        self.assertEqual(alone["risks"][0]["peers_on_v2"], [])
 
     def test_read_failure_on_legacy_is_unknown(self):
         record = cluster(name="seeded-b")
@@ -499,11 +590,12 @@ class InTreeVolumesRuleTest(unittest.TestCase):
         out = intree_volumes.evaluate(record, {}, self._items(with_pod=False), TARGET, context(record))
         self.assertEqual(out["blocking"][0]["workloads"], ["Deployment seeded-shapes/intree-pd-reader"])
 
-    def test_migrated_to_annotation_and_unbound_volume(self):
+    def test_unbound_volume(self):
         record = cluster(name="seeded-a", addonsConfig={"gcePersistentDiskCsiDriverConfig": {"enabled": True}})
         items = [pv("loose", claim=None, phase="Available", annotations={"pv.kubernetes.io/migrated-to": "pd.csi.storage.gke.io"})]
         out = intree_volumes.evaluate(record, {}, items, TARGET, context(record))
-        self.assertEqual((out["risks"][0]["claim"], out["risks"][0]["migrated_to"]), (None, "pd.csi.storage.gke.io"))
+        self.assertEqual(out["risks"][0]["claim"], None)
+        self.assertNotIn("migrated_to", out["risks"][0])
         self.assertIn("claim unbound, Available", intree_volumes.describe(out["risks"][0]))
 
     def test_clean_and_unknown(self):
@@ -558,6 +650,30 @@ class FoldingTest(unittest.TestCase):
             r.EXTRA_RULES[:] = original
         self.assertEqual(folded["unknown"], ["broken: rule failed (boom); not evaluated"])
         self.assertEqual(folded["rules"]["broken"]["blocking"], [])
+
+    def test_a_describe_that_raises_renders_as_a_failure_cell(self):
+        class Terse:
+            RULE_ID = "terse"
+            ENTRY = 0
+
+            @staticmethod
+            def evaluate(*args):
+                return {"risks": [{"x": 1}]}
+
+            @staticmethod
+            def describe(finding):
+                return finding["missing"]
+
+        original = list(r.EXTRA_RULES)
+        r.EXTRA_RULES.append(Terse)
+        r.RULES_BY_ID["terse"] = Terse
+        try:
+            folded = r.evaluate_extra_rules(cluster(location="us-central1"), {}, [], TARGET, {})
+            cell = r.describe_extra_finding(folded["risks"][-1])
+        finally:
+            r.EXTRA_RULES[:] = original
+            del r.RULES_BY_ID["terse"]
+        self.assertEqual(cell, "terse: finding could not be rendered ('missing'): {'x': 1, 'rule': 'terse'}")
 
     def test_verdict_folds_blocking_and_unknown_and_ignores_risks(self):
         clear = {"blocking_exclusions": [], "undecided_exclusions": []}
