@@ -9,7 +9,9 @@ whose documented entrypoint is a supervisor (`MULTI_PROCESS_IMAGE_REPOS`). The s
 `risk` when the target turns the group kill on for the pool: the pool moves to cgroup v2
 at a target of 1.28 or later, or a cgroup v2 pool's kubelet crosses 1.28; it is never
 `blocking`. A pool already group-killing today, or one whose node config sets
-`singleProcessOOMKill`, is a note; a pool whose cgroup mode is unread is `unknown`.
+`singleProcessOOMKill`, is a note; a pool whose cgroup mode is unread is `unknown`. The
+rule needs the DaemonSets and CronJobs of the workload read; when that read failed it grades
+the Deployments and StatefulSets it has and says so.
 """
 
 import readiness_rules as rules
@@ -28,8 +30,9 @@ NOTE_ALREADY = "{rule}: {kind} {object} container {container} {shape} on pool {p
 NOTE_SINGLE_PROCESS = "{rule}: {kind} {object} container {container} {shape} on pool {pool}, whose node config sets singleProcessOOMKill; not an upgrade risk"
 NOTE_STAYS = "{rule}: {kind} {object} container {container} {shape} on pool {pool}; {reason}; not a risk at this target"
 NOTE_BELOW_KUBELET = "{rule}: {kind} {object} container {container} {shape} on pool {pool}; the target {target} is below 1.{minor}, where the kubelet starts the group kill; not a risk at this target"
-# A shell `-c` takes its script as the next word.
+# A shell `-c` (or `-ec`, `-lc`) takes its script as the next word.
 SHELL_SCRIPT_OFFSET = 2
+WORKLOADS_UNREAD_DETAIL = "DaemonSets and CronJobs not read ({reason}); Deployments and StatefulSets graded"
 
 
 def _program(word: str) -> str:
@@ -52,8 +55,9 @@ def multi_process_shape(container: dict) -> str | None:
             return SUPERVISOR_SHAPE.format(program=program)
     for index, program in enumerate(programs):
         script_index = index + SHELL_SCRIPT_OFFSET
-        if program in tables.SHELL_PROGRAMS and script_index < len(command) and command[index + 1] == tables.SHELL_COMMAND_FLAG:
-            if tables.SHELL_FORK_RE.search(command[script_index]):
+        if program in tables.SHELL_PROGRAMS and script_index < len(command) and tables.SHELL_COMMAND_FLAG_RE.match(command[index + 1]):
+            script = tables.SHELL_QUOTED_SPAN_RE.sub("", command[script_index])
+            if tables.SHELL_FORK_RE.search(script):
                 return SHELL_FORK_SHAPE
     repository = _repository(container.get("image") or "")
     for repo in tables.MULTI_PROCESS_IMAGE_REPOS:
@@ -83,6 +87,9 @@ def _grade(pool: dict, target, transition: str) -> str:
 
 def evaluate(cluster: dict, member: dict, items: list, target, context: dict) -> dict:
     result = rules.empty_result()
+    workloads_failed = rules.read_failure(context, rules.READ_WORKLOADS)
+    if workloads_failed:
+        result["unknown"].append(rules.rule_unknown(RULE_ID, ENTRY, WORKLOADS_UNREAD_DETAIL.format(reason=workloads_failed)))
     for obj, spec, _ in rules.templates(items):
         for container in rules.containers(spec):
             shape = multi_process_shape(container)

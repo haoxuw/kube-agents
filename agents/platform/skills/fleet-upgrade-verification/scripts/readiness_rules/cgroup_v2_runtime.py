@@ -8,7 +8,8 @@ the pin, against GKE's 1.33 migration and 1.35 removal). A runtime below the flo
 pool that moves is a `risk`; a known runtime whose tag names no version on such a pool
 is `unknown`; a pool whose mode the record does not carry is `unknown`; a pool already
 on cgroup v2, or staying on v1 at the target, is a note, because the upgrade changes
-nothing for it.
+nothing for it. The rule needs the DaemonSets and CronJobs of the workload read; when that
+read failed it grades the Deployments and StatefulSets it has and says so.
 """
 
 import readiness_rules as rules
@@ -31,6 +32,7 @@ UNKNOWN_TAG_DETAIL = "container {container} runs {image} ({runtime}) on pool {po
 UNKNOWN_POOL_DETAIL = "container {container} runs {image} ({runtime}) on pool {pool}: {reason}"
 NOTE_ALREADY = "{rule}: {kind} {object} container {container} runs {image} ({runtime}) on pool {pool}, {reason}; not an upgrade risk"
 NOTE_STAYS = "{rule}: {kind} {object} container {container} runs {image} ({runtime}) on pool {pool}; {reason}; not a risk at this target"
+WORKLOADS_UNREAD_DETAIL = "DaemonSets and CronJobs not read ({reason}); Deployments and StatefulSets graded"
 
 
 def runtime_verdict(image: str) -> tuple[str, str] | None:
@@ -70,6 +72,9 @@ def runtime_verdict(image: str) -> tuple[str, str] | None:
 
 def evaluate(cluster: dict, member: dict, items: list, target, context: dict) -> dict:
     result = rules.empty_result()
+    workloads_failed = rules.read_failure(context, rules.READ_WORKLOADS)
+    if workloads_failed:
+        result["unknown"].append(rules.rule_unknown(RULE_ID, ENTRY, WORKLOADS_UNREAD_DETAIL.format(reason=workloads_failed)))
     for obj, spec, _ in rules.templates(items):
         for container in rules.containers(spec):
             image = container.get("image") or ""

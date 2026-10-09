@@ -380,7 +380,7 @@ class ExtraRulesTest(unittest.TestCase):
     """The registry: every rule runs over one member, findings carry their text, and the
     verdict reads the flattened lists."""
 
-    CONTEXT = {"at": AT, "target_text": TARGET_TEXT, "master": MASTER, "pools": [pool("default-pool", "1.34.11-gke.1000")], "autopilot": False}
+    CONTEXT = {"at": AT, "target_text": TARGET_TEXT, "master": MASTER, "pools": [pool("default-pool", "1.34.11-gke.1000")], "autopilot": False, "read_failures": {}}
 
     def test_every_registered_rule_reports_and_findings_carry_text(self):
         items = [
@@ -388,16 +388,17 @@ class ExtraRulesTest(unittest.TestCase):
         ]
         out = r.evaluate_extra_rules({}, {"node_pools": []}, items, TARGET, self.CONTEXT)
         self.assertEqual(sorted(out["results"]), sorted(rule.RULE_ID for rule in r.EXTRA_RULES))
-        self.assertEqual([f["rule"] for f in out["blocking"]], ["retired-registry"])
-        self.assertTrue(out["blocking"][0]["text"].startswith("Deployment shop/legacy: container c pulls k8s.gcr.io/pause:3.9"))
-        self.assertEqual(out["risks"], [])
+        self.assertEqual([f["rule"] for f in out["risks"]], ["retired-registry"])
+        self.assertTrue(out["risks"][0]["text"].startswith("Deployment shop/legacy: container c pulls k8s.gcr.io/pause:3.9"))
+        self.assertEqual(out["results"]["retired-registry"], {"blocking": 0, "risks": 1, "unknown": 0, "notes": 0})
+        self.assertEqual(out["blocking"], [])
         self.assertEqual(out["unknown"], [])
 
     def test_a_failed_workload_read_is_one_rule_level_unknown(self):
         out = r.evaluate_extra_rules({}, {"node_pools": []}, None, TARGET, self.CONTEXT)
         self.assertEqual(out["results"], {})
         self.assertEqual(out["blocking"], [])
-        self.assertEqual([(u["rule"], u["object"], u["text"]) for u in out["unknown"]], [("workload-rules", None, "workload read failed; not graded")])
+        self.assertEqual([(u["rule"], u["object"], u["text"]) for u in out["unknown"]], [("workload-rules", None, "nothing read after the PDB read failed; not graded")])
 
     def test_rules_param_selects_the_rules(self):
         out = r.evaluate_extra_rules({}, {"node_pools": []}, [], TARGET, self.CONTEXT, rules=[r.EXTRA_RULES[0]])

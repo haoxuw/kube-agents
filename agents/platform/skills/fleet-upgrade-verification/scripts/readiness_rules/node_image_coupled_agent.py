@@ -4,9 +4,10 @@ own network that depends on the node image, through a selector on a node-image l
 (`NODE_IMAGE_LABELS`), a mount of the kernel's module tree or the network plugin's
 directories (`KERNEL_MODULE_HOST_PATHS`, `CNI_HOST_PATHS`), or a command that loads a
 kernel module, breaks when a node upgrade changes the image under it. Every such
-DaemonSet with `hostNetwork: true` outside the system and managed-agent namespaces is a
-`risk`, named with its couplings; the detail names the pools below the target, whose
-image this upgrade changes, or says no pool is below it yet.
+DaemonSet with `hostNetwork: true` outside the system namespaces is a `risk`, named with
+its couplings; the detail names the pools below the target, whose image this upgrade
+changes, or says no pool is below it yet. The DaemonSets come from the workload read; when
+that read failed the rule is `unknown`.
 """
 
 import readiness_rules as rules
@@ -23,6 +24,7 @@ DETAIL = "on the node's network and coupled to the node image: {couplings}; {poo
 POOLS_BELOW_TEXT = "pool(s) {pools} are below the target and get a new node image in this upgrade"
 NO_POOL_BELOW_TEXT = "no pool is below the target; the next node upgrade changes the image under it"
 NO_TARGET_TEXT = "which pools change image needs a target"
+WORKLOADS_UNREAD_DETAIL = "DaemonSets not read ({reason}); nothing graded"
 
 
 def couplings(spec: dict) -> list[str]:
@@ -47,7 +49,11 @@ def couplings(spec: dict) -> list[str]:
 
 def evaluate(cluster: dict, member: dict, items: list, target, context: dict) -> dict:
     result = rules.empty_result()
-    for obj, spec, _ in rules.templates(items, KINDS, managed_agents=True):
+    workloads_failed = rules.read_failure(context, rules.READ_WORKLOADS)
+    if workloads_failed:
+        result["unknown"].append(rules.rule_unknown(RULE_ID, ENTRY, WORKLOADS_UNREAD_DETAIL.format(reason=workloads_failed)))
+        return result
+    for obj, spec, _ in rules.templates(items, KINDS):
         if spec.get("hostNetwork") is not True:
             continue
         found = couplings(spec)

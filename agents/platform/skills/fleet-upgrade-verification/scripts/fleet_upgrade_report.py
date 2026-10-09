@@ -19,9 +19,9 @@ target: drain-blocking PodDisruptionBudgets (read with one `kubectl get` per mem
 `gcloud container clusters get-credentials` into a per-target kubeconfig), a maintenance
 exclusion in effect whose scope covers the upgrade, the maintenance window's state at
 `--at`, node-pool version skew against the target control plane, and the workload rules
-(a second `kubectl get` per member: DaemonSets, CronJobs, Nodes, claims and StorageClasses
-beside the first read's Deployments and StatefulSets) that read the pod templates for the
-upgrade-failure catalogue's node-image entries. The rules live in `upgrade_readiness.py`
+that read the pod templates for the upgrade-failure catalogue's node-image entries, from
+three more reads per member after the first (DaemonSets, CronJobs and claims; StorageClasses;
+the Nodes projected to the fields the rules use). The rules live in `upgrade_readiness.py`
 and its `readiness_rules/` package; this file reads and renders.
 
 Read-only against GCP: the gcloud commands it runs are `container clusters list`,
@@ -42,6 +42,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
+import readiness_rules
 import upgrade_readiness as readiness
 
 # Project resolution: explicit --project flags are the whole scope. Otherwise the
@@ -200,10 +201,10 @@ PROGRESS_COLUMNS = (
 )
 VERSION_PAIR_SEPARATOR = " / "
 
-# Readiness (`--readiness`). The rules need two kubectl reads per member (PDBs with their
-# Deployments and StatefulSets, then the workload rules' kinds), which need credentials for
-# that member: `get-credentials` writes a per-target kubeconfig, passed to the kubectl reads
-# as KUBECONFIG in the subprocess environment rather than through a flag,
+# Readiness (`--readiness`). The rules need four kubectl reads per member (PDBs with their
+# Deployments and StatefulSets, then the workload rules' kinds in three reads), which need
+# credentials for that member: `get-credentials` writes a per-target kubeconfig, passed to
+# the kubectl reads as KUBECONFIG in the subprocess environment rather than through a flag,
 # because the gcloud and kubectl in the agent pod are credential-proxy shims that forward
 # that variable. The directory is `$HERMES_HOME/.kubeconfigs`, the platform AGENTS.md
 # convention, and the file name mirrors `_thread_kubeconfig_path` in
@@ -213,16 +214,33 @@ VERSION_PAIR_SEPARATOR = " / "
 KUBECTL = "kubectl"
 KUBECTL_TIMEOUT_SECONDS = 60
 KUBECTL_RESOURCES = "pdb,deploy,statefulset"
-# The workload rules' second read: the template kinds the first read does not carry, the
-# Nodes (for the labels a selector names and the pool each node is in), and the claims
-# and classes that tell a local-SSD volume from a disk. Cluster-scoped kinds list under
-# `-A` as under no namespace. Kept apart from the first read so a refused Node or
-# StorageClass list costs the workload rules and never the PDB rule.
-KUBECTL_WORKLOAD_RESOURCES = "daemonset,cronjob,node,pvc,storageclass"
+# The workload rules' reads after the first: the namespaced kinds the first read does not
+# carry (templates and the claims that tell a local-SSD volume from a disk), the
+# StorageClasses, and the Nodes. Three reads rather than one so a refused or oversized kind
+# costs only the rules that need it (each records `unknown` for itself) and never the PDB
+# rule or the other rules; none of the three sets exit code 1. The Nodes come through a
+# jsonpath template that keeps the fields the rules use and drops the rest (`status.images`,
+# the annotations), which is what keeps a few hundred nodes under the credential proxy's
+# output cap: one line per node, tab-separated, each field JSON as kubectl's jsonpath renders
+# maps and lists, an absent field empty.
+KUBECTL_WORKLOAD_RESOURCES = "daemonset,cronjob,pvc"
+KUBECTL_STORAGE_RESOURCES = "storageclass"
+KUBECTL_NODE_RESOURCE = "nodes"
+KUBECTL_NODE_JSONPATH = '{range .items[*]}{.metadata.name}{"\\t"}{.metadata.labels}{"\\t"}{.spec.taints}{"\\t"}{.status.nodeInfo}{"\\t"}{.status.allocatable}{"\\t"}{.status.conditions}{"\\n"}{end}'
+NODE_FIELD_SEPARATOR = "\t"
+NODE_FIELD_COUNT = 6
+NODE_KIND = "Node"
+# How the three reads are keyed in `read["read_failures"]`, the member JSON and the rules'
+# context (readiness_rules.READ_*).
+READ_WORKLOADS = readiness_rules.READ_WORKLOADS
+READ_STORAGE = readiness_rules.READ_STORAGE
+READ_NODES = readiness_rules.READ_NODES
 NOTE_PDB_READ_FAILED = "cluster read failed; PDBs not graded"
-NOTE_WORKLOAD_READ_FAILED = "workload read failed; workload rules not graded"
-NOTE_WORKLOAD_READ_SKIPPED = "workload read skipped after the PDB read failed; workload rules not graded"
+NOTE_WORKLOAD_READS_SKIPPED = "workload, StorageClass and Node reads skipped after the PDB read failed; workload rules not graded"
+NOTE_READ_FAILED = "{read} read failed ({error}); the rules that need it say so"
 NOTE_RULE_UNKNOWN = "{rule}: {count} not graded"
+# A read's error in the note column: its first line, cut to this; the JSON carries it whole.
+NOTE_ERROR_CHARS = 160
 KUBECONFIG_ENV = "KUBECONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
 DEFAULT_HERMES_HOME = "/opt/data"
@@ -587,19 +605,47 @@ def _kubectl_get(resources: str, env: dict) -> tuple[list | None, str | None]:
     return items, None
 
 
+def parse_node_lines(stdout: str) -> tuple[list[dict] | None, str | None]:
+    """(nodes, error): the projected Node objects from the jsonpath read's lines."""
+    nodes = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split(NODE_FIELD_SEPARATOR)
+        if len(fields) != NODE_FIELD_COUNT:
+            return None, f"node line has {len(fields)} field(s), not {NODE_FIELD_COUNT}: {line[:NOTE_ERROR_CHARS]!r}"
+        try:
+            labels, taints, info, allocatable, conditions = (json.loads(f) if f.strip() else None for f in fields[1:])
+        except ValueError as e:
+            return None, f"node line unparsable: {e}"
+        nodes.append({"kind": NODE_KIND, "metadata": {"name": fields[0], "labels": labels or {}}, "spec": {"taints": taints or []}, "status": {"nodeInfo": info or {}, "allocatable": allocatable or {}, "conditions": conditions or []}})
+    return nodes, None
+
+
+def _kubectl_nodes(env: dict) -> tuple[list[dict] | None, str | None]:
+    """(nodes, error) of the projected node read."""
+    cmd = [KUBECTL, "get", KUBECTL_NODE_RESOURCE, "-o", f"jsonpath={KUBECTL_NODE_JSONPATH}"]
+    rc, stdout, stderr = run_cmd(cmd, KUBECTL_TIMEOUT_SECONDS, env)
+    if rc != 0:
+        return None, f"{' '.join(cmd[:3])} failed ({rc}): {stderr.strip()}"
+    return parse_node_lines(stdout)
+
+
 def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> dict:
     """The objects of one member, read through kubectl, as a dict: `kubeconfig`, `items` and
-    `error` for the PDB read, `workload_items` and `workload_error` for the workload read.
+    `error` for the PDB read; `workload_items`, the objects of the three reads after it; and
+    `read_failures`, keyed `workloads`, `storage` and `nodes`, each None or that read's error.
 
     `get-credentials` writes the member's kubeconfig, then one `kubectl get` reads every
-    PodDisruptionBudget, Deployment and StatefulSet, and a second one the kinds the
-    workload rules add. A failed credentials fetch or PDB read leaves `items` None, skips
-    the second read (the API server did not answer the first) and grades the member
-    `unknown` on the PDB rule and the workload rules; a failed second read alone leaves
-    `workload_items` None and costs the workload rules only. Either failure exits 1.
+    PodDisruptionBudget, Deployment and StatefulSet. A failed credentials fetch or PDB read
+    leaves `items` None, skips the three reads after it (the API server did not answer the
+    first), grades the member `unknown` on the PDB rule and the workload rules, and exits 1.
+    The three reads after it (DaemonSets, CronJobs and claims; StorageClasses; the projected
+    Nodes) each fail on their own: the kinds that answered reach the rules, the failed read is
+    recorded for the rules that need it, and the exit code is untouched.
     """
     path = kubeconfig_path(kubeconfig_dir, project, cluster.get("name", ""), cluster.get("location", ""))
-    read = {"kubeconfig": path, "items": None, "error": None, "workload_items": None, "workload_error": None}
+    read = {"kubeconfig": path, "items": None, "error": None, "workload_items": None, "read_failures": {READ_WORKLOADS: None, READ_STORAGE: None, READ_NODES: None}}
     try:
         os.makedirs(kubeconfig_dir, exist_ok=True)
     except OSError as e:
@@ -614,14 +660,27 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
     read["items"], read["error"] = _kubectl_get(KUBECTL_RESOURCES, env)
     if read["error"] is not None:
         return read
-    read["workload_items"], read["workload_error"] = _kubectl_get(KUBECTL_WORKLOAD_RESOURCES, env)
+    read["workload_items"] = []
+    for key, reader in ((READ_WORKLOADS, lambda: _kubectl_get(KUBECTL_WORKLOAD_RESOURCES, env)), (READ_STORAGE, lambda: _kubectl_get(KUBECTL_STORAGE_RESOURCES, env)), (READ_NODES, lambda: _kubectl_nodes(env))):
+        objects, error = reader()
+        if error is not None:
+            read["read_failures"][key] = error
+        else:
+            read["workload_items"].extend(objects)
     return read
 
 
 def _pool_records(cluster: dict, member: dict) -> list[dict]:
-    """The pools as the rules read them: name, version, parsed version, and the record's config."""
-    configs = {p.get("name", ""): p.get("config") or {} for p in cluster.get("nodePools") or [] if isinstance(p, dict)}
-    return [{"name": p["name"], "version": p["version"], "parsed": parse_version(p["version"]), "config": configs.get(p["name"]) or {}} for p in member["node_pools"]]
+    """The pools as the rules read them: name, version, parsed version, and the record's config and autoscaling."""
+    records = {p.get("name", ""): p for p in cluster.get("nodePools") or [] if isinstance(p, dict)}
+    return [
+        {"name": p["name"], "version": p["version"], "parsed": parse_version(p["version"]), "config": records.get(p["name"], {}).get("config") or {}, "autoscaling": records.get(p["name"], {}).get("autoscaling") or {}}
+        for p in member["node_pools"]
+    ]
+
+
+def _error_excerpt(error: str) -> str:
+    return error.splitlines()[0][:NOTE_ERROR_CHARS] if error else ""
 
 
 def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime) -> dict:
@@ -634,17 +693,19 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime) -> d
     pdbs = None if items is None else readiness.grade_pdbs(*readiness.split_items(items))
     maintenance = readiness.evaluate_maintenance(cluster.get("maintenancePolicy"), at, member["target_version"], target, master, pools)
     skew = readiness.evaluate_skew(target, pools, autopilot)
-    context = {"at": at, "target_text": member["target_version"], "master": master, "pools": pools, "autopilot": autopilot}
-    workload_items = None if items is None or read["workload_items"] is None else items + read["workload_items"]
+    read_failures = read["read_failures"]
+    context = {"at": at, "target_text": member["target_version"], "master": master, "pools": pools, "autopilot": autopilot, "read_failures": read_failures}
+    workload_items = None if items is None else items + (read["workload_items"] or [])
     rules = readiness.evaluate_extra_rules(cluster, member, workload_items, target, context)
     status = readiness.readiness_status(pdbs, maintenance, skew, target is not None, rules)
 
     notes = []
     if read_error:
         notes.append(NOTE_PDB_READ_FAILED)
-        notes.append(NOTE_WORKLOAD_READ_SKIPPED)
-    elif read["workload_error"]:
-        notes.append(NOTE_WORKLOAD_READ_FAILED)
+        notes.append(NOTE_WORKLOAD_READS_SKIPPED)
+    for key in (READ_WORKLOADS, READ_STORAGE, READ_NODES):
+        if read_failures.get(key):
+            notes.append(NOTE_READ_FAILED.format(read=key, error=_error_excerpt(read_failures[key])))
     if target is None:
         notes.append("no target; exclusion scope and skew not graded")
     if pdbs:
@@ -662,10 +723,9 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime) -> d
         notes.append(f"pool(s) at the skew ceiling: {readiness.LIST_SEPARATOR.join(skew['at_ceiling'])}")
     if skew["applicable"] and skew["unknown"] and target is not None:
         notes.append(f"pool version unparsable, skew unknown: {readiness.LIST_SEPARATOR.join(skew['unknown'])}")
-    if workload_items is not None:
-        for rule_id, result in rules["results"].items():
-            if result["unknown"]:
-                notes.append(NOTE_RULE_UNKNOWN.format(rule=rule_id, count=len(result["unknown"])))
+    for rule_id, counts in rules["results"].items():
+        if counts["unknown"]:
+            notes.append(NOTE_RULE_UNKNOWN.format(rule=rule_id, count=counts["unknown"]))
     notes.extend(rules["notes"])
 
     return {
@@ -673,7 +733,7 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime) -> d
         "evaluated_at": at.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT),
         "kubeconfig": read["kubeconfig"],
         "read_error": read_error,
-        "workload_read_error": read["workload_error"],
+        "read_failures": read_failures,
         "autopilot": autopilot,
         "pdbs": pdbs,
         "maintenance": maintenance,
@@ -712,9 +772,8 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
             member = grade_member(cluster, project, explicit_target, cache)
             if readiness_options is not None:
                 read = read_cluster_objects(cluster, project, readiness_options["kubeconfig_dir"])
-                for message in (read["error"], read["workload_error"]):
-                    if message is not None:
-                        errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": message})
+                if read["error"] is not None:
+                    errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": read["error"]})
                 member["readiness"] = assess_readiness(cluster, member, read, readiness_options["at"])
             members.append(member)
     errors.extend(cache.errors)
@@ -830,7 +889,7 @@ def _skew_cell(r: dict) -> str:
 
 def _rule_cell(r: dict, key: str) -> str:
     """The workload rules' blockers or risks, each as its rule described it."""
-    if r["pdbs"] is None or r["workload_read_error"]:
+    if r["pdbs"] is None:
         return READINESS_READ_FAILED_CELL
     findings = r[key]
     if not findings:
@@ -1099,7 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="Path to write the report as JSON.")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help=f"Directory holding one record per target from the previous run (default: {DEFAULT_STATE_DIR}).")
     parser.add_argument("--rollout-in-progress", action="store_true", help="Assert a rollout is under way, so an unchanged, behind member is flagged stalled even when no other member moved.")
-    parser.add_argument("--readiness", action="store_true", help="Also grade each member's readiness for the upgrade: drain-blocking PDBs and the workload rules (two kubectl reads per member), maintenance exclusions and window, node-pool skew.")
+    parser.add_argument("--readiness", action="store_true", help="Also grade each member's readiness for the upgrade: drain-blocking PDBs and the workload rules (four kubectl reads per member), maintenance exclusions and window, node-pool skew.")
     parser.add_argument("--at", help="RFC 3339 instant to evaluate maintenance exclusions and the window at (default: now). Only with --readiness.")
     parser.add_argument("--kubeconfig-dir", help="Directory for the per-member kubeconfig files --readiness writes (default: $HERMES_HOME/.kubeconfigs).")
     args = parser.parse_args(argv)

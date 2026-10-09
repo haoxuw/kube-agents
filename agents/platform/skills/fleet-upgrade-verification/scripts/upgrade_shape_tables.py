@@ -19,13 +19,30 @@ import re
 
 # ------------------------------------------------------------------ namespaces, kinds
 
-# Namespaces GKE's own components occupy: kube-system, gmp-system and every `gke-*`
-# (gke-gmp-system, gke-managed-*). GKE upgrades what runs there with the version, so the
-# readiness rules read nothing in them; Config Sync's namespaces are the one more family
-# of managed agents.
-SYSTEM_NAMESPACES = ("kube-system", "gmp-system")
-SYSTEM_NAMESPACE_PREFIXES = ("gke-",)
-MANAGED_AGENT_NAMESPACE_PREFIXES = ("config-management-",)
+# Namespaces GKE and its add-ons occupy: the set every fleet-audit collector spells
+# (`fleet-audit/scripts/collect.py`, SYSTEM_NAMESPACES, copied rather than imported because
+# each script ships standalone), plus the two prefixes those collectors skip, every `gke-*`
+# namespace (gke-gmp-system, gke-managed-*) and Config Sync's. GKE upgrades what runs there
+# with the version, so the readiness rules read nothing in them.
+SYSTEM_NAMESPACES = frozenset(
+    {
+        "kube-system",
+        "kube-public",
+        "kube-node-lease",
+        "gmp-system",
+        "gmp-public",
+        "gke-gmp-system",
+        "cnrm-system",
+        "configconnector-operator-system",
+        "krmapihosting-system",
+        "istio-system",
+        "asm-system",
+        "anthos-identity-service",
+        "gatekeeper-system",
+        "composer-system",
+    }
+)
+SYSTEM_NAMESPACE_PREFIXES = ("gke-", "config-management-")
 # Kinds whose spec carries a pod template. Bare Pods and Jobs are not read.
 TEMPLATE_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "CronJob")
 # The pool a node belongs to, as a node label and as the selector a template pins with.
@@ -76,10 +93,6 @@ DROPPED_NODE_LABELS = (
     ("cloud.google.com/gke-container-runtime", "docker", (1, 24), "GKE 1.24 removes Docker node images"),
 )
 
-# ------------------------------------------------------------------ entry 13: the runtime socket
-
-CONTAINERD_SOCKET_PATH_PREFIXES = ("/run/containerd", "/var/run/containerd")
-
 # ------------------------------------------------------------------ entries 14 and 15: cgroup v2
 
 # The node pool's cgroup mode as `nodePools[].config.effectiveCgroupMode` reports it
@@ -92,7 +105,6 @@ CGROUP_MODE_V2_PIN = "CGROUP_MODE_V2"
 # GKE's cgroup v2 timeline (docs.cloud.google.com/kubernetes-engine/docs/how-to/migrate-cgroupv2):
 # v2 is the default for new nodes from 1.26, GKE migrates v1 pools to v2 from 1.33, and
 # removes v1 support at 1.35, which is where a pin to v1 ends.
-CGROUP_V2_DEFAULT_MINOR = 26
 CGROUP_V2_MIGRATION_MINOR = 33
 CGROUP_V1_REMOVAL_MINOR = 35
 # Runtimes that read their memory limit from cgroup v1 paths, by image repository and
@@ -123,13 +135,16 @@ SINGLE_PROCESS_OOM_KILL_FIELD = "singleProcessOomKill"
 # Entry 15 is a heuristic on the command and the image: the process count is not readable
 # from the API. Programs whose job is to run several services in one container
 # (supervisord, s6-overlay's s6-svscan, runit's runsvdir), a shell script that forks a
-# background job (`a & b & wait`; `&&`, `2>&1` and `&>` are not forks), and images whose
-# documented entrypoint is such a supervisor: phusion/baseimage and phusion/passenger run
-# services under runit (github.com/phusion/baseimage-docker), webdevops/php-nginx and
-# richarvey/nginx-php-fpm run nginx and PHP-FPM under supervisord (their READMEs).
+# background job (`a & b & wait`; `&&`, `2>&1`, `&>` and an `&` inside a quoted string are
+# not forks; the script is the word after any short flag group carrying `c`, `-c`, `-ec`,
+# `-lc`), and images whose documented entrypoint is such a supervisor: phusion/baseimage and
+# phusion/passenger run services under runit (github.com/phusion/baseimage-docker),
+# webdevops/php-nginx and richarvey/nginx-php-fpm run nginx and PHP-FPM under supervisord
+# (their READMEs).
 SUPERVISOR_PROGRAMS = ("supervisord", "s6-svscan", "runsvdir")
 SHELL_PROGRAMS = ("sh", "bash", "ash", "dash", "zsh")
-SHELL_COMMAND_FLAG = "-c"
+SHELL_COMMAND_FLAG_RE = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
+SHELL_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 SHELL_FORK_RE = re.compile(r"(?<![&>\d])&(?![&>])")
 MULTI_PROCESS_IMAGE_REPOS = ("phusion/baseimage", "phusion/passenger", "webdevops/php-nginx", "richarvey/nginx-php-fpm")
 
@@ -152,16 +167,28 @@ KERNEL_MODULE_COMMANDS = ("modprobe", "insmod")
 # ------------------------------------------------------------------ entry 18: GPU drivers
 
 GPU_RESOURCE = "nvidia.com/gpu"
-# A CUDA pin in an image tag (`nvidia/cuda:12.2.0-base`) or an env value.
+# A CUDA pin in an image tag (`nvidia/cuda:12.2.0-base`), or in the two env values that name
+# a toolkit version: `CUDA_VERSION` as NVIDIA's CUDA images set it (`12.2.0`) and
+# `NVIDIA_REQUIRE_CUDA`, the container toolkit's requirement string
+# (`cuda>=12.2 brand=tesla,driver>=470,driver<471`). No other env is read:
+# `TORCH_CUDA_ARCH_LIST` and `TF_CUDA_COMPUTE_CAPABILITIES` carry compute capabilities.
 CUDA_IMAGE_PIN_RE = re.compile(r"cuda[:/_-]?(\d+\.\d+)", re.I)
-CUDA_ENV_NAME_MARKER = "CUDA"
-VERSION_IN_TEXT_RE = re.compile(r"\d+\.\d+")
+CUDA_VERSION_ENV = "CUDA_VERSION"
+CUDA_VERSION_VALUE_RE = re.compile(r"^\s*(\d+\.\d+)")
+NVIDIA_REQUIRE_CUDA_ENV = "NVIDIA_REQUIRE_CUDA"
+NVIDIA_REQUIRE_CUDA_RE = re.compile(r"cuda>=(\d+\.\d+)")
 # The accelerator a template selects, and the pool record's fields for the accelerator and
 # its driver install mode (GKE REST v1 NodeConfig.accelerators[]).
 ACCELERATOR_LABEL = "cloud.google.com/gke-accelerator"
 GPU_DRIVER_DEFAULT = "DEFAULT"
 GPU_DRIVER_LATEST = "LATEST"
 GPU_DRIVER_INSTALLATION_DISABLED = "INSTALLATION_DISABLED"
+# On Autopilot the workload selects the driver with this label, `default` when absent or
+# `latest` (docs.cloud.google.com/kubernetes-engine/docs/how-to/autopilot-gpus), and GKE
+# provisions the node on Container-Optimized OS
+# (docs.cloud.google.com/kubernetes-engine/docs/concepts/node-images).
+AUTOPILOT_GPU_DRIVER_LABEL = "cloud.google.com/gke-gpu-driver-version"
+AUTOPILOT_GPU_DRIVER_LATEST = "latest"
 # Node image types as `nodePools[].config.imageType` spells them.
 IMAGE_TYPE_COS_CONTAINERD = "COS_CONTAINERD"
 IMAGE_TYPE_UBUNTU_CONTAINERD = "UBUNTU_CONTAINERD"

@@ -4,7 +4,9 @@
 The objects mirror the seeded fleet's shapes on bench/tf/fleet (cache-on-emptydir,
 arch-pinned-worker, cgroup-blind-jvm, multi-process-worker, cni-shaped-agent,
 cuda-pinned-trainer, legacy-registry-pull) plus the variants each rule grades differently:
-the blocking, risk, unknown and clean paths a rule has.
+the blocking, risk, unknown, note and clean paths a rule has, and the inputs the adversarial
+review of the first cut found graded wrong (a `DoesNotExist` term, a preferred term, a pool
+scaled to zero, a quoted `&`, a compute-capability env, a scratch emptyDir).
 """
 
 import os
@@ -44,71 +46,95 @@ def node(name, pool="default-pool", labels=None):
     return {"kind": "Node", "metadata": {"name": name, "labels": {**base, **(labels or {})}}}
 
 
-def pool(name="default-pool", version="1.33.4-gke.1000", **config):
-    return {"name": name, "version": version, "parsed": parse_version(version), "config": config}
+def pool(name="default-pool", version="1.33.4-gke.1000", autoscaling=None, **config):
+    return {"name": name, "version": version, "parsed": parse_version(version), "config": config, "autoscaling": autoscaling or {}}
 
 
-def context(pools, target_text=TARGET_TEXT):
-    return {"at": AT, "target_text": target_text, "master": parse_version("1.33.4-gke.1000"), "pools": pools, "autopilot": False}
+def context(pools, target_text=TARGET_TEXT, autopilot=False, read_failures=None):
+    return {"at": AT, "target_text": target_text, "master": parse_version("1.33.4-gke.1000"), "pools": pools, "autopilot": autopilot, "read_failures": read_failures or {}}
 
 
-def run(rule, items, pools=None, target=TARGET):
+def run(rule, items, pools=None, target=TARGET, autopilot=False, read_failures=None):
     pools = [pool()] if pools is None else pools
-    return rule.evaluate({}, {}, items, target, context(pools))
+    return rule.evaluate({}, {}, items, target, context(pools, autopilot=autopilot, read_failures=read_failures))
 
 
-def busybox(command=None, name="worker"):
+def busybox(command=None, name="worker", mounts=None):
     container = {"name": name, "image": "busybox:1.36"}
     if command:
         container["command"] = command
+    if mounts:
+        container["volumeMounts"] = mounts
     return container
 
 
+def affinity(key, operator, values=None, required=True):
+    expr = {"key": key, "operator": operator, **({"values": values} if values else {})}
+    if required:
+        return {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [expr]}]}}}}
+    return {"affinity": {"nodeAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 1, "preference": {"matchExpressions": [expr]}}]}}}
+
+
 class NodeLocalStateTest(unittest.TestCase):
-    """Entry 4 has risk and clean paths only: nothing it reads can block, and nothing is undecidable."""
+    """Entry 4: state is a risk, scratch a note; nothing it reads can block."""
 
-    def test_emptydir_queue_is_a_risk_naming_the_volume(self):
+    def test_deployment_emptydir_queue_is_a_note_not_a_risk(self):
         out = run(node_local_state, [template("Deployment", "cache-on-emptydir", {"containers": [busybox(name="queue")], "volumes": [{"name": "queue", "emptyDir": {}}]})])
-        self.assertEqual(out["blocking"], [])
-        self.assertEqual(out["unknown"], [])
-        self.assertEqual(len(out["risks"]), 1)
+        self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
+        self.assertEqual(out["notes"], ["data-on-the-node: Deployment seeded-shapes/cache-on-emptydir keeps scratch on the node in queue (emptyDir; the name suggests state); not a risk: a Deployment's emptyDir is emptied by every reschedule and a read-only or memory-backed mount holds nothing of the workload's"])
+
+    def test_three_tmp_emptydirs_are_notes_and_fill_no_risk(self):
+        items = [template("Deployment", f"svc-{i}", {"containers": [busybox(mounts=[{"name": "tmp", "mountPath": "/tmp"}])], "volumes": [{"name": "tmp", "emptyDir": {}}]}) for i in range(3)]
+        out = run(node_local_state, items)
+        self.assertEqual(out["risks"], [])
+        self.assertEqual(len(out["notes"]), 3)
+
+    def test_statefulset_emptydir_is_the_strongest_risk(self):
+        out = run(node_local_state, [template("StatefulSet", "queue", {"containers": [busybox()], "volumes": [{"name": "data", "emptyDir": {}}]})])
         finding = out["risks"][0]
-        self.assertEqual((finding["kind"], finding["object"], finding["grade"]), ("Deployment", "seeded-shapes/cache-on-emptydir", "risk"))
-        self.assertEqual(finding["volumes"], ["queue (emptyDir; the name suggests state)"])
-        self.assertEqual(node_local_state.describe(finding), "Deployment seeded-shapes/cache-on-emptydir: keeps data on the node in queue (emptyDir; the name suggests state); a node rebuild loses it")
+        self.assertEqual((finding["kind"], finding["object"], finding["grade"], finding["volumes"]), ("StatefulSet", "seeded-shapes/queue", "risk", ["data (emptyDir; the name suggests state)"]))
+        self.assertEqual(node_local_state.describe(finding), "StatefulSet seeded-shapes/queue: keeps data on the node in data (emptyDir; the name suggests state); a node rebuild loses it, and a StatefulSet's identity survives the rebuild while its node-local data does not")
 
-    def test_local_ssd_hostpath_and_memory_emptydir_are_named(self):
-        spec = {"containers": [busybox()], "volumes": [{"name": "scratch", "emptyDir": {"medium": "Memory"}}, {"name": "ssd", "hostPath": {"path": "/mnt/disks/ssd0"}}, {"name": "cfg", "configMap": {"name": "c"}}]}
+    def test_local_ssd_and_writable_hostpaths_are_risks_memory_and_read_only_are_notes(self):
+        spec = {
+            "containers": [busybox(mounts=[{"name": "scratch", "mountPath": "/scratch"}, {"name": "ssd", "mountPath": "/ssd", "readOnly": True}, {"name": "logs", "mountPath": "/host/log", "readOnly": True}, {"name": "work", "mountPath": "/work"}])],
+            "volumes": [{"name": "scratch", "emptyDir": {"medium": "Memory"}}, {"name": "ssd", "hostPath": {"path": "/mnt/disks/ssd0"}}, {"name": "logs", "hostPath": {"path": "/var/log"}}, {"name": "work", "hostPath": {"path": "/opt/work"}}, {"name": "cfg", "configMap": {"name": "c"}}],
+        }
         out = run(node_local_state, [template("Deployment", "d", spec)])
-        self.assertEqual(out["risks"][0]["volumes"], ["scratch (emptyDir, medium Memory)", "ssd (hostPath /mnt/disks/ssd0, a Local SSD mount)"])
+        self.assertEqual(out["risks"][0]["volumes"], ["ssd (hostPath /mnt/disks/ssd0, a Local SSD mount)", "work (hostPath /opt/work)"])
+        self.assertIn("scratch (emptyDir, medium Memory), logs (hostPath /var/log, mounted read-only)", out["notes"][0])
 
-    def test_statefulset_on_a_local_storage_class_is_the_strongest_case(self):
-        sc = {"kind": "StorageClass", "metadata": {"name": "local-scsi"}, "provisioner": "kubernetes.io/no-provisioner"}
-        sts = template("StatefulSet", "db", {"containers": [busybox()]}, workload_spec={"volumeClaimTemplates": [{"metadata": {"name": "data"}, "spec": {"storageClassName": "local-scsi"}}]})
-        out = run(node_local_state, [sc, sts])
-        self.assertEqual(out["risks"][0]["volumes"], ["data (volumeClaimTemplate on local StorageClass local-scsi)"])
-        self.assertIn("a StatefulSet's identity survives the rebuild while its node-local data does not", out["risks"][0]["detail"])
-
-    def test_claim_on_a_local_class_is_a_risk_and_a_disk_claim_is_not(self):
+    def test_statefulset_on_a_local_storage_class_and_claims(self):
         items = [
             {"kind": "StorageClass", "metadata": {"name": "local-scsi"}, "provisioner": "kubernetes.io/no-provisioner"},
             {"kind": "StorageClass", "metadata": {"name": "standard-rwo"}, "provisioner": "pd.csi.storage.gke.io"},
             {"kind": "PersistentVolumeClaim", "metadata": {"namespace": NS, "name": "fast"}, "spec": {"storageClassName": "local-scsi"}},
             {"kind": "PersistentVolumeClaim", "metadata": {"namespace": NS, "name": "disk"}, "spec": {"storageClassName": "standard-rwo"}},
+            template("StatefulSet", "db", {"containers": [busybox()]}, workload_spec={"volumeClaimTemplates": [{"metadata": {"name": "data"}, "spec": {"storageClassName": "local-scsi"}}]}),
             template("Deployment", "on-ssd", {"containers": [busybox()], "volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "fast"}}]}),
             template("Deployment", "on-disk", {"containers": [busybox()], "volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "disk"}}]}),
         ]
         out = run(node_local_state, items)
-        self.assertEqual([f["name"] for f in out["risks"]], ["on-ssd"])
-        self.assertEqual(out["risks"][0]["volumes"], ["v (claim fast on local StorageClass local-scsi)"])
+        self.assertEqual([(f["name"], f["volumes"]) for f in out["risks"]], [("db", ["data (volumeClaimTemplate on local StorageClass local-scsi)"]), ("on-ssd", ["v (claim fast on local StorageClass local-scsi)"])])
+        self.assertEqual(out["unknown"], [])
+
+    def test_storage_read_failure_makes_claims_unknown_and_nothing_else(self):
+        items = [
+            template("Deployment", "on-disk", {"containers": [busybox()], "volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "disk"}}]}),
+            template("Deployment", "stateless", {"containers": [busybox()]}),
+        ]
+        out = run(node_local_state, items, read_failures={rules.READ_STORAGE: "storageclasses is forbidden"})
+        self.assertEqual([u["name"] for u in out["unknown"]], ["on-disk"])
+        self.assertIn("mounts claim(s) disk; the StorageClass read failed (storageclasses is forbidden)", out["unknown"][0]["detail"])
 
     def test_clean_daemonsets_cronjobs_and_system_namespaces_are_not_read(self):
         items = [
             template("Deployment", "stateless", {"containers": [busybox()], "volumes": [{"name": "cfg", "configMap": {"name": "c"}}]}),
             template("DaemonSet", "agent", {"containers": [busybox()], "volumes": [{"name": "logs", "hostPath": {"path": "/var/log"}}]}),
             template("CronJob", "job", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}),
-            template("Deployment", "kube-dns", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}, namespace="kube-system"),
-            template("Deployment", "collector", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}, namespace="gke-managed-cim"),
+            template("StatefulSet", "kube-dns", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}, namespace="kube-system"),
+            template("StatefulSet", "collector", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}, namespace="gke-managed-cim"),
+            template("StatefulSet", "cnrm", {"containers": [busybox()], "volumes": [{"name": "tmp", "emptyDir": {}}]}, namespace="cnrm-system"),
         ]
         self.assertEqual(run(node_local_state, items), rules.empty_result())
 
@@ -119,56 +145,87 @@ class RemovedNodeLabelTest(unittest.TestCase):
     def test_deprecated_beta_arch_label_the_nodes_carry_is_a_risk_with_the_replacement(self):
         items = self.NODES + [template("Deployment", "arch-pinned-worker", {"containers": [busybox()], "nodeSelector": {"beta.kubernetes.io/arch": "amd64"}})]
         out = run(removed_node_label, items)
-        self.assertEqual(out["blocking"], [])
-        self.assertEqual(out["unknown"], [])
+        self.assertEqual((out["blocking"], out["unknown"]), ([], []))
         finding = out["risks"][0]
         self.assertEqual((finding["object"], finding["label"], finding["replacement"]), ("seeded-shapes/arch-pinned-worker", "beta.kubernetes.io/arch", "kubernetes.io/arch"))
         self.assertEqual(removed_node_label.describe(finding), "Deployment seeded-shapes/arch-pinned-worker: selects on beta.kubernetes.io/arch=amd64 (nodeSelector), deprecated since 1.14 in favour of kubernetes.io/arch; the kubelet still sets it today, and a node image that stops setting it strands the pods")
 
-    def test_label_value_the_target_minor_dropped_is_blocking(self):
-        items = self.NODES + [template("Deployment", "docker-pinned", {"containers": [busybox()], "nodeSelector": {"cloud.google.com/gke-container-runtime": "docker"}})]
-        out = run(removed_node_label, items)
-        self.assertEqual(out["risks"], [])
+    def test_a_drop_blocks_only_when_a_selected_pool_crosses_it(self):
+        pinned = template("Deployment", "docker-pinned", {"containers": [busybox()], "nodeSelector": {"cloud.google.com/gke-container-runtime": "docker"}})
+        # The pool is below the drop and the target at it: blocking.
+        out = run(removed_node_label, self.NODES + [pinned], pools=[pool(version="1.23.17-gke.1")], target=parse_version("1.24.0-gke.1"))
         finding = out["blocking"][0]
-        self.assertEqual((finding["grade"], finding["dropped_at"]), ("blocking", "1.24"))
-        self.assertIn("cloud.google.com/gke-container-runtime=docker (nodeSelector), dropped at 1.24: GKE 1.24 removes Docker node images; the target 1.34 is at or past it", finding["detail"])
-        # The same key with the surviving value is carried by no test node, so it is the risk path, not the drop.
-        items = self.NODES + [template("Deployment", "containerd-pinned", {"containers": [busybox()], "nodeSelector": {"cloud.google.com/gke-container-runtime": "containerd"}})]
-        out = run(removed_node_label, items)
+        self.assertEqual((finding["grade"], finding["dropped_at"], finding["pools_crossing"]), ("blocking", "1.24", ["default-pool"]))
+        self.assertIn("dropped at 1.24: GKE 1.24 removes Docker node images; pool(s) default-pool cross the drop in this upgrade to 1.24", finding["detail"])
+        # The pool passed the drop years ago: a note, whatever the target.
+        out = run(removed_node_label, self.NODES + [pinned])
+        self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
+        self.assertEqual(out["notes"], ["removed-node-label: Deployment seeded-shapes/docker-pinned selects on cloud.google.com/gke-container-runtime=docker (nodeSelector), dropped at 1.24, which every pool passed already; the pods either run or are already unschedulable, and the upgrade changes neither"])
+        # No target: the crossing cannot be decided.
+        out = run(removed_node_label, self.NODES + [pinned], target=None)
+        self.assertIn("whether a pool crosses the drop needs a target", out["unknown"][0]["detail"])
+        # The same key with the surviving value is carried by no test node: the risk path.
+        containerd = template("Deployment", "containerd-pinned", {"containers": [busybox()], "nodeSelector": {"cloud.google.com/gke-container-runtime": "containerd"}})
+        out = run(removed_node_label, self.NODES + [containerd])
         self.assertEqual(out["blocking"], [])
-        self.assertIn("no node in the cluster carries it today", out["risks"][0]["detail"])
+        self.assertEqual(removed_node_label.describe(out["risks"][0]), "Deployment seeded-shapes/containerd-pinned: selects on cloud.google.com/gke-container-runtime=containerd (nodeSelector) and no node in the cluster carries it today; the rebuilt nodes carry it no more")
 
-    def test_kubeadm_master_label_is_blocking_and_undecided_without_a_target(self):
-        affinity = {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "node-role.kubernetes.io/master", "operator": "Exists"}]}]}}}}
-        items = self.NODES + [template("Deployment", "reflector", {"containers": [busybox()], **affinity})]
-        out = run(removed_node_label, items)
-        self.assertEqual(out["blocking"][0]["label"], "node-role.kubernetes.io/master")
-        self.assertIn("(nodeAffinity), dropped at 1.24: kubeadm 1.24 stops setting it", out["blocking"][0]["detail"])
-        out = run(removed_node_label, items, target=None)
-        self.assertEqual(out["blocking"], [])
-        self.assertIn("whether the target crosses it needs a target", out["unknown"][0]["detail"])
+    def test_kubeadm_master_label_on_gke_is_a_note_for_exists_and_nothing_for_does_not_exist(self):
+        exists = template("Deployment", "reflector", {"containers": [busybox()], **affinity("node-role.kubernetes.io/master", "Exists")})
+        out = run(removed_node_label, self.NODES + [exists])
+        self.assertEqual((out["blocking"], out["risks"]), ([], []))
+        self.assertIn("node-role.kubernetes.io/master (nodeAffinity), dropped at 1.24, which every pool passed already", out["notes"][0])
+        # The common "stay off control-plane nodes" term selects nothing and is never graded.
+        avoid = template("Deployment", "operator", {"containers": [busybox()], **affinity("node-role.kubernetes.io/master", "DoesNotExist")})
+        self.assertEqual(run(removed_node_label, self.NODES + [avoid]), rules.empty_result())
+
+    def test_negative_operators_and_preferred_terms_are_never_graded(self):
+        items = self.NODES + [
+            template("Deployment", "web", {"containers": [busybox()], **affinity("cloud.google.com/gke-spot", "DoesNotExist")}),
+            template("Deployment", "batch", {"containers": [busybox()], **affinity("cloud.google.com/gke-spot", "In", ["true"], required=False)}),
+            template("Deployment", "x86", {"containers": [busybox()], **affinity("kubernetes.io/arch", "NotIn", ["arm64"])}),
+            template("Deployment", "gt", {"containers": [busybox()], **affinity("example.com/tier", "Gt", ["2"])}),
+            template("Deployment", "no-arm", {"containers": [busybox()], **affinity("beta.kubernetes.io/arch", "NotIn", ["arm64"])}),
+        ]
+        self.assertEqual(run(removed_node_label, items), rules.empty_result())
 
     def test_label_no_node_carries_is_a_risk_scoped_to_the_selected_pool(self):
         nodes = [node("a1", pool="pool-a", labels={"team/gpu": "yes"}), node("b1", pool="pool-b")]
         pinned = template("Deployment", "pinned", {"containers": [busybox()], "nodeSelector": {tables.NODEPOOL_LABEL: "pool-b", "team/gpu": "yes"}})
         out = run(removed_node_label, nodes + [pinned], pools=[pool("pool-a"), pool("pool-b")])
         self.assertEqual([f["label"] for f in out["risks"]], ["team/gpu"])
-        self.assertIn("no node in pool(s) pool-b carries it today", out["risks"][0]["detail"])
-        # Across the whole cluster a node does carry it: clean.
+        self.assertIn("no node in pool(s) pool-b carries it today; the rebuilt nodes carry it no more", out["risks"][0]["detail"])
+        self.assertNotIn("do not schedule", out["risks"][0]["detail"])
         free = template("Deployment", "free", {"containers": [busybox()], "nodeSelector": {"team/gpu": "yes"}})
         self.assertEqual(run(removed_node_label, nodes + [free], pools=[pool("pool-a"), pool("pool-b")]), rules.empty_result())
 
-    def test_no_node_objects_makes_the_carried_question_unknown(self):
-        items = [template("Deployment", "pinned", {"containers": [busybox()], "nodeSelector": {"team/gpu": "yes"}})]
-        out = run(removed_node_label, items)
+    def test_a_pool_at_zero_nodes_is_a_note_and_autopilot_skips_the_carried_question(self):
+        trainer = template("CronJob", "trainer", {"containers": [busybox()], "nodeSelector": {tables.NODEPOOL_LABEL: "gpu-pool", "cloud.google.com/gke-accelerator": "nvidia-l4"}})
+        gpu_pool = pool("gpu-pool", autoscaling={"enabled": True, "minNodeCount": 0, "maxNodeCount": 4})
+        out = run(removed_node_label, self.NODES + [trainer], pools=[pool(), gpu_pool])
+        self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
+        self.assertEqual(len(out["notes"]), 2)
+        self.assertIn("pool(s) gpu-pool has no node today (the pool scales from zero); not graded as stranded", out["notes"][0])
+        # On Autopilot GKE provisions the nodes; only the deprecated-label question is asked.
+        arch = template("Deployment", "arch-pinned-worker", {"containers": [busybox()], "nodeSelector": {"beta.kubernetes.io/arch": "amd64", "team/gpu": "yes"}})
+        out = run(removed_node_label, [arch], pools=[], autopilot=True)
+        self.assertEqual([f["label"] for f in out["risks"]], ["beta.kubernetes.io/arch"])
+        self.assertEqual(out["notes"], [])
+
+    def test_read_failures_are_unknown_for_what_they_hide(self):
+        pinned = template("Deployment", "pinned", {"containers": [busybox()], "nodeSelector": {"team/gpu": "yes"}})
+        out = run(removed_node_label, [pinned], read_failures={rules.READ_NODES: "nodes is forbidden"})
         self.assertEqual(out["risks"], [])
-        self.assertIn("no Node object was read", out["unknown"][0]["detail"])
+        self.assertIn("the Node read failed (nodes is forbidden), so whether a node carries it is unknown", out["unknown"][0]["detail"])
+        out = run(removed_node_label, self.NODES + [template("Deployment", "plain", {"containers": [busybox()]})], read_failures={rules.READ_WORKLOADS: "daemonsets is forbidden"})
+        self.assertEqual([(u["object"], u["detail"]) for u in out["unknown"]], [(None, "DaemonSets and CronJobs not read (daemonsets is forbidden); Deployments and StatefulSets graded")])
 
     def test_ga_labels_the_nodes_carry_and_system_namespaces_are_clean(self):
         items = self.NODES + [
-            template("Deployment", "zonal", {"containers": [busybox()], "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "topology.kubernetes.io/zone", "operator": "In", "values": ["us-central1-a"]}]}]}}}}),
+            template("Deployment", "zonal", {"containers": [busybox()], **affinity("topology.kubernetes.io/zone", "In", ["us-central1-a"])}),
             template("Deployment", "arch", {"containers": [busybox()], "nodeSelector": {"kubernetes.io/arch": "amd64"}}),
             template("DaemonSet", "fluentbit", {"containers": [busybox()], "nodeSelector": {"beta.kubernetes.io/os": "linux"}}, namespace="kube-system"),
+            template("Deployment", "gatekeeper", {"containers": [busybox()], "nodeSelector": {"beta.kubernetes.io/os": "linux"}}, namespace="gatekeeper-system"),
         ]
         self.assertEqual(run(removed_node_label, items), rules.empty_result())
 
@@ -178,8 +235,7 @@ class CgroupV2RuntimeTest(unittest.TestCase):
 
     def test_old_jdk_on_a_pool_gke_migrates_at_the_target_is_a_risk(self):
         out = run(cgroup_v2_runtime, [self.JVM], pools=[pool(effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V1")])
-        self.assertEqual(out["blocking"], [])
-        self.assertEqual(out["unknown"], [])
+        self.assertEqual((out["blocking"], out["unknown"]), ([], []))
         finding = out["risks"][0]
         self.assertEqual((finding["object"], finding["image"], finding["runtime"]), ("seeded-shapes/cgroup-blind-jvm", "docker.io/library/eclipse-temurin:8u302-b08-jre", "JDK 8u302, below 8u372"))
         self.assertEqual(cgroup_v2_runtime.describe(finding), "Deployment seeded-shapes/cgroup-blind-jvm: container jvm runs docker.io/library/eclipse-temurin:8u302-b08-jre (JDK 8u302, below 8u372) on pool default-pool, which GKE migrates cgroup v1 pools to v2 from 1.33 at the target; the heap is then sized from the node and the container is OOM-killed")
@@ -198,7 +254,7 @@ class CgroupV2RuntimeTest(unittest.TestCase):
         out = run(cgroup_v2_runtime, [self.JVM], pools=[pinned], target=parse_version("1.35.0-gke.1"))
         self.assertIn("the pool is pinned to cgroup v1 and GKE removes cgroup v1 at 1.35", out["risks"][0]["detail"])
 
-    def test_unread_cgroup_mode_and_unversioned_tags_are_unknown(self):
+    def test_unread_cgroup_mode_unversioned_tags_and_a_failed_workload_read_are_unknown(self):
         out = run(cgroup_v2_runtime, [self.JVM], pools=[pool()])
         self.assertEqual(out["risks"], [])
         self.assertIn("the pool record carries no effectiveCgroupMode", out["unknown"][0]["detail"])
@@ -208,6 +264,8 @@ class CgroupV2RuntimeTest(unittest.TestCase):
         self.assertIn("(JDK 8 with no update in the tag) on pool default-pool, which GKE migrates cgroup v1 pools to v2 from 1.33 at the target; the tag does not say whether it reads cgroup v2", out["unknown"][0]["detail"])
         out = run(cgroup_v2_runtime, [self.JVM], pools=[pool(effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V1")], target=None)
         self.assertIn("no target to decide whether the pool moves to cgroup v2", out["unknown"][0]["detail"])
+        out = run(cgroup_v2_runtime, [], read_failures={rules.READ_WORKLOADS: "forbidden"})
+        self.assertEqual([u["object"] for u in out["unknown"]], [None])
 
     def test_runtime_verdicts(self):
         below, ok, unversioned = cgroup_v2_runtime.RUNTIME_BELOW, cgroup_v2_runtime.RUNTIME_OK, cgroup_v2_runtime.RUNTIME_UNVERSIONED
@@ -224,7 +282,9 @@ class CgroupV2RuntimeTest(unittest.TestCase):
         self.assertIsNone(cgroup_v2_runtime.runtime_verdict("busybox:1.36"))
         self.assertIsNone(cgroup_v2_runtime.runtime_verdict("registry.k8s.io/pause:3.10"))
 
-    def test_fine_runtimes_and_system_namespaces_are_clean(self):
+    def test_one_note_per_pool_and_clean_runtimes(self):
+        out = run(cgroup_v2_runtime, [self.JVM], pools=[pool("a", effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V2"), pool("b", effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V2"), pool("c", effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V1")])
+        self.assertEqual(([f["pool"] for f in out["risks"]], len(out["notes"])), (["c"], 2))
         items = [
             template("Deployment", "modern", {"containers": [{"name": "jvm", "image": "eclipse-temurin:21-jre"}]}),
             template("Deployment", "old-but-system", {"containers": [{"name": "jvm", "image": "openjdk:8u212-jre"}]}, namespace="kube-system"),
@@ -250,22 +310,30 @@ class GroupOomKillTest(unittest.TestCase):
         self.assertEqual(out["risks"], [])
         self.assertEqual(out["notes"], ["group-oom-kill: Deployment seeded-shapes/multi-process-worker container supervisor runs a shell script that forks a background job on pool default-pool, on cgroup v2 with a kubelet at 1.33.4-gke.1000, which already group-kills; not an upgrade risk"])
 
-    def test_single_process_oom_kill_and_an_unread_mode(self):
+    def test_single_process_oom_kill_an_unread_mode_and_a_failed_workload_read(self):
         out = run(group_oom_kill, [self.WORKER], pools=[pool(effectiveCgroupMode="EFFECTIVE_CGROUP_MODE_V1", linuxNodeConfig={"singleProcessOomKill": True})])
         self.assertEqual(out["risks"], [])
         self.assertIn("whose node config sets singleProcessOOMKill; not an upgrade risk", out["notes"][0])
         out = run(group_oom_kill, [self.WORKER], pools=[pool()])
         self.assertEqual(out["risks"], [])
         self.assertIn("the pool record carries no effectiveCgroupMode", out["unknown"][0]["detail"])
+        out = run(group_oom_kill, [], read_failures={rules.READ_WORKLOADS: "forbidden"})
+        self.assertEqual([u["object"] for u in out["unknown"]], [None])
 
-    def test_shapes_and_non_shapes(self):
-        self.assertEqual(group_oom_kill.multi_process_shape({"command": ["/usr/bin/supervisord", "-n"]}), "runs supervisord")
-        self.assertEqual(group_oom_kill.multi_process_shape({"command": ["/init"], "args": ["s6-svscan", "/etc/s6"]}), "runs s6-svscan")
-        self.assertEqual(group_oom_kill.multi_process_shape({"command": ["tini", "--", "bash", "-c", "nginx & php-fpm & wait"]}), "runs a shell script that forks a background job")
-        self.assertEqual(group_oom_kill.multi_process_shape({"image": "docker.io/phusion/baseimage:jammy-1.0.1"}), "runs phusion/baseimage, whose entrypoint is a supervisor")
-        self.assertIsNone(group_oom_kill.multi_process_shape({"command": ["sh", "-c", "date -u > /tmp/stamp && exec tail -f /dev/null 2>&1"]}))
-        self.assertIsNone(group_oom_kill.multi_process_shape({"command": ["sh", "-c", "java -version && exec sleep infinity"]}))
-        self.assertIsNone(group_oom_kill.multi_process_shape({"image": "nginx:1.27", "args": ["nginx", "-g", "daemon off;"]}))
+    def test_shapes_quoting_and_flag_groups(self):
+        shape = group_oom_kill.multi_process_shape
+        self.assertEqual(shape({"command": ["/usr/bin/supervisord", "-n"]}), "runs supervisord")
+        self.assertEqual(shape({"command": ["/init"], "args": ["s6-svscan", "/etc/s6"]}), "runs s6-svscan")
+        self.assertEqual(shape({"command": ["tini", "--", "bash", "-c", "nginx & php-fpm & wait"]}), "runs a shell script that forks a background job")
+        self.assertEqual(shape({"command": ["sh", "-ec", "nginx & php-fpm & wait"]}), "runs a shell script that forks a background job")
+        self.assertEqual(shape({"command": ["bash", "-lc", "a & b & wait"]}), "runs a shell script that forks a background job")
+        self.assertEqual(shape({"image": "docker.io/phusion/baseimage:jammy-1.0.1"}), "runs phusion/baseimage, whose entrypoint is a supervisor")
+        # An `&` inside a quoted string is not a fork; `&&` and `2>&1` never were.
+        self.assertIsNone(shape({"command": ["sh", "-c", "curl -fsS 'http://svc/health?x=y&z=1'"]}))
+        self.assertIsNone(shape({"command": ["sh", "-c", 'echo "Tom & Jerry"']}))
+        self.assertIsNone(shape({"command": ["sh", "-c", "date -u > /tmp/stamp && exec tail -f /dev/null 2>&1"]}))
+        self.assertIsNone(shape({"command": ["sh", "-c", "java -version && exec sleep infinity"]}))
+        self.assertIsNone(shape({"image": "nginx:1.27", "args": ["nginx", "-g", "daemon off;"]}))
 
     def test_clean_when_nothing_looks_multi_process(self):
         items = [template("Deployment", "single", {"containers": [busybox(["sh", "-c", "tail -f /dev/null"])]})]
@@ -277,17 +345,18 @@ class NodeImageCoupledAgentTest(unittest.TestCase):
 
     def test_host_network_daemonset_mounting_the_cni_directory_is_a_risk(self):
         out = run(node_image_coupled_agent, [self.AGENT])
-        self.assertEqual(out["blocking"], [])
-        self.assertEqual(out["unknown"], [])
+        self.assertEqual((out["blocking"], out["unknown"]), ([], []))
         finding = out["risks"][0]
         self.assertEqual((finding["kind"], finding["object"], finding["couplings"], finding["pools_below_target"]), ("DaemonSet", "seeded-shapes/cni-shaped-agent", ["mounts /etc/cni/net.d from the node"], ["default-pool"]))
         self.assertEqual(node_image_coupled_agent.describe(finding), "DaemonSet seeded-shapes/cni-shaped-agent: on the node's network and coupled to the node image: mounts /etc/cni/net.d from the node; pool(s) default-pool are below the target and get a new node image in this upgrade")
 
-    def test_pools_at_the_target_and_no_target_change_the_detail_not_the_grade(self):
+    def test_pools_at_the_target_no_target_and_a_failed_workload_read(self):
         out = run(node_image_coupled_agent, [self.AGENT], pools=[pool(version=TARGET_TEXT)])
         self.assertIn("no pool is below the target; the next node upgrade changes the image under it", out["risks"][0]["detail"])
         out = run(node_image_coupled_agent, [self.AGENT], target=None)
         self.assertIn("which pools change image needs a target", out["risks"][0]["detail"])
+        out = run(node_image_coupled_agent, [self.AGENT], read_failures={rules.READ_WORKLOADS: "forbidden"})
+        self.assertEqual((out["risks"], [u["detail"] for u in out["unknown"]]), ([], ["DaemonSets not read (forbidden); nothing graded"]))
 
     def test_label_module_and_modprobe_couplings(self):
         spec = {
@@ -307,18 +376,19 @@ class NodeImageCoupledAgentTest(unittest.TestCase):
             template("Deployment", "not-an-agent", {"hostNetwork": True, "containers": [busybox()], "volumes": [{"name": "cni-conf", "hostPath": {"path": "/etc/cni/net.d"}}]}),
             template("DaemonSet", "netd", {"hostNetwork": True, "containers": [busybox()], "volumes": [{"name": "cni-conf", "hostPath": {"path": "/etc/cni/net.d"}}]}, namespace="kube-system"),
             template("DaemonSet", "otel", {"hostNetwork": True, "containers": [busybox()], "volumes": [{"name": "mods", "hostPath": {"path": "/lib/modules"}}]}, namespace="config-management-monitoring"),
+            template("DaemonSet", "istio-cni", {"hostNetwork": True, "containers": [busybox()], "volumes": [{"name": "cni-conf", "hostPath": {"path": "/etc/cni/net.d"}}]}, namespace="istio-system"),
         ]
         self.assertEqual(run(node_image_coupled_agent, items), rules.empty_result())
 
 
 class GpuDriverMismatchTest(unittest.TestCase):
-    def trainer(self, image="docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04", env=None, select=True):
+    def trainer(self, image="docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04", env=None, select=True, extra_selector=None):
         container = {"name": "trainer", "image": image, "resources": {"limits": {"nvidia.com/gpu": "1"}, "requests": {"nvidia.com/gpu": "1"}}}
         if env:
             container["env"] = env
         spec = {"containers": [container]}
         if select:
-            spec["nodeSelector"] = {"cloud.google.com/gke-accelerator": "nvidia-l4"}
+            spec["nodeSelector"] = {"cloud.google.com/gke-accelerator": "nvidia-l4", **(extra_selector or {})}
         return template("CronJob", "cuda-pinned-trainer", spec)
 
     def gpu_pool(self, version="1.32.4-gke.1", mode="DEFAULT", image_type="COS_CONTAINERD", accelerator="nvidia-l4"):
@@ -326,8 +396,7 @@ class GpuDriverMismatchTest(unittest.TestCase):
 
     def test_no_pool_carries_the_accelerator_is_a_risk_naming_the_pin(self):
         out = run(gpu_driver_mismatch, [self.trainer()])
-        self.assertEqual(out["blocking"], [])
-        self.assertEqual(out["unknown"], [])
+        self.assertEqual((out["blocking"], out["unknown"]), ([], []))
         finding = out["risks"][0]
         self.assertEqual((finding["kind"], finding["object"], finding["cuda"]), ("CronJob", "seeded-shapes/cuda-pinned-trainer", ["12.2"]))
         self.assertEqual(gpu_driver_mismatch.describe(finding), "CronJob seeded-shapes/cuda-pinned-trainer: requests nvidia.com/gpu on accelerator nvidia-l4 and no pool in the cluster carries that accelerator; the target driver cannot be read, and the pin image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 stays unchecked")
@@ -336,17 +405,27 @@ class GpuDriverMismatchTest(unittest.TestCase):
         target = parse_version("1.33.0-gke.1")
         out = run(gpu_driver_mismatch, [self.trainer("nvidia/cuda:13.0.0-runtime-ubuntu24.04")], pools=[self.gpu_pool()], target=target)
         self.assertEqual((out["blocking"][0]["cuda"], out["blocking"][0]["driver"]), ("13.0", 535))
-        self.assertIn("the target 1.33 node image ships driver R535 (gpuDriverVersion DEFAULT), below the R580 floor for CUDA 13.x; the device does not open", out["blocking"][0]["detail"])
+        self.assertIn("on pool gpu-pool; the target 1.33 node image ships driver R535 (gpuDriverVersion DEFAULT), below the R580 floor for CUDA 13.x; the device does not open", out["blocking"][0]["detail"])
         out = run(gpu_driver_mismatch, [self.trainer("pytorch/pytorch:2.6.0-cuda12.8-cudnn9-runtime")], pools=[self.gpu_pool()], target=target)
         self.assertEqual(out["blocking"], [])
         self.assertIn("below the R570 CUDA 12.8 names; the build runs under minor version compatibility", out["risks"][0]["detail"])
         out = run(gpu_driver_mismatch, [self.trainer()], pools=[self.gpu_pool()], target=target)
         self.assertEqual((out["blocking"], out["risks"], out["unknown"]), ([], [], []))
         self.assertEqual(out["notes"], ["gpu-driver: CronJob seeded-shapes/cuda-pinned-trainer requests nvidia.com/gpu with image docker.io/nvidia/cuda:12.2.0-base-ubuntu22.04 on pool gpu-pool; the target 1.33 node image ships driver R535 (gpuDriverVersion DEFAULT), which serves CUDA 12.2; forward-compatibility packages inside the image are not readable from the tag"])
-        # LATEST on 1.33 is R580, which serves CUDA 13.0.
         out = run(gpu_driver_mismatch, [self.trainer("nvidia/cuda:13.0.0-runtime-ubuntu24.04")], pools=[self.gpu_pool(mode="LATEST")], target=target)
         self.assertEqual(out["blocking"], [])
         self.assertIn("driver R580 (gpuDriverVersion LATEST), which serves CUDA 13.0", out["notes"][0])
+
+    def test_autopilot_reads_the_driver_from_the_cos_table_and_the_selector(self):
+        target = parse_version("1.33.0-gke.1")
+        out = run(gpu_driver_mismatch, [self.trainer("nvidia/cuda:13.0.0-runtime-ubuntu24.04")], pools=[], target=target, autopilot=True)
+        self.assertIn("on the node Autopilot provisions; the target 1.33 node image ships driver R535 (cloud.google.com/gke-gpu-driver-version default), below the R580 floor for CUDA 13.x", out["blocking"][0]["detail"])
+        latest = self.trainer("nvidia/cuda:13.0.0-runtime-ubuntu24.04", extra_selector={"cloud.google.com/gke-gpu-driver-version": "latest"})
+        out = run(gpu_driver_mismatch, [latest], pools=[], target=target, autopilot=True)
+        self.assertEqual(out["blocking"], [])
+        self.assertIn("driver R580 (cloud.google.com/gke-gpu-driver-version latest), which serves CUDA 13.0", out["notes"][0])
+        out = run(gpu_driver_mismatch, [self.trainer()], pools=[], autopilot=True)
+        self.assertIn("the COS_CONTAINERD driver table covers 1.26 to 1.33, not the target 1.34", out["unknown"][0]["detail"])
 
     def test_unknown_when_the_table_does_not_cover_the_target_or_the_driver_is_not_in_the_record(self):
         out = run(gpu_driver_mismatch, [self.trainer()], pools=[self.gpu_pool()])
@@ -361,17 +440,25 @@ class GpuDriverMismatchTest(unittest.TestCase):
         self.assertIn("CUDA 10.2 is outside the table (majors 11, 12, 13)", out["unknown"][0]["detail"])
         out = run(gpu_driver_mismatch, [self.trainer()], pools=[self.gpu_pool()], target=None)
         self.assertIn("no target to read the driver at", out["unknown"][0]["detail"])
+        out = run(gpu_driver_mismatch, [], read_failures={rules.READ_WORKLOADS: "forbidden"})
+        self.assertEqual([u["object"] for u in out["unknown"]], [None])
 
-    def test_image_without_a_cuda_version_is_a_risk_and_env_pins_count(self):
-        out = run(gpu_driver_mismatch, [self.trainer("tensorflow/tensorflow:2.15.0-gpu")], pools=[self.gpu_pool()], target=parse_version("1.33.0-gke.1"))
-        self.assertEqual(gpu_driver_mismatch.describe(out["risks"][0]), "CronJob seeded-shapes/cuda-pinned-trainer: requests nvidia.com/gpu and its image tensorflow/tensorflow:2.15.0-gpu names no CUDA version; the driver it needs cannot be read from the tag")
-        out = run(gpu_driver_mismatch, [self.trainer("my/trainer:1", env=[{"name": "CUDA_VERSION", "value": "12.4.1"}])], pools=[self.gpu_pool()], target=parse_version("1.33.0-gke.1"))
+    def test_env_pins_are_the_two_named_variables_only(self):
+        target = parse_version("1.33.0-gke.1")
+        arch_list = self.trainer("nvcr.io/nvidia/pytorch:24.01-py3", env=[{"name": "TORCH_CUDA_ARCH_LIST", "value": "8.0;8.6;9.0"}, {"name": "TF_CUDA_COMPUTE_CAPABILITIES", "value": "7.0,8.0"}])
+        out = run(gpu_driver_mismatch, [arch_list], pools=[self.gpu_pool()], target=target)
+        self.assertEqual(out["unknown"], [])
+        self.assertIn("names no CUDA version", out["risks"][0]["detail"])
+        out = run(gpu_driver_mismatch, [self.trainer("my/trainer:1", env=[{"name": "CUDA_VERSION", "value": "12.4.1"}])], pools=[self.gpu_pool()], target=target)
         self.assertIn("with env CUDA_VERSION=12.4.1 on pool gpu-pool", out["risks"][0]["detail"])
+        out = run(gpu_driver_mismatch, [self.trainer("my/trainer:1", env=[{"name": "NVIDIA_REQUIRE_CUDA", "value": "cuda>=12.2 brand=tesla,driver>=470,driver<471"}])], pools=[self.gpu_pool()], target=target)
+        self.assertIn("which serves CUDA 12.2", out["notes"][0])
+        out = run(gpu_driver_mismatch, [self.trainer("tensorflow/tensorflow:2.15.0-gpu")], pools=[self.gpu_pool()], target=target)
+        self.assertEqual(gpu_driver_mismatch.describe(out["risks"][0]), "CronJob seeded-shapes/cuda-pinned-trainer: requests nvidia.com/gpu and its image tensorflow/tensorflow:2.15.0-gpu names no CUDA version; the driver it needs cannot be read from the tag")
 
     def test_clean_without_a_gpu_request_and_pool_selection(self):
         plain = template("Deployment", "cpu-only", {"containers": [{"name": "c", "image": "nvidia/cuda:13.0.0-base"}]})
         self.assertEqual(run(gpu_driver_mismatch, [plain], pools=[self.gpu_pool()], target=parse_version("1.33.0-gke.1")), rules.empty_result())
-        # A template selecting another accelerator does not read this pool's driver.
         other = self.trainer("nvidia/cuda:13.0.0-base")
         other["spec"]["jobTemplate"]["spec"]["template"]["spec"]["nodeSelector"] = {"cloud.google.com/gke-accelerator": "nvidia-tesla-t4"}
         out = run(gpu_driver_mismatch, [other], pools=[self.gpu_pool()], target=parse_version("1.33.0-gke.1"))
@@ -382,29 +469,31 @@ class GpuDriverMismatchTest(unittest.TestCase):
 class RetiredRegistryTest(unittest.TestCase):
     LEGACY = template("Deployment", "legacy-registry-pull", {"containers": [{"name": "pause", "image": "k8s.gcr.io/pause:3.9", "imagePullPolicy": "Always"}]})
 
-    def test_retired_host_is_blocking_naming_the_image_and_the_rebuilt_pools(self):
+    def test_retired_host_is_a_risk_naming_the_image_the_host_and_the_rebuilt_pools(self):
         out = run(retired_registry, [self.LEGACY])
-        self.assertEqual(out["risks"], [])
-        self.assertEqual(out["unknown"], [])
-        finding = out["blocking"][0]
-        self.assertEqual((finding["object"], finding["hosts"], finding["pools_below_target"]), ("seeded-shapes/legacy-registry-pull", ["k8s.gcr.io/"], ["default-pool"]))
-        self.assertEqual(retired_registry.describe(finding), "Deployment seeded-shapes/legacy-registry-pull: container pause pulls k8s.gcr.io/pause:3.9 from k8s.gcr.io (frozen 2023-04-03, a redirect to registry.k8s.io since 2023-03-20); a rebuilt node pulls it again; pool(s) default-pool are below the target and are rebuilt in this upgrade")
+        self.assertEqual((out["blocking"], out["unknown"]), ([], []))
+        finding = out["risks"][0]
+        self.assertEqual((finding["grade"], finding["object"], finding["hosts"], finding["pools_below_target"]), ("risk", "seeded-shapes/legacy-registry-pull", ["k8s.gcr.io/"], ["default-pool"]))
+        self.assertEqual(retired_registry.describe(finding), "Deployment seeded-shapes/legacy-registry-pull: container pause pulls k8s.gcr.io/pause:3.9 from k8s.gcr.io (frozen 2023-04-03, a redirect to registry.k8s.io since 2023-03-20); a rebuilt node pulls it again from a host that stopped publishing; pool(s) default-pool are below the target and are rebuilt in this upgrade")
 
     def test_pools_at_the_target_and_no_target_keep_the_grade(self):
         out = run(retired_registry, [self.LEGACY], pools=[pool(version=TARGET_TEXT)])
-        self.assertIn("no pool is below the target; the next node upgrade pulls it again", out["blocking"][0]["detail"])
+        self.assertEqual(out["blocking"], [])
+        self.assertIn("no pool is below the target; the next node upgrade pulls it again", out["risks"][0]["detail"])
         out = run(retired_registry, [self.LEGACY], target=None)
-        self.assertIn("which pools are rebuilt needs a target", out["blocking"][0]["detail"])
+        self.assertIn("which pools are rebuilt needs a target", out["risks"][0]["detail"])
 
-    def test_every_retired_host_including_init_containers(self):
+    def test_every_retired_host_including_init_containers_and_a_failed_workload_read(self):
         items = [
             template("StatefulSet", "tiller", {"initContainers": [{"name": "init", "image": "gcr.io/kubernetes-helm/tiller:v2.17.0"}], "containers": [busybox()]}),
             template("DaemonSet", "old-agent", {"containers": [{"name": "a", "image": "gcr.io/google_containers/pause-amd64:3.1"}]}),
             template("CronJob", "old-job", {"containers": [{"name": "j", "image": "gcr.io/google-containers/busybox:1.27"}]}),
         ]
         out = run(retired_registry, items)
-        self.assertEqual([(f["kind"], f["hosts"]) for f in out["blocking"]], [("StatefulSet", ["gcr.io/kubernetes-helm/"]), ("DaemonSet", ["gcr.io/google_containers/"]), ("CronJob", ["gcr.io/google-containers/"])])
-        self.assertIn("Helm 2's registry, unsupported since 2020-11-13", out["blocking"][0]["detail"])
+        self.assertEqual([(f["kind"], f["hosts"]) for f in out["risks"]], [("StatefulSet", ["gcr.io/kubernetes-helm/"]), ("DaemonSet", ["gcr.io/google_containers/"]), ("CronJob", ["gcr.io/google-containers/"])])
+        self.assertIn("Helm 2's registry, unsupported since 2020-11-13", out["risks"][0]["detail"])
+        out = run(retired_registry, items[:1], read_failures={rules.READ_WORKLOADS: "forbidden"})
+        self.assertEqual(([u["object"] for u in out["unknown"]], len(out["risks"])), ([None], 1))
 
     def test_clean_hosts_and_system_namespaces(self):
         items = [
@@ -415,24 +504,34 @@ class RetiredRegistryTest(unittest.TestCase):
 
 
 class HelpersTest(unittest.TestCase):
+    def test_selectors_keep_operators_and_skip_preferred_terms(self):
+        spec = {"nodeSelector": {"a": "1"}, **affinity("b", "NotIn", ["x", "y"])}
+        self.assertEqual(rules.selectors(spec), [{"key": "a", "operator": "In", "values": ["1"], "where": "nodeSelector"}, {"key": "b", "operator": "NotIn", "values": ["x", "y"], "where": "nodeAffinity"}])
+        self.assertEqual(rules.selectors(affinity("c", "In", ["z"], required=False)), [])
+        self.assertEqual(rules.selected_values({**affinity("b", "NotIn", ["x"]), "nodeSelector": {"b": "w"}}, "b"), ["w"])
+
     def test_pools_for_template_follows_the_nodepool_selector(self):
         pools = [pool("a"), pool("b")]
         self.assertEqual([p["name"] for p in rules.pools_for_template({"nodeSelector": {tables.NODEPOOL_LABEL: "b"}}, pools)], ["b"])
-        affinity = {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": tables.NODEPOOL_LABEL, "operator": "In", "values": ["a"]}]}]}}}}
-        self.assertEqual([p["name"] for p in rules.pools_for_template(affinity, pools)], ["a"])
+        self.assertEqual([p["name"] for p in rules.pools_for_template(affinity(tables.NODEPOOL_LABEL, "In", ["a"]), pools)], ["a"])
         self.assertEqual(len(rules.pools_for_template({}, pools)), 2)
+
+    def test_pool_scales_from_zero(self):
+        self.assertTrue(rules.pool_scales_from_zero(pool(autoscaling={"enabled": True, "minNodeCount": 0, "maxNodeCount": 3})))
+        self.assertFalse(rules.pool_scales_from_zero(pool(autoscaling={"enabled": True, "minNodeCount": 1})))
+        self.assertFalse(rules.pool_scales_from_zero(pool(autoscaling={"enabled": True, "totalMinNodeCount": 2})))
+        self.assertFalse(rules.pool_scales_from_zero(pool()))
 
     def test_image_repository_and_tag(self):
         self.assertEqual(rules.image_repository_and_tag("docker.io/library/eclipse-temurin:8u302-b08-jre"), ("eclipse-temurin", "8u302-b08-jre"))
         self.assertEqual(rules.image_repository_and_tag("localhost:5000/openjdk"), ("openjdk", ""))
         self.assertEqual(rules.image_repository_and_tag("openjdk:11@sha256:abc"), ("openjdk", "11"))
 
-    def test_system_namespaces(self):
-        for namespace in ("kube-system", "gmp-system", "gke-managed-cim", "gke-gmp-system"):
-            self.assertTrue(rules.is_system_namespace(namespace))
-        self.assertFalse(rules.is_system_namespace("config-management-system"))
-        self.assertTrue(rules.is_system_namespace("config-management-system", managed_agents=True))
-        self.assertFalse(rules.is_system_namespace("seeded-shapes", managed_agents=True))
+    def test_system_namespaces_are_the_collectors_set_plus_the_two_prefixes(self):
+        for namespace in ("kube-system", "kube-public", "gmp-system", "gke-managed-cim", "gke-gmp-system", "cnrm-system", "istio-system", "gatekeeper-system", "config-management-system"):
+            self.assertTrue(rules.is_system_namespace(namespace), namespace)
+        for namespace in ("seeded-shapes", "default", "istio-ingress", "gkeapp"):
+            self.assertFalse(rules.is_system_namespace(namespace), namespace)
 
     def test_describe_rule_level_entry(self):
         self.assertEqual(rules.describe(rules.rule_unknown("x", None, "why")), "x: why")

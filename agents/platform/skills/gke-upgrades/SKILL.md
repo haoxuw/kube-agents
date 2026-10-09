@@ -242,7 +242,7 @@ data kept on the node, selectors on removed or deprecated node labels, pre-cgrou
 multi-process containers, node-image-coupled agents, CUDA pins the target image's driver does not
 serve, and images on retired registries. Run it before writing the plan; carry its `blocked` rows
 into the checklist rather than asking the operator to check those items by hand, and its risks as
-what to watch. The cluster reads cost one `get-credentials` and two `kubectl get` per member and
+what to watch. The cluster reads cost one `get-credentials` and four `kubectl get` per member and
 leave a per-member kubeconfig under `${HERMES_HOME:-/opt/data}/.kubeconfigs/`; an exclusion is
 reported as holding back automatic upgrades only.
 

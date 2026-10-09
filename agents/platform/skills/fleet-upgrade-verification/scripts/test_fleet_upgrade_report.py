@@ -879,17 +879,22 @@ if __name__ == "__main__":
 
 
 class FakeReadinessCommands(FakeGcloud):
-    """FakeGcloud plus `get-credentials` and the two `kubectl get` reads, recording the KUBECONFIG each ran with.
+    """FakeGcloud plus `get-credentials` and the four `kubectl get` reads, recording the KUBECONFIG each ran with.
 
-    `objects_by_cluster` answers the PDB read, `workload_objects_by_cluster` the workload read.
+    `objects_by_cluster` answers the PDB read, `workload_objects_by_cluster` the namespaced
+    workload read, `storage_objects_by_cluster` the StorageClass read and `nodes_by_cluster`
+    (Node dicts) the projected node read, rendered the way kubectl's jsonpath renders it.
+    `failing_reads` maps a cluster to the resource arguments whose reads fail.
     """
 
-    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), workload_objects_by_cluster=None, failing_workload_kubectl=()):
+    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), workload_objects_by_cluster=None, storage_objects_by_cluster=None, nodes_by_cluster=None, failing_reads=None):
         super().__init__(clusters_by_project, config_by_location)
         self.objects_by_cluster = objects_by_cluster
         self.workload_objects_by_cluster = workload_objects_by_cluster or {}
+        self.storage_objects_by_cluster = storage_objects_by_cluster or {}
+        self.nodes_by_cluster = nodes_by_cluster or {}
         self.failing_kubectl = set(failing_kubectl)
-        self.failing_workload_kubectl = set(failing_workload_kubectl)
+        self.failing_reads = failing_reads or {}
         self.failing_credentials = set(failing_credentials)
         self.kubeconfigs = []
         self.current_cluster = None
@@ -905,18 +910,33 @@ class FakeReadinessCommands(FakeGcloud):
         if cmd[:2] == ["kubectl", "get"]:
             self.calls.append(cmd)
             self.kubeconfigs.append(env.get("KUBECONFIG") if env else None)
-            if cmd[2] == report.KUBECTL_RESOURCES:
+            resource = cmd[2]
+            if resource == report.KUBECTL_RESOURCES:
                 if self.current_cluster in self.failing_kubectl:
                     return 1, "", "Unable to connect to the server: dial tcp: i/o timeout"
                 return 0, json.dumps({"kind": "List", "items": self.objects_by_cluster.get(self.current_cluster, [])}), ""
-            if self.current_cluster in self.failing_workload_kubectl:
-                return 1, "", 'Error from server (Forbidden): nodes is forbidden: User "agent" cannot list resource "nodes"'
-            return 0, json.dumps({"kind": "List", "items": self.workload_objects_by_cluster.get(self.current_cluster, [])}), ""
+            if resource in self.failing_reads.get(self.current_cluster, ()):
+                return 1, "", f'Error from server (Forbidden): {resource} is forbidden: User "agent" cannot list resource "{resource}"'
+            if resource == report.KUBECTL_WORKLOAD_RESOURCES:
+                return 0, json.dumps({"kind": "List", "items": self.workload_objects_by_cluster.get(self.current_cluster, [])}), ""
+            if resource == report.KUBECTL_STORAGE_RESOURCES:
+                return 0, json.dumps({"kind": "List", "items": self.storage_objects_by_cluster.get(self.current_cluster, [])}), ""
+            if resource == report.KUBECTL_NODE_RESOURCE:
+                return 0, "".join(node_line(n) for n in self.nodes_by_cluster.get(self.current_cluster, [])), ""
         return super().__call__(cmd)
 
 
+def node_line(node):
+    """One node as kubectl's jsonpath renders the report's template: tab-separated fields, maps and lists as JSON, an absent field empty."""
+    meta, spec, status = node.get("metadata") or {}, node.get("spec") or {}, node.get("status") or {}
+    fields = [meta.get("name", ""), meta.get("labels"), spec.get("taints"), status.get("nodeInfo"), status.get("allocatable"), status.get("conditions")]
+    return "\t".join([fields[0]] + [json.dumps(f) if f is not None else "" for f in fields[1:]]) + "\n"
+
+
 PDB_READ_CMD = ["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]
-WORKLOAD_READ_CMD = ["kubectl", "get", "daemonset,cronjob,node,pvc,storageclass", "-A", "-o", "json"]
+WORKLOAD_READ_CMD = ["kubectl", "get", "daemonset,cronjob,pvc", "-A", "-o", "json"]
+STORAGE_READ_CMD = ["kubectl", "get", "storageclass", "-A", "-o", "json"]
+NODE_READ_CMD = ["kubectl", "get", "nodes", "-o", f"jsonpath={report.KUBECTL_NODE_JSONPATH}"]
 
 
 def k8s_template(kind, namespace, name, spec):
@@ -1057,7 +1077,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(all(k and k.startswith(self.kubeconfig_dir + os.sep) for k in fake.kubeconfigs))
         self.assertTrue(os.path.isdir(self.kubeconfig_dir))
         kubectl = [c for c in fake.calls if c[:1] == ["kubectl"]]
-        self.assertEqual(kubectl, [PDB_READ_CMD, WORKLOAD_READ_CMD] * 3)
+        self.assertEqual(kubectl, [PDB_READ_CMD, WORKLOAD_READ_CMD, STORAGE_READ_CMD, NODE_READ_CMD] * 3)
         self.assertEqual(data["readiness"]["kubeconfig_dir"], self.kubeconfig_dir)
         self.assertEqual({m["cluster"]: m["readiness"]["kubeconfig"] for m in data["members"]}["seeded-b"], expected)
 
@@ -1096,30 +1116,49 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(b["status"], "blocked")
         self.assertIsNone(b["pdbs"])
         self.assertIn("forbidden", b["read_error"])
-        # Two reads for each of the two members whose credentials came; none for seeded-b.
-        self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 4)
-        self.assertIn("workload read skipped after the PDB read failed; workload rules not graded", b["note"])
+        # Four reads for each of the two members whose credentials came; none for seeded-b.
+        self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 8)
+        self.assertIn("workload, StorageClass and Node reads skipped after the PDB read failed; workload rules not graded", b["note"])
 
-    def test_workload_read_failure_costs_the_workload_rules_only_and_exits_partial(self):
-        fake = FakeReadinessCommands(self.clusters, {}, self.objects, failing_workload_kubectl=["seeded-a"])
+    def test_a_failed_read_after_the_pdb_read_costs_the_rules_that_need_it_and_no_exit_code(self):
+        selector = k8s_template("Deployment", "shop", "pinned", {"containers": [{"name": "c", "image": "busybox:1.36"}], "nodeSelector": {"team/gpu": "yes"}})
+        claim = k8s_template("Deployment", "shop", "on-disk", {"containers": [{"name": "c", "image": "busybox:1.36"}], "volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "disk"}}]})
+        objects = {"seeded-a": self.objects["seeded-a"] + [selector, claim]}
+        # The namespaced workload read refused: the rules that read DaemonSets and CronJobs say so; the PDB rule and the data rule are untouched.
+        fake = FakeReadinessCommands({"p1": [self.clusters["p1"][1]]}, {}, objects, failing_reads={"seeded-a": {report.KUBECTL_WORKLOAD_RESOURCES}})
         rc, text, data = self._run(fake)
-        self.assertEqual(rc, report.EXIT_PARTIAL)
-        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
-        # The PDB rule was read and graded; the workload rules were not, so the member is unknown.
+        self.assertEqual(rc, report.EXIT_OK)
+        a = data["members"][0]["readiness"]
         self.assertEqual(a["status"], "unknown")
         self.assertEqual(a["pdbs"]["blocking"], [])
         self.assertIsNone(a["read_error"])
-        self.assertIn("nodes is forbidden", a["workload_read_error"])
-        self.assertEqual(a["rules"], {})
-        self.assertEqual([u["rule"] for u in a["unknown"]], ["workload-rules"])
-        self.assertIn("workload read failed; workload rules not graded", a["note"])
-        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
-        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: kubectl get daemonset,cronjob,node,pvc,storageclass -A -o json failed (1)", text)
-        a_row = next(l for l in text.splitlines() if l.startswith("| p1 | seeded-a |") and "| unknown |" in l)
-        self.assertIn("| none | no exclusion in effect", a_row)
-        self.assertIn("| read failed | read failed |", a_row)
-        # The other members are graded in full.
-        self.assertEqual({m["cluster"]: m["readiness"]["status"] for m in data["members"]}["robot-host"], "blocked")
+        self.assertIn("daemonset,cronjob,pvc is forbidden", a["read_failures"]["workloads"])
+        self.assertIsNone(a["read_failures"]["nodes"])
+        self.assertEqual(sorted(u["rule"] for u in a["unknown"] if u["object"] is None), ["cgroup-v2-runtime", "gpu-driver", "group-oom-kill", "node-image-coupled-agent", "removed-node-label", "retired-registry"])
+        self.assertEqual(a["rules"]["data-on-the-node"]["unknown"], 0)
+        self.assertEqual(a["rules"]["retired-registry"], {"blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
+        self.assertIn("workloads read failed (kubectl get daemonset,cronjob,pvc -A -o json failed (1)", a["note"])
+        self.assertEqual(data["errors"], [])
+        self.assertNotIn("read failed for", text)
+        # The Node read refused: only the label rule's selector is unknown; the StorageClass read refused: only the claim is.
+        fake = FakeReadinessCommands({"p1": [self.clusters["p1"][1]]}, {}, objects, failing_reads={"seeded-a": {report.KUBECTL_NODE_RESOURCE, report.KUBECTL_STORAGE_RESOURCES}})
+        rc, _, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_OK)
+        a = data["members"][0]["readiness"]
+        self.assertEqual([(u["rule"], u["object"]) for u in a["unknown"]], [("data-on-the-node", "shop/on-disk"), ("removed-node-label", "shop/pinned")])
+        self.assertIn("the Node read failed (kubectl get nodes failed (1)", a["unknown"][1]["detail"])
+        self.assertEqual(a["rules"]["removed-node-label"]["unknown"], 1)
+
+    def test_projected_nodes_are_parsed_and_a_malformed_line_fails_the_node_read_only(self):
+        nodes, error = report.parse_node_lines('n1\t{"cloud.google.com/gke-nodepool":"default-pool"}\t\t{"kubeletVersion":"v1.33.4-gke.1000"}\t{"cpu":"940m"}\t[{"type":"Ready","status":"True"}]\n\n')
+        self.assertIsNone(error)
+        self.assertEqual(nodes, [{"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": []}, "status": {"nodeInfo": {"kubeletVersion": "v1.33.4-gke.1000"}, "allocatable": {"cpu": "940m"}, "conditions": [{"type": "Ready", "status": "True"}]}}])
+        self.assertEqual(report.parse_node_lines(""), ([], None))
+        nodes, error = report.parse_node_lines("n1\tnot-json\t\t\t\t\n")
+        self.assertIsNone(nodes)
+        self.assertIn("node line unparsable", error)
+        nodes, error = report.parse_node_lines("n1\tonly two\n")
+        self.assertIn("field(s), not 6", error)
 
     def test_workload_rules_in_table_and_json(self):
         shapes = cluster("shapes", "us-central1-a", "1.33.4-gke.1000", [("default-pool", "1.33.4-gke.1000")])
@@ -1127,34 +1166,42 @@ class ReadinessTest(unittest.TestCase):
         pdb_read = [
             k8s_template("Deployment", "seeded-shapes", "legacy-registry-pull", {"containers": [{"name": "pause", "image": "k8s.gcr.io/pause:3.9"}]}),
             k8s_template("Deployment", "seeded-shapes", "cache-on-emptydir", {"containers": [{"name": "queue", "image": "busybox:1.36"}], "volumes": [{"name": "queue", "emptyDir": {}}]}),
+            k8s_template("StatefulSet", "seeded-shapes", "journal", {"containers": [{"name": "w", "image": "busybox:1.36"}], "volumes": [{"name": "journal", "emptyDir": {}}]}),
             k8s_template("Deployment", "seeded-shapes", "cgroup-blind-jvm", {"containers": [{"name": "jvm", "image": "docker.io/library/eclipse-temurin:8u302-b08-jre"}]}),
+            k8s_template("Deployment", "seeded-shapes", "arch-pinned-worker", {"containers": [{"name": "w", "image": "busybox:1.36"}], "nodeSelector": {"beta.kubernetes.io/arch": "amd64"}}),
             k8s_template("Deployment", "kube-system", "system-thing", {"containers": [{"name": "c", "image": "k8s.gcr.io/pause:3.9"}]}),
         ]
         workload_read = [
             k8s_template("DaemonSet", "seeded-shapes", "cni-shaped-agent", {"hostNetwork": True, "containers": [{"name": "agent", "image": "registry.k8s.io/pause:3.10"}], "volumes": [{"name": "cni-conf", "hostPath": {"path": "/etc/cni/net.d"}}]}),
-            {"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool", "kubernetes.io/arch": "amd64"}}},
         ]
-        fake = FakeReadinessCommands({"p1": [shapes]}, {}, {"shapes": pdb_read}, workload_objects_by_cluster={"shapes": workload_read})
+        nodes = [{"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool", "kubernetes.io/arch": "amd64", "beta.kubernetes.io/arch": "amd64"}}, "status": {"nodeInfo": {"kubeletVersion": "v1.33.4-gke.1000"}}}]
+        fake = FakeReadinessCommands({"p1": [shapes]}, {}, {"shapes": pdb_read}, workload_objects_by_cluster={"shapes": workload_read}, nodes_by_cluster={"shapes": nodes})
         rc, text, data = self._run(fake)
         self.assertEqual(rc, report.EXIT_OK)
         r = data["members"][0]["readiness"]
-        self.assertEqual(r["status"], "blocked")
-        self.assertEqual([f["rule"] for f in r["workload_blockers"]], ["retired-registry"])
-        self.assertEqual(r["workload_blockers"][0]["object"], "seeded-shapes/legacy-registry-pull")
-        self.assertEqual(sorted(f["rule"] for f in r["risks"]), ["data-on-the-node", "node-image-coupled-agent"])
+        # Nothing blocks: the retired host and the coupled agent are risks, the StatefulSet's emptyDir and the beta label too.
+        self.assertEqual(r["status"], "ready")
+        self.assertEqual(r["workload_blockers"], [])
+        self.assertEqual(sorted((f["rule"], f["name"]) for f in r["risks"]), [("data-on-the-node", "journal"), ("node-image-coupled-agent", "cni-shaped-agent"), ("removed-node-label", "arch-pinned-worker"), ("retired-registry", "legacy-registry-pull")])
         self.assertEqual(r["unknown"], [])
+        self.assertEqual(r["read_failures"], {"workloads": None, "storage": None, "nodes": None})
+        # Per rule, counts only: the findings are serialised once, in the flat lists.
         self.assertEqual(set(r["rules"]), {"data-on-the-node", "removed-node-label", "cgroup-v2-runtime", "group-oom-kill", "node-image-coupled-agent", "gpu-driver", "retired-registry"})
-        self.assertTrue(all("text" in f for f in r["workload_blockers"] + r["risks"]))
+        self.assertEqual(r["rules"]["retired-registry"], {"blocking": 0, "risks": 1, "unknown": 0, "notes": 0})
+        self.assertEqual(r["rules"]["data-on-the-node"], {"blocking": 0, "risks": 1, "unknown": 0, "notes": 1})
+        self.assertTrue(all("text" in f for f in r["risks"]))
         # The kube-system Deployment on the retired host is GKE's and is not read.
         self.assertNotIn("system-thing", json.dumps(r))
-        # A pre-cgroup-v2 JDK on a pool already on cgroup v2 is a note, not a risk.
+        # A Deployment's emptyDir and a pre-cgroup-v2 JDK on a pool already on cgroup v2 are notes, not risks.
+        self.assertIn("data-on-the-node: Deployment seeded-shapes/cache-on-emptydir keeps scratch on the node in queue (emptyDir; the name suggests state); not a risk", r["note"])
         self.assertIn("cgroup-v2-runtime: Deployment seeded-shapes/cgroup-blind-jvm container jvm runs docker.io/library/eclipse-temurin:8u302-b08-jre (JDK 8u302, below 8u372) on pool default-pool, already on cgroup v2; not an upgrade risk", r["note"])
-        row = next(l for l in text.splitlines() if l.startswith("| p1 | shapes |") and "| blocked |" in l)
+        row = next(l for l in text.splitlines() if l.startswith("| p1 | shapes |") and "| ready |" in l)
         cells = [c.strip() for c in row.strip("|").split(" | ")]
-        self.assertEqual(cells[3], "blocked")
-        self.assertIn("Deployment seeded-shapes/legacy-registry-pull: container pause pulls k8s.gcr.io/pause:3.9 from k8s.gcr.io (frozen 2023-04-03, a redirect to registry.k8s.io since 2023-03-20); a rebuilt node pulls it again; pool(s) default-pool are below the target and are rebuilt in this upgrade", cells[7])
-        self.assertIn("Deployment seeded-shapes/cache-on-emptydir: keeps data on the node in queue (emptyDir; the name suggests state); a node rebuild loses it", cells[8])
+        self.assertEqual(cells[3], "ready")
+        self.assertEqual(cells[7], "none")
+        self.assertIn("Deployment seeded-shapes/legacy-registry-pull: container pause pulls k8s.gcr.io/pause:3.9 from k8s.gcr.io (frozen 2023-04-03, a redirect to registry.k8s.io since 2023-03-20); a rebuilt node pulls it again from a host that stopped publishing; pool(s) default-pool are below the target and are rebuilt in this upgrade", cells[8])
         self.assertIn("DaemonSet seeded-shapes/cni-shaped-agent: on the node's network and coupled to the node image: mounts /etc/cni/net.d from the node; pool(s) default-pool are below the target and get a new node image in this upgrade", cells[8])
+        self.assertIn("StatefulSet seeded-shapes/journal: keeps data on the node in journal (emptyDir; the name suggests state)", cells[8])
         self.assertIn("a risk lets the upgrade proceed and names what to watch", text)
 
     def test_unknown_target_grades_the_pdb_rule_and_marks_the_rest_unknown(self):

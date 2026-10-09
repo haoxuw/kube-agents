@@ -11,10 +11,13 @@ One module per rule, each exposing:
 
 `cluster` is the `clusters list` record; `member` the version row `grade_member` built;
 `items` the objects the member's kubectl reads returned (PodDisruptionBudgets, Deployments,
-StatefulSets, DaemonSets, CronJobs, Nodes, PersistentVolumeClaims and StorageClasses);
-`target` the parsed target version or None; `context` a dict with `target_text`, `master`
-(parsed), `pools` (dicts with `name`, `version`, `parsed` and the pool's `config`),
-`autopilot` and `at`.
+StatefulSets, DaemonSets, CronJobs, PersistentVolumeClaims, StorageClasses and the projected
+Nodes); `target` the parsed target version or None; `context` a dict with `target_text`,
+`master` (parsed), `pools` (dicts with `name`, `version`, `parsed`, the pool's `config` and
+`autoscaling`), `autopilot`, `at`, and `read_failures`, a dict keyed `workloads`, `storage`
+and `nodes` whose value is the read's error when that read failed (see
+`fleet_upgrade_report.read_cluster_objects`). A rule that needs a kind the failed read carries
+records one rule-level `unknown` naming the reason and still grades what it has.
 
 A finding is a dict with `rule`, `entry`, `grade`, `kind`, `namespace`, `name`, `object`
 (`namespace/name`), `detail` and whatever else the rule records; `describe` renders it for
@@ -23,7 +26,7 @@ a table cell. `blocking` goes into the member's `blocked` verdict, `unknown` int
 the rule could not decide, and a rule that could not run at all records one entry whose
 `object` is None. `notes` are strings for the member's note column: shapes the rule saw and
 decided are not an upgrade risk, named so a reader can check the reasoning. Every rule
-reads pod templates, never Pods, and skips the namespaces GKE manages
+reads pod templates, never Pods, and skips the namespaces GKE and its add-ons occupy
 (`upgrade_shape_tables.SYSTEM_NAMESPACES` and its prefixes).
 
 Pure functions over data the report has read; nothing here runs a command.
@@ -35,6 +38,10 @@ GRADE_BLOCKING = "blocking"
 GRADE_RISK = "risk"
 GRADE_UNKNOWN = "unknown"
 RESULT_KEYS = ("blocking", "risks", "unknown", "notes")
+# The three reads after the PDB read, as `context["read_failures"]` keys them.
+READ_WORKLOADS = "workloads"
+READ_STORAGE = "storage"
+READ_NODES = "nodes"
 OBJECT_FORMAT = "{namespace}/{name}"
 DESCRIBE_FORMAT = "{kind} {object}: {detail}"
 RULE_LEVEL_FORMAT = "{rule}: {detail}"
@@ -43,11 +50,15 @@ MINOR_FORMAT = "{major}.{minor}"
 KIND_NODE = "Node"
 KIND_CRONJOB = "CronJob"
 KIND_STATEFULSET = "StatefulSet"
-KIND_DAEMONSET = "DaemonSet"
-# Node affinity, as the PodSpec spells it; `In` is the one operator that names values.
+# Node affinity, as the PodSpec spells it. Only required terms are read: a preferred term
+# never keeps a pod off a node. The operators are the NodeSelectorRequirement's; `In` and
+# `Exists` select nodes carrying the label, the others select nodes without it or by value.
 AFFINITY_REQUIRED = "requiredDuringSchedulingIgnoredDuringExecution"
-AFFINITY_PREFERRED = "preferredDuringSchedulingIgnoredDuringExecution"
-OPERATOR_IN = "In"
+OP_IN = "In"
+OP_NOT_IN = "NotIn"
+OP_EXISTS = "Exists"
+OP_DOES_NOT_EXIST = "DoesNotExist"
+POSITIVE_OPERATORS = (OP_IN, OP_EXISTS)
 WHERE_NODE_SELECTOR = "nodeSelector"
 WHERE_NODE_AFFINITY = "nodeAffinity"
 # What `cgroup_transition` answers for a pool against the target.
@@ -75,8 +86,8 @@ def finding(rule: str, entry: int, grade: str, obj: dict, detail: str, **extra) 
     return {"rule": rule, "entry": entry, "grade": grade, "kind": obj["kind"], "namespace": obj["namespace"], "name": obj["name"], "object": obj["object"], "detail": detail, **extra}
 
 
-def rule_unknown(rule: str, entry: int, detail: str) -> dict:
-    """The whole rule could not run (a missing read, no target); `object` is None."""
+def rule_unknown(rule: str, entry, detail: str) -> dict:
+    """The whole rule, or one of its reads, could not run; `object` is None."""
     return {"rule": rule, "entry": entry, "grade": GRADE_UNKNOWN, "kind": None, "namespace": None, "name": None, "object": None, "detail": detail}
 
 
@@ -87,11 +98,14 @@ def describe(entry: dict) -> str:
     return DESCRIBE_FORMAT.format(kind=entry["kind"], object=entry["object"], detail=entry["detail"])
 
 
-def is_system_namespace(namespace: str, managed_agents: bool = False) -> bool:
-    """A namespace GKE's components occupy; with `managed_agents`, Config Sync's too."""
-    if namespace in tables.SYSTEM_NAMESPACES or namespace.startswith(tables.SYSTEM_NAMESPACE_PREFIXES):
-        return True
-    return managed_agents and namespace.startswith(tables.MANAGED_AGENT_NAMESPACE_PREFIXES)
+def read_failure(context: dict, read: str) -> str | None:
+    """The error of one of the reads after the PDB read, or None when it answered."""
+    return (context.get("read_failures") or {}).get(read)
+
+
+def is_system_namespace(namespace: str) -> bool:
+    """A namespace GKE or one of its add-ons occupies."""
+    return namespace in tables.SYSTEM_NAMESPACES or namespace.startswith(tables.SYSTEM_NAMESPACE_PREFIXES)
 
 
 def objects_of_kind(items: list, kind: str) -> list[dict]:
@@ -106,7 +120,7 @@ def pod_template_spec(workload: dict) -> dict | None:
     return (spec.get("template") or {}).get("spec")
 
 
-def templates(items: list, kinds: tuple = tables.TEMPLATE_KINDS, managed_agents: bool = False) -> list[tuple[dict, dict, dict]]:
+def templates(items: list, kinds: tuple = tables.TEMPLATE_KINDS) -> list[tuple[dict, dict, dict]]:
     """(obj, pod_spec, workload) for every template of the kinds asked, outside the system namespaces."""
     out = []
     for item in items or []:
@@ -114,7 +128,7 @@ def templates(items: list, kinds: tuple = tables.TEMPLATE_KINDS, managed_agents:
             continue
         meta = item.get("metadata") or {}
         namespace = meta.get("namespace", "") or ""
-        if is_system_namespace(namespace, managed_agents):
+        if is_system_namespace(namespace):
             continue
         spec = pod_template_spec(item)
         if not isinstance(spec, dict):
@@ -130,30 +144,28 @@ def containers(spec: dict) -> list[dict]:
 
 
 def selectors(spec: dict) -> list[dict]:
-    """Every node label a template selects on: `key`, `values` (a list, or None when the
-    expression names none) and `where` it was found."""
+    """Every node label a template requires: `key`, `operator`, `values` (a list, empty for
+    `Exists` and `DoesNotExist`) and `where` it was found. A `nodeSelector` entry is `In` one
+    value; preferred affinity terms and `matchFields` are not read."""
     out = []
     for key, value in (spec.get("nodeSelector") or {}).items():
-        out.append({"key": key, "values": [value], "where": WHERE_NODE_SELECTOR})
+        out.append({"key": key, "operator": OP_IN, "values": [value], "where": WHERE_NODE_SELECTOR})
     node_affinity = (spec.get("affinity") or {}).get("nodeAffinity") or {}
-    terms = list((node_affinity.get(AFFINITY_REQUIRED) or {}).get("nodeSelectorTerms") or [])
-    terms += [p.get("preference") or {} for p in node_affinity.get(AFFINITY_PREFERRED) or [] if isinstance(p, dict)]
-    for term in terms:
+    for term in (node_affinity.get(AFFINITY_REQUIRED) or {}).get("nodeSelectorTerms") or []:
         if not isinstance(term, dict):
             continue
         for expr in term.get("matchExpressions") or []:
-            if isinstance(expr, dict) and expr.get("key"):
-                values = list(expr.get("values") or []) if expr.get("operator") == OPERATOR_IN else None
-                out.append({"key": expr["key"], "values": values, "where": WHERE_NODE_AFFINITY})
+            if isinstance(expr, dict) and expr.get("key") and expr.get("operator"):
+                out.append({"key": expr["key"], "operator": expr["operator"], "values": [v for v in expr.get("values") or [] if v is not None], "where": WHERE_NODE_AFFINITY})
     return out
 
 
 def selected_values(spec: dict, key: str) -> list[str]:
-    """The values a template requires for one label, from its nodeSelector and affinity."""
+    """The values a template requires for one label through `In` terms and its nodeSelector."""
     values = []
     for selector in selectors(spec):
-        if selector["key"] == key:
-            values.extend(v for v in selector["values"] or [] if v is not None)
+        if selector["key"] == key and selector["operator"] == OP_IN:
+            values.extend(selector["values"])
     return values
 
 
@@ -168,6 +180,14 @@ def pools_for_template(spec: dict, pools: list[dict]) -> list[dict]:
 def pool_config(pool: dict) -> dict:
     config = pool.get("config")
     return config if isinstance(config, dict) else {}
+
+
+def pool_scales_from_zero(pool: dict) -> bool:
+    """An autoscaled pool whose minimum is zero nodes: empty today is not stranded."""
+    autoscaling = pool.get("autoscaling")
+    if not isinstance(autoscaling, dict) or not autoscaling.get("enabled"):
+        return False
+    return not (autoscaling.get("minNodeCount") or 0) and not (autoscaling.get("totalMinNodeCount") or 0)
 
 
 def minor_text(version: tuple | None) -> str | None:

@@ -64,7 +64,7 @@ RULE_RESULT_KEYS = ("blocking", "risks", "unknown")
 RULE_TEXT_KEY = "text"
 # What stands in for every rule when the workload read failed.
 RULES_UNREAD_ID = "workload-rules"
-RULES_UNREAD_DETAIL = "workload read failed; not graded"
+RULES_UNREAD_DETAIL = "nothing read after the PDB read failed; not graded"
 
 # The workload kinds a PDB is matched against. A DaemonSet is never here: a drain deletes
 # its pods rather than evicting them, so a PDB on one blocks nothing (SOP §3.3).
@@ -620,12 +620,14 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
 
 
 def evaluate_extra_rules(cluster: dict, member: dict, items: list | None, target, context: dict, rules: list | None = None) -> dict:
-    """Every registered rule over one member: per-rule results under `results`, plus the
-    flattened `blocking`, `risks`, `unknown` and `notes` across rules.
+    """Every registered rule over one member: the flattened `blocking`, `risks`, `unknown`
+    and `notes` across rules, each finding carrying its `rule`, and under `results` a count
+    per rule and grade, so the findings are serialised once.
 
-    `items` is the member's kubectl read (both commands' objects); None means the workload
-    read failed, and every rule is then one rule-level `unknown` entry. Each finding gains
-    `text`, the rule's own rendering, so the JSON reads without the module.
+    `items` is the member's kubectl reads' objects; None means the PDB read failed and nothing
+    was read, and every rule is then one rule-level `unknown` entry. A read after the PDB read
+    that failed is in `context["read_failures"]`, which each rule answers for itself. Each
+    finding gains `text`, the rule's own rendering, so the JSON reads without the module.
     """
     flattened = {key: [] for key in RULE_RESULT_KEYS}
     out = {"results": {}, "notes": [], **flattened}
@@ -639,7 +641,7 @@ def evaluate_extra_rules(cluster: dict, member: dict, items: list | None, target
                 finding.setdefault(RULE_TEXT_KEY, rule.describe(finding))
                 out[key].append(finding)
         out["notes"].extend(result.get("notes") or [])
-        out["results"][rule.RULE_ID] = result
+        out["results"][rule.RULE_ID] = {key: len(result.get(key) or []) for key in readiness_rules.RESULT_KEYS}
     return out
 
 
