@@ -1,11 +1,11 @@
 # Upgrade-failure catalogue entry 6: a served API version is removed.
 # PARKED: scripts/validate_bench_cases.py lists this case under
-# FIXTURE_NOT_READY (#2655). No standing fleet role can call a removed API.
-# No Kubernetes minor after 1.32 removes a served API version, and 1.31, the
-# last minor that serves one, leaves GKE's Extended channel on 2026-10-22.
-# The deprecated-api-caller role on seeded-a is stamped deprecated, not
-# removed, and stands in for entry 9. The readiness report's
-# removed-api-callers rule is covered by unit tests on a captured log sample
+# FIXTURE_NOT_READY on #2275, which tracks the fleet-shape fixtures to merge
+# (scenario issue #2655). No standing fleet role can call a removed API; the
+# catalogue's entry 6 Fixture line says why. The deprecated-api-caller role
+# on seeded-a is stamped deprecated, not removed, and stands in for entry 9.
+# The readiness report's removed-api-callers rule is covered by unit tests on
+# a captured log sample
 # (agents/platform/skills/fleet-upgrade-verification/scripts/testdata).
 #
 # The designed role, removed-api-caller: a CronJob, removed-api-writer in

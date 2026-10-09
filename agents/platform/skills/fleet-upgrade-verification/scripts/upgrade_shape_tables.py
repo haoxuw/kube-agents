@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-upgrade_shape_tables.py — the fact tables the readiness rules grade against, each with
-the page it was read from and the day it was read.
+upgrade_shape_tables.py — the facts behind the upgrade-failure catalogue's static shapes.
 
-Shared by the rule modules under `readiness_rules/`, so a value a rule compares with (a
-skew allowance, the minor at which a default changes, an add-on's supported range) is
-declared once, beside its source, and a reader who wants to know what the rules assume
-about the world reads this file rather than the rules. Nothing here is computed from a
-cluster and nothing here runs a command. Each group of rules appends its own block;
-append, do not rewrite, when another group's block is already here.
+One home for the tables the readiness rules under `readiness_rules/` read. Every constant
+is named for the catalogue shape it serves, so any other reader of the same shapes imports
+this module instead of carrying a copy. Every table names its source and the day it was
+read. The tables are deliberately small: a rule whose input has no row here grades
+`unknown` with the reason rather than guessing
+(docs/designs/upgrade-readiness-checks.md, "What a run produces"). Nothing here is
+computed from a cluster and nothing here runs a command.
+
+Catalogue entries, as docs/designs/upgrade-failure-catalogue.md numbers them: 6 a served
+API version removed, 8 a default changes in the new minor, 9 a feature deprecated but
+still served, 10 add-on and client skew.
 """
 
 import json
 import re
 from pathlib import Path
 
-# ----------------------------------------------------------------------- group C
+# ------------------------------------------------ entries 6, 9, 10: the audit-log read
 
 # The audit-log rules (catalogue entries 6, 9 and 10): one `gcloud logging read` per
 # cluster over the last seven days. Seven days sees a CronJob caller on any schedule a

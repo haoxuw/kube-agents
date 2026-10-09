@@ -244,28 +244,28 @@ FIXTURE_NOT_READY = {
         "verification sweep"
     ),
     "upgrades-removed-api-caller-named": (
-        "#2655: needs a removed-api-caller role, a writer that calls an API "
+        "#2275: needs a removed-api-caller role, a writer that calls an API "
         "version the cluster's next minor stops serving, which no standing fleet "
-        "role can carry: no Kubernetes minor after 1.32 removes a served API "
-        "version, and 1.31, the last minor that serves one, leaves GKE's Extended "
-        "channel on 2026-10-22 (catalogue entry 6). The deprecated-api-caller role "
-        "is stamped deprecated, not removed, and stands in for entry 9. The "
-        "readiness report's removed-api-callers rule is covered by unit tests on "
-        "a captured log sample; the case waits for the issue to plant the role on "
-        "a purpose-built cluster, or for the next minor that removes a served API"
+        "role can carry (the catalogue's entry 6 Fixture line says why); the "
+        "deprecated-api-caller role is stamped deprecated, not removed, and stands "
+        "in for entry 9, and the readiness report's removed-api-callers rule is "
+        "covered by unit tests on a captured log sample. #2275 tracks the fixtures "
+        "to merge; the case waits for the role on a purpose-built cluster, or for "
+        "the next minor that removes a served API (scenario issue #2655)"
     ),
     "upgrades-pod-security-latest-pinned-named": (
-        "#2657: needs the moving-admission-default role, the seeded-defaults "
-        "namespace enforcing baseline at enforce-version latest with "
-        "baseline-edge-worker in it, applied to every pool project; the role is "
-        "designed in the catalogue and is not in bench/tf/fleet/fixtures.json on "
-        "main"
+        "#2275: needs the moving-admission-default role (namespace seeded-defaults "
+        "enforcing baseline at enforce-version latest, with baseline-edge-worker "
+        "in it) applied to every pool project; the role is designed on the "
+        "fleet-shape fixture branch, which #2275 tracks to merge, and is not in "
+        "bench/tf/fleet/fixtures.json yet (scenario issue #2657)"
     ),
     "upgrades-stale-client-skew-named": (
-        "#2659: needs the stale-client-skew role, the stale-kubectl-client CronJob "
-        "running kubectl v1.29.0 against seeded-a every ten minutes, applied to "
-        "every pool project; the role is designed in the catalogue and is not in "
-        "bench/tf/fleet/fixtures.json on main"
+        "#2275: needs the stale-client-skew role (CronJob stale-kubectl-client "
+        "running kubectl v1.29.0 against seeded-a every ten minutes) applied to "
+        "every pool project; the role is designed on the fleet-shape fixture "
+        "branch, which #2275 tracks to merge, and is not in "
+        "bench/tf/fleet/fixtures.json yet (scenario issue #2659)"
     ),
     "gitops-drift-noise-filtered-triage": (
         "#911: needs an audit ingress on the eval install -- a drift-audit "

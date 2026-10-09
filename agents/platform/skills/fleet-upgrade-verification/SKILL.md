@@ -158,7 +158,9 @@ maintenance rule departs from its SOP where the two differ, and says so below:
   `${HERMES_HOME:-/opt/data}/.kubeconfigs/` (`kubeconfig_<project>_<cluster>_<location>.yaml`, one file per
   target so concurrent reads never share a current-context; `--kubeconfig-dir` moves the
   directory), adding `--dns-endpoint` when the cluster record says its DNS endpoint accepts
-  external traffic, then one `kubectl get pdb,deploy,statefulset -A -o json`. A PDB is matched to
+  external traffic, then one `kubectl get pdb,deploy,statefulset,daemonset,cronjob,namespace -A -o json`,
+  shared with the registered rules below (DaemonSets and CronJobs for their images and volumes,
+  Namespaces for their Pod Security labels). A PDB is matched to
   the Deployments and StatefulSets in its namespace whose pod-template labels satisfy its
   selector (`matchLabels` and `matchExpressions`), and it blocks every drain when
   `maxUnavailable` is `0` or `0%`, or when `minAvailable` demands every expected pod: an integer
@@ -223,8 +225,9 @@ maintenance rule departs from its SOP where the two differ, and says so below:
   GKE-managed add-ons that are on; they expose no version and GKE owns them, so they are listed
   in the note and not graded. A third-party add-on recognised by image repository is graded
   against `upgrade_shape_tables.ADDON_SUPPORT` (the vendor's page and the day it was read): a
-  target outside the release's supported range is a risk; an add-on with no table, or at a
-  release the table does not list, is `unknown` with the page to read. Nothing is inferred.
+  target outside the release's supported range is a risk; an add-on at a release the table does
+  not list is `unknown` with the page to read, and one with no table is `unknown` with the
+  vendor's matrix named as what to check. Nothing is inferred.
 - **Changed defaults** (`readiness_rules/changed_defaults.py`, entry 8). The minors the upgrade
   crosses, from the control plane for an admission default and from the lowest node pool for a
   kubelet default, are looked up in `upgrade_shape_tables.DEFAULT_CHANGES_BY_MINOR`, each row
@@ -247,7 +250,11 @@ listed under the table as a read failure for that member and sets exit code 1, l
 gcloud read; the member's maintenance and skew rules are still graded, and the other members are
 unaffected. A failed or timed-out `gcloud logging read` is listed the same way and leaves that
 member's three audit-log rules `unknown`, the rest graded. `--at` with a value that is not RFC
-3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage error (exit 2).
+3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage error (exit 2). In the
+JSON, `members[].readiness.rules` holds each registered rule's result under its id (`blocking`,
+`risks`, `unknown` and `note`), `members[].readiness.audit_log` holds the read's `command`,
+`entries`, `truncated` and `error`, and the top-level `readiness.risks` counts the risks across
+members.
 
 ## Scan the GitOps manifests
 

@@ -1,7 +1,8 @@
 # Upgrade-failure catalogue entry 10: add-on and client skew.
 # PARKED: scripts/validate_bench_cases.py lists this case under
-# FIXTURE_NOT_READY (#2659) until the stale-client-skew role reaches every
-# pool project.
+# FIXTURE_NOT_READY on #2275, which tracks the fleet-shape fixtures to merge
+# (scenario issue #2659), until the stale-client-skew role reaches every pool
+# project.
 #
 # The designed role, stale-client-skew on seeded-a: a CronJob,
 # stale-kubectl-client in seeded-shapes, runs kubectl v1.29.0 against the

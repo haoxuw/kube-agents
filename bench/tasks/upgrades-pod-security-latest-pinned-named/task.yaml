@@ -1,6 +1,7 @@
 # Upgrade-failure catalogue entry 8: a default changes in the new minor.
 # PARKED: scripts/validate_bench_cases.py lists this case under
-# FIXTURE_NOT_READY (#2657) until the moving-admission-default role reaches
+# FIXTURE_NOT_READY on #2275, which tracks the fleet-shape fixtures to merge
+# (scenario issue #2657), until the moving-admission-default role reaches
 # every pool project.
 #
 # The designed role, moving-admission-default on seeded-a: a namespace,

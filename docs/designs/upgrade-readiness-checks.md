@@ -167,9 +167,10 @@ Every check below carries a tier, and the tiers are what produce the verdict:
 The findings are the evidence behind the verdict; the verdict is the deliverable.
 
 Closest thing on `main`: `fleet-upgrade-verification --readiness` already emits
-`blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions and skew.
-Three things are missing — the verdict is per cluster, not per family; it reads three inputs rather
-than every check here; and it runs only when asked, not on the schedule.
+`blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions, skew and
+the audit-log, client-skew and changed-defaults rules the Scope table credits. Three things are
+missing — the verdict is per cluster, not per family; it reads a subset of the checks here, not
+every one; and it runs only when asked, not on the schedule.
 
 ## Version posture
 
