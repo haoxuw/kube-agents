@@ -256,6 +256,54 @@ FIXTURE_NOT_READY = {
         "the ALERT_DAILY_LIMIT_DRIFT raise the unparking pull request owes "
         "alongside the ingress"
     ),
+    # The readiness report's workload rules, one case per upgrade-failure
+    # catalogue entry, each on a seeded-shapes role the fleet-shape fixture
+    # branch designs on slot a; none is in bench/tf/fleet/fixtures.json yet.
+    # The pull request that lands a role leaves its entry here (merging
+    # plants nothing); the later one that moves the case to the nightly file
+    # cites the reconcile and the fixture-state scan.
+    "upgrades-fleet-readiness-node-local-state": (
+        "#2653: needs the node-local-state role (Deployment cache-on-emptydir in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-deprecated-node-label": (
+        "#2661: needs the deprecated-label-selector role (Deployment arch-pinned-worker in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-cgroup-blind-runtime": (
+        "#2663: needs the cgroup-blind-runtime role (Deployment cgroup-blind-jvm in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-multi-process-container": (
+        "#2664: needs the multi-process-container role (Deployment multi-process-worker in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-node-image-coupled-agent": (
+        "#2666: needs the node-image-coupled-agent role (DaemonSet cni-shaped-agent in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-cuda-pinned-gpu-job": (
+        "#2667: needs the cuda-pinned-gpu-job role (CronJob cuda-pinned-trainer in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
+    "upgrades-fleet-readiness-retired-registry-image": (
+        "#2669: needs the retired-registry-image role (Deployment legacy-registry-pull in "
+        "seeded-shapes on slot a) applied to every pool project; the role is "
+        "designed on the fleet-shape fixture branch and is not in "
+        "bench/tf/fleet/fixtures.json yet"
+    ),
 }
 
 # Cases that claim no domain because no row in domains.yaml describes them.

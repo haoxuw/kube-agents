@@ -1,0 +1,124 @@
+# The readiness report names a workload whose data lives on the node, as a risk and not a blocker
+#
+# One of the upgrade-failure catalogue's scenario cases
+# (docs/designs/upgrade-failure-catalogue.md, entry 4: data on the node is gone).
+# It grades the readiness report's `data-on-the-node` rule in the
+# fleet-upgrade-verification skill (scripts/readiness_rules/node_local_state.py),
+# through the agent's answer to the fleet readiness question.
+#
+# The rule reads every Deployment and StatefulSet outside the system namespaces
+# for an emptyDir, a hostPath or a claim on a local StorageClass, and lists each
+# as a risk with the volume. A risk lets the upgrade proceed: a node rebuild
+# loses the data, GKE does not stop for it. So the declared line for the
+# planted Deployment reads `blocks the upgrade: no`, and the case grades two
+# things: the agent names the Deployment (the report found it) and does not
+# promote the risk to a blocker.
+#
+# What the deterministic checks read, and what they leave to the judge. The
+# prompt asks for one fixed-form line per object, and the checks read one token
+# from it: the verdict, `blocks the upgrade: <yes|no>`, on any line that names
+# the object. Nothing else on the line is graded, not the cluster prefix and
+# not the kind field: the sibling case upgrades-fleet-readiness-failclosed-webhook
+# found that anchoring on the rendering graded the agent's formatting rather
+# than its judgement. The object's name is the fixture's and appears nowhere in
+# the prompt, so a line naming it is the agent having read the report; the
+# verdict token is one word from a closed set, so there is no room for a hedge
+# on the graded part. A pod of the workload may stand in for it on the line
+# (the name plus one or two hash suffixes), as the agent sometimes renders it.
+# Each accept is `<name> ... blocks the upgrade: no` on one line, read after
+# the harness's trail fold (`fold_decoration`); the forbid is the same name with
+# any other value, so a second line about the object that contradicts the
+# first fails whatever the right line says. The prose, the reason the rule
+# gives, and the recommended remedy are the judge's, against `expected_output`.
+# A separate objective reads the worker's commands for the readiness run
+# itself: a reply that reaches the right verdict by a hand survey passes the
+# line check and fails the route check.
+#
+# Planted defect required: on slot a, the Deployment cache-on-emptydir in seeded-shapes, one replica,
+# whose queue directory is an emptyDir
+# (role node-local-state). The role is designed on the fleet-shape fixture
+# branch and is not in bench/tf/fleet/fixtures.json yet, so the case waits in
+# scripts/validate_bench_cases.py's FIXTURE_NOT_READY on #2653 and carries no
+# fleet_resource_property safeguard: that check resolves a role through the
+# catalogue, and adding one when the role lands changes what the case grades,
+# which needs its own eval run.
+#
+# Isolation class: read-only (chat prompt; the readiness script reads with
+# gcloud container and kubectl get and writes only its own record and
+# per-member kubeconfig files). Eligible tier: nightly, once the fixture is on
+# the pool projects.
+id: upgrades-fleet-readiness-node-local-state
+name: Fleet upgrade readiness names the workload keeping its queue on the node
+prompt: >-
+  Check every cluster in this project for its readiness to upgrade to its
+  release channel's default version. For each cluster, report what blocks the
+  upgrade and what is at risk. Read only: do not change, upgrade or remove
+  anything. End your answer with one line per object that the readiness
+  report names as a blocker, as a risk, or as a shape it checked and cleared,
+  in exactly this form and with no other words on the line:
+  "<cluster>/<object name>: kind
+  <deployment|statefulset|daemonset|cronjob|pdb|exclusion>; blocks the
+  upgrade: <yes|no>". Write each name exactly as the API shows it, with no
+  brackets, quotes or parentheses around it. Put any aside on a line of its
+  own.
+expected_output: >-
+  A per-cluster readiness report read during this run. For seeded-a it names
+  the Deployment cache-on-emptydir in seeded-shapes under the risks: its volume
+  queue is an emptyDir, so a node rebuild loses the data in it. It does not
+  call the Deployment a blocker. The upgrade can proceed, and the remedy is an
+  operator decision: move the queue to a PersistentVolumeClaim, or accept the
+  loss. Other clusters' blockers and risks come from the same run. It ends
+  with one declared line per object, and the line for cache-on-emptydir reads
+  "blocks the upgrade: no". It cites no CVE identifiers and changes nothing.
+infrastructure:
+  deployer: noop
+validated: false
+
+# Slug per docs/designs/domains.yaml.
+domain: upgrades
+
+# Who answers when this case flakes -- see bench/CONTRIBUTING.md.
+owner: haoxuw
+
+# Named by ROLE, not cluster: bench/tf/fleet/fixtures.json, once the role
+# lands there; docs/designs/bench-fleet-catalog.md is the rule.
+fixtures:
+  - node-local-state
+
+verification_spec:
+  # The line this case exists for: one naming cache-on-emptydir whose verdict is
+  # no; the forbid is the same name with any other verdict.
+  - name: cache-on-emptydir-line-does-not-block
+    role: objective
+    # assert, not the converge default: the transcript is immutable once the
+    # run ends, so polling a failed check would only wait out the timeout.
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - node-local-state
+      any_of_patterns:
+        - '(?m)^[^\n]*(?<![a-z0-9-])cache-on-emptydir(?:-[a-z0-9]{5,10}){0,2}(?![a-z0-9-])[^\n]*; blocks the upgrade: no\s*$'
+      forbidden_patterns:
+        - '(?m)^[^\n]*(?<![a-z0-9-])cache-on-emptydir(?:-[a-z0-9]{5,10}){0,2}(?![a-z0-9-])[^\n]*; blocks the upgrade: (?!no\s*$)'
+
+  # The route: the skill's readiness run, in a delegated worker's commands,
+  # however it was invoked (relative or absolute path, with or without flags
+  # ahead of the mode). The persona routes a fleet readiness question to this
+  # one run; a hand kubectl survey that reaches the right verdict fails here.
+  - name: the-readiness-run-happened
+    role: objective
+    mode: assert
+    check:
+      type: worker_commands
+      required_patterns:
+        - '(python3?\s+(-\S+\s+)*|/|^)\S*fleet_upgrade_report\.py\b[^\n|;&]*\s--readiness\b'
+
+  - name: no-invented-cves
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      # No vulnerability feed; a CVE id in a readiness report is an invention.
+      forbidden_phrases: ["CVE-"]
