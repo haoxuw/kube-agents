@@ -6,19 +6,20 @@ target minor supports.
 Clients. kubectl is supported within one minor, older or newer, of kube-apiserver
 (`upgrade_shape_tables.KUBECTL_SKEW_SOURCE`). The rule reads kubectl versions from two
 places and grades each against the target minor: the `kubectl/vX.Y.Z` user agents in the
-shared audit-log read (one `gcloud logging read` per member, last seven days; Admin
-Activity logs carry writes, so a kubectl that only reads is not there), and the image tags
-of workloads that run a kubectl binary, from the same `kubectl get` the PDB rule reads. A
-kubectl further than one minor from the target is a risk naming the version and the
-principal or workload. A client-go user agent carries the binary's version, not the
-library's, so those callers are counted in the note, never graded.
+shared deprecated-or-kubectl read (paged `gcloud logging read`, the seven days ending at
+the evaluation instant; the Admin Activity log carries writes, so a kubectl that only reads
+is not there), and the image tags of workloads that run a kubectl binary, from the same
+`kubectl get` the PDB rule reads. A kubectl further than one minor from the target is a
+risk naming the version and the principal or workload. A client-go user agent carries the
+binary's version, not the library's, so those callers are counted in the note, never graded.
 
 Add-ons. The cluster record's `addonsConfig` names the GKE-managed add-ons that are on;
 it exposes no version for them and GKE owns their lifecycle, so they are listed in the
 note and not graded. Third-party add-ons are recognised by image repository in the same
 workload read; one whose vendor table (`upgrade_shape_tables.ADDON_SUPPORT`) does not
-cover the target is a risk, one with no table or at a release the table does not list is
-`unknown` with the page to read. Nothing is inferred.
+cover the target is a risk. One with no table, or at a release the table does not list, is
+a note ("version not graded") that changes no verdict: a missing row in this table is not
+the cluster's problem. Nothing is inferred.
 """
 
 import re
@@ -38,35 +39,31 @@ IMAGE_DIGEST_SEPARATOR = "@"
 IMAGE_TAG_SEPARATOR = ":"
 IMAGE_PATH_SEPARATOR = "/"
 DOCKER_HUB_PREFIX = "docker.io/"
-# Where a workload's pod template sits, per kind read.
-TEMPLATE_PATHS = {
-    "Deployment": ("spec", "template"),
-    "StatefulSet": ("spec", "template"),
-    "DaemonSet": ("spec", "template"),
-    "CronJob": ("spec", "jobTemplate", "spec", "template"),
-}
 CONTAINER_LISTS = ("containers", "initContainers")
-WORKLOAD_FORMAT = "{kind} {namespace}/{name}"
+IMAGE_KEY = "image"
+# The two finding kinds this rule files.
+KIND_CLIENT = "client"
+KIND_ADDON = "addon"
 # `addonsConfig` blocks that spell "on" as the absence of `disabled: true` (an empty block
-# is on); every other block spells it `enabled: true`.
+# is on); every other block, `dnsCacheConfig` among them, spells it `enabled: true`, as the
+# GKE API's cluster_service.proto defines them.
 ADDONS_CONFIG_KEY = "addonsConfig"
 DISABLED_STYLE_ADDONS = (
     "httpLoadBalancing",
     "horizontalPodAutoscaling",
     "kubernetesDashboard",
     "networkPolicyConfig",
-    "dnsCacheConfig",
     "cloudRunConfig",
     "istioConfig",
 )
 ADDON_ENABLED_KEY = "enabled"
 ADDON_DISABLED_KEY = "disabled"
 
-AUDIT_READ_FAILED = "kubectl user agents not read: {reason}"
+AUDIT_READ_FAILED = "kubectl user agents: {reason}"
 OBJECTS_NOT_READ = "cluster objects not read; kubectl images and add-ons not graded"
-NO_TARGET_REASON = "no target; client and add-on skew need one"
+NOTE_NO_TARGET = "no target; {count} kubectl client{plural} not graded against a skew window"
 CLIENT_NAME = "kubectl"
-CLIENT_FROM_AUDIT = "principal {principal} (user agent {user_agent}, {count} call{plural} in {days}d)"
+CLIENT_FROM_AUDIT = "principal {principal} (user agent {user_agent}, {count} write{plural} in {days}d)"
 CLIENT_FROM_IMAGE = "{workload} (image {image})"
 CLIENT_SKEW_DETAIL = (
     "{gap} minor{plural} {direction} the target {target}; kubectl is supported within "
@@ -78,21 +75,22 @@ DIRECTION_AHEAD = "ahead of"
 MINOR_PLURAL = "s"
 CALL_PLURAL = "s"
 ADDON_UNSUPPORTED_DETAIL = "{addon} {version} supports Kubernetes {low} to {high} ({source}, read {read_on}); the target {target} is outside it"
-ADDON_NO_TABLE_REASON = "{addon} {version} at {where}: no support table with a source here; check the vendor's matrix against {target}"
-ADDON_RELEASE_NOT_LISTED_REASON = "{addon} {version} at {where}: release not in the table read on {read_on} ({source}); check it against {target}"
-ADDON_NO_TARGET_REASON = "{addon} {version} at {where}: no target to check its support range against"
+NOTE_ADDON_NO_TABLE = "{addon} {version} at {where}: version not graded (no support table with a source here; check the vendor's matrix against {target})"
+NOTE_ADDON_RELEASE_NOT_LISTED = "{addon} {version} at {where}: version not graded (release not in the table read on {read_on}, {source}; check it against {target})"
+NOTE_ADDON_NO_TARGET = "{addon} {version} at {where}: version not graded (no target)"
 NOTE_GKE_ADDONS = "GKE add-ons on: {addons} (GKE-managed; the cluster record carries no version, so not graded)"
 NOTE_CLIENT_GO = "{count} client-go caller{plural} whose user agent carries the binary's version, not the library's; not graded"
 NOTE_ADDON_OK = "{addon} {version} supports the target {target} ({source})"
 NOTE_CLIENTS_OK = "{count} kubectl client{plural} within one minor of the target"
 LIST_SEPARATOR = ", "
+NO_TARGET_TEXT = "(no target)"
 DESCRIBE_CLIENT = "{client} {version} from {where}: {detail}"
 DESCRIBE_ADDON = "{addon} {version} at {where}: {detail}"
 VERSION_FORMAT = "v{major}.{minor}"
 
 
 def _image_parts(image: str) -> tuple[str, str]:
-    """(repository without registry alias, tag) for an image reference; the digest is dropped."""
+    """(repository, tag) for an image reference; the digest is dropped."""
     reference = str(image or "").split(IMAGE_DIGEST_SEPARATOR, 1)[0]
     repository, tag = reference, ""
     last = reference.rsplit(IMAGE_PATH_SEPARATOR, 1)[-1]
@@ -113,23 +111,14 @@ def workload_images(items: list) -> list[tuple[str, str]]:
     """(workload label, image) for every container of every workload kind read."""
     found = []
     for item in items or []:
-        if not isinstance(item, dict):
+        spec = finding.pod_spec(item)
+        if spec is None:
             continue
-        path = TEMPLATE_PATHS.get(item.get("kind"))
-        if path is None:
-            continue
-        node = item
-        for key in path:
-            node = node.get(key) if isinstance(node, dict) else None
-        pod_spec = (node or {}).get("spec") if isinstance(node, dict) else None
-        if not isinstance(pod_spec, dict):
-            continue
-        meta = item.get("metadata") or {}
-        label = WORKLOAD_FORMAT.format(kind=item.get("kind"), namespace=meta.get("namespace", ""), name=meta.get("name", ""))
+        label = finding.workload_label(item)
         for list_key in CONTAINER_LISTS:
-            for container in pod_spec.get(list_key) or []:
-                if isinstance(container, dict) and container.get("image"):
-                    found.append((label, str(container["image"])))
+            for container in spec.get(list_key) or []:
+                if isinstance(container, dict) and container.get(IMAGE_KEY):
+                    found.append((label, str(container[IMAGE_KEY])))
     return found
 
 
@@ -154,7 +143,7 @@ def enabled_gke_addons(cluster: dict) -> list[str]:
 def _client_finding(version: tuple, where: str, target_minor: tuple) -> dict | None:
     """A risk for a kubectl at `version` against the target, or None when inside the window."""
     version_text = VERSION_FORMAT.format(major=version[0], minor=version[1])
-    base = {"rule": RULE_ID, "tier": finding.TIER_RISK, "kind": "client", "client": CLIENT_NAME, "version": version_text, "where": where, "target": tables.format_minor(target_minor)}
+    base = {"rule": RULE_ID, "tier": finding.TIER_RISK, "kind": KIND_CLIENT, "client": CLIENT_NAME, "version": version_text, "where": where, "target": tables.format_minor(target_minor)}
     if version[0] != target_minor[0]:
         return {**base, "gap_minors": None, "detail": CLIENT_MAJOR_DETAIL.format(target=base["target"])}
     gap = target_minor[1] - version[1]
@@ -174,18 +163,16 @@ def _client_finding(version: tuple, where: str, target_minor: tuple) -> dict | N
 def _addon_verdict(addon: str, version: tuple, where: str, target_minor: tuple | None, result: dict) -> None:
     version_text = VERSION_FORMAT.format(major=version[0], minor=version[1])
     support = tables.ADDON_SUPPORT.get(addon)
-    target_text = tables.format_minor(target_minor) if target_minor else None
+    target_text = tables.format_minor(target_minor) if target_minor else NO_TARGET_TEXT
     if support is None:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, ADDON_NO_TABLE_REASON.format(addon=addon, version=version_text, where=where, target=target_text)))
+        finding.add_note(result, NOTE_ADDON_NO_TABLE.format(addon=addon, version=version_text, where=where, target=target_text))
         return
     span = support["releases"].get(version)
     if span is None:
-        result[finding.RESULT_UNKNOWN].append(
-            finding.unknown(RULE_ID, ADDON_RELEASE_NOT_LISTED_REASON.format(addon=addon, version=version_text, where=where, read_on=support["read_on"], source=support["source"], target=target_text))
-        )
+        finding.add_note(result, NOTE_ADDON_RELEASE_NOT_LISTED.format(addon=addon, version=version_text, where=where, read_on=support["read_on"], source=support["source"], target=target_text))
         return
     if target_minor is None:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, ADDON_NO_TARGET_REASON.format(addon=addon, version=version_text, where=where)))
+        finding.add_note(result, NOTE_ADDON_NO_TARGET.format(addon=addon, version=version_text, where=where))
         return
     low, high = span
     if low <= target_minor <= high:
@@ -195,7 +182,7 @@ def _addon_verdict(addon: str, version: tuple, where: str, target_minor: tuple |
         {
             "rule": RULE_ID,
             "tier": finding.TIER_RISK,
-            "kind": "addon",
+            "kind": KIND_ADDON,
             "addon": addon,
             "version": version_text,
             "where": where,
@@ -212,19 +199,20 @@ def evaluate(cluster: dict, member: dict, items: list | None, target, context: d
     clients: list[tuple[tuple, str]] = []
     client_go = 0
 
-    log = audit_log.read_callers(context)
+    log = audit_log.read_deprecated(context)
     if log["error"]:
         result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, AUDIT_READ_FAILED.format(reason=log["error"])))
-    else:
-        for caller in log["callers"]:
-            if caller["platform"]:
-                continue
-            match = KUBECTL_USER_AGENT_RE.match(str(caller["user_agent"]))
-            if match:
-                where = CLIENT_FROM_AUDIT.format(principal=caller["principal"], user_agent=caller["user_agent"], count=caller["count"], plural="" if caller["count"] == 1 else CALL_PLURAL, days=log["window_days"])
-                clients.append(((int(match.group(1)), int(match.group(2))), where))
-            elif CLIENT_GO_USER_AGENT_MARKER in str(caller["user_agent"]):
-                client_go += 1
+    for caller in log["callers"]:
+        if caller["caller_class"] == audit_log.CLASS_PROVIDER:
+            continue
+        match = KUBECTL_USER_AGENT_RE.match(str(caller["user_agent"]))
+        if match:
+            where = CLIENT_FROM_AUDIT.format(principal=caller["principal"], user_agent=caller["user_agent"], count=caller["count"], plural="" if caller["count"] == 1 else CALL_PLURAL, days=log["window_days"])
+            clients.append(((int(match.group(1)), int(match.group(2))), where))
+        elif CLIENT_GO_USER_AGENT_MARKER in str(caller["user_agent"]):
+            client_go += 1
+    if log["sampled"]:
+        finding.add_note(result, audit_log.sampled_note(log))
 
     if items is None:
         result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, OBJECTS_NOT_READ))
@@ -241,7 +229,7 @@ def evaluate(cluster: dict, member: dict, items: list | None, target, context: d
 
     if target_minor is None:
         if clients:
-            result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, NO_TARGET_REASON))
+            finding.add_note(result, NOTE_NO_TARGET.format(count=len(clients), plural="" if len(clients) == 1 else MINOR_PLURAL))
     else:
         within = 0
         for version, where in clients:
@@ -264,6 +252,6 @@ def evaluate(cluster: dict, member: dict, items: list | None, target, context: d
 def describe(item: dict) -> str:
     if item["tier"] == finding.TIER_UNKNOWN:
         return item["reason"]
-    if item.get("kind") == "addon":
+    if item.get("kind") == KIND_ADDON:
         return DESCRIBE_ADDON.format(addon=item["addon"], version=item["version"], where=item["where"], detail=item["detail"])
     return DESCRIBE_CLIENT.format(client=item["client"], version=item["version"], where=item["where"], detail=item["detail"])

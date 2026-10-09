@@ -19,7 +19,7 @@ three rules are the ones the governance SOPs define in prose:
 After those three, `evaluate_extra_rules` runs every module registered in EXTRA_RULES
 (`readiness_rules/`): one module per rule, each grading from the same cluster record and
 object read, or from a read it performs through the context the report hands it (the
-audit-log rules share one `gcloud logging read` per member). Their blocking findings make
+audit-log rules share two paged `gcloud logging read`s per member). Their blocking findings make
 a member `blocked` and their unknown findings `unknown`, as the three rules' own do; a
 risk is reported and changes no verdict.
 """

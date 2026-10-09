@@ -17,8 +17,9 @@ enforces a level a crossed minor tightens, the rule files a risk naming the name
 the setting; a crossed minor that only widens an allowlist is a note. Workloads carrying a
 gitRepo volume are graded the same way against the kubelet-side rows.
 
-A run without a target, a target past the table, and a cluster whose objects were not
-read are each `unknown` with the reason.
+A target past the table's `as_of` is graded on the minors the table covers, with a note
+that the table ends there; the refresh is a row per later minor from its release notes,
+beside the rows that exist. A cluster whose objects were not read is `unknown`.
 """
 
 import re
@@ -37,18 +38,14 @@ PSA_LATEST = "latest"
 PSA_UNSET = "unset (latest)"
 # A pinned version is `v<major>.<minor>`, as the admission controller spells it.
 PSA_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)$")
-TEMPLATE_PATHS = {
-    "Deployment": ("spec", "template"),
-    "StatefulSet": ("spec", "template"),
-    "DaemonSet": ("spec", "template"),
-    "CronJob": ("spec", "jobTemplate", "spec", "template"),
-}
 VOLUMES_KEY = "volumes"
 GITREPO_KEY = "gitRepo"
-WORKLOAD_FORMAT = "{kind} {namespace}/{name}"
+# The two finding kinds this rule files.
+KIND_NAMESPACE = "namespace"
+KIND_WORKLOAD = "workload"
 
-NO_TARGET_REASON = "no target; which minors the upgrade crosses needs one"
-PAST_TABLE_REASON = "target {target} is past the defaults table (as of {as_of}, read {read_on}); read its release notes before trusting a clean row"
+NOTE_NO_TARGET = "no target; which minors the upgrade crosses needs one, so defaults were not graded"
+NOTE_PAST_TABLE = "the defaults table ends at {as_of} (read {read_on}); minors after it up to the target {target} are not graded, and a row per minor from its release notes refreshes the table"
 OBJECTS_NOT_READ = "cluster objects not read; namespace admission labels and workload volumes not graded"
 CONTROL_PLANE_UNPARSABLE = "control plane version {version!r} unparsable; the crossed minors could not be measured"
 SETTING_PSA = "{prefix}{mode}={level}, {prefix}{mode}{suffix}={version}"
@@ -114,29 +111,20 @@ def _changes(rows: list[tuple[tuple, dict]]) -> list[dict]:
 
 
 def _gitrepo_volumes(item: dict) -> list[str]:
-    path = TEMPLATE_PATHS.get(item.get("kind"))
-    if path is None:
+    spec = finding.pod_spec(item)
+    if spec is None:
         return []
-    node = item
-    for key in path:
-        node = node.get(key) if isinstance(node, dict) else None
-    pod_spec = (node or {}).get("spec") if isinstance(node, dict) else None
-    if not isinstance(pod_spec, dict):
-        return []
-    return [str(v.get("name", "")) for v in pod_spec.get(VOLUMES_KEY) or [] if isinstance(v, dict) and isinstance(v.get(GITREPO_KEY), dict)]
+    return [str(v.get("name", "")) for v in spec.get(VOLUMES_KEY) or [] if isinstance(v, dict) and isinstance(v.get(GITREPO_KEY), dict)]
 
 
 def evaluate(cluster: dict, member: dict, items: list | None, target, context: dict) -> dict:
     result = finding.empty_result()
     if target is None:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, NO_TARGET_REASON))
+        finding.add_note(result, NOTE_NO_TARGET)
         return result
     target_minor = (target[0], target[1])
     if target_minor > tables.DEFAULT_CHANGES_AS_OF:
-        result[finding.RESULT_UNKNOWN].append(
-            finding.unknown(RULE_ID, PAST_TABLE_REASON.format(target=tables.format_minor(target_minor), as_of=tables.format_minor(tables.DEFAULT_CHANGES_AS_OF), read_on=tables.DEFAULT_CHANGES_READ_ON))
-        )
-        return result
+        finding.add_note(result, NOTE_PAST_TABLE.format(as_of=tables.format_minor(tables.DEFAULT_CHANGES_AS_OF), read_on=tables.DEFAULT_CHANGES_READ_ON, target=tables.format_minor(target_minor)))
     if items is None:
         result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, OBJECTS_NOT_READ))
         return result
@@ -175,7 +163,7 @@ def evaluate(cluster: dict, member: dict, items: list | None, target, context: d
                     {
                         "rule": RULE_ID,
                         "tier": finding.TIER_RISK,
-                        "kind": "namespace",
+                        "kind": KIND_NAMESPACE,
                         "namespace": name,
                         "subject": NAMESPACE_SUBJECT.format(name=name),
                         "setting": setting,
@@ -195,13 +183,12 @@ def evaluate(cluster: dict, member: dict, items: list | None, target, context: d
             rows = _rows(kubelet_minors, tables.DETECTOR_GITREPO_VOLUME)
             if not rows:
                 continue
-            meta = item.get("metadata") or {}
-            workload = WORKLOAD_FORMAT.format(kind=item.get("kind"), namespace=meta.get("namespace", ""), name=meta.get("name", ""))
+            workload = finding.workload_label(item)
             result[finding.RESULT_RISKS].append(
                 {
                     "rule": RULE_ID,
                     "tier": finding.TIER_RISK,
-                    "kind": "workload",
+                    "kind": KIND_WORKLOAD,
                     "workload": workload,
                     "subject": workload,
                     "setting": SETTING_GITREPO.format(volume=volume),

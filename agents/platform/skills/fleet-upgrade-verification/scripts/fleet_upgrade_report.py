@@ -20,9 +20,9 @@ target: drain-blocking PodDisruptionBudgets (read with one `kubectl get` per mem
 exclusion in effect whose scope covers the upgrade, the maintenance window's state at
 `--at`, and node-pool version skew against the target control plane; then the rules
 registered in `upgrade_readiness.EXTRA_RULES` (`readiness_rules/`), which read the same
-objects and, for the audit-log rules, one `gcloud logging read` per member over the last
-seven days. The rules live in `upgrade_readiness.py` and `readiness_rules/`; this file
-reads and renders.
+objects and, for the audit-log rules, two paged `gcloud logging read`s per member over the
+seven days ending at `--at`. The rules live in `upgrade_readiness.py` and
+`readiness_rules/`; this file reads and renders.
 
 Read-only against GCP: the gcloud commands it runs are `container clusters list`,
 `container get-server-config`, `projects list`, `config get-value project`, `projects
@@ -257,18 +257,20 @@ RULES_CELL_UNKNOWN = "unknown"
 RULES_CELL_FORMAT = "{tier}: {text}"
 RULE_NOTE_FORMAT = "{rule}: {note}"
 # A failed audit-log read is a read failure like a failed kubectl: listed under the table
-# with the member it belongs to, exit code 1, the member's audit-log rules `unknown`.
-AUDIT_LOG_ERROR_FORMAT = "audit log not read: {error}"
-# The readiness context the registered rules share per member: the project, location and
-# cluster name a log filter needs, this module's runner (its default timeout is the
-# per-call cap), the instant, and a cache a rule fills so another rule reads it once.
+# with the member it belongs to, exit code 1, the rules that read it `unknown`.
+AUDIT_LOG_ERROR_FORMAT = "audit log ({read} read) not read: {error}"
+# The readiness context the registered rules share per member (readiness_rules/__init__.py
+# is the contract): the project, location and cluster name a log filter needs, this
+# module's runner (its default timeout is the per-call cap), the instant, and a cache a
+# rule fills so another rule reads it once.
 CONTEXT_PROJECT = "project"
 CONTEXT_LOCATION = "location"
 CONTEXT_CLUSTER = "cluster_name"
 CONTEXT_RUNNER = "run_cmd"
-CONTEXT_TIMEOUT = "timeout_seconds"
 CONTEXT_AT = "at"
 CONTEXT_CACHE = "cache"
+# What the JSON keeps of each audit-log read, beside the rules' findings.
+AUDIT_LOG_SUMMARY_KEYS = ("commands", "entries", "pages", "sampled", "error", "window_start", "window_end")
 
 # Exit codes. A failed gcloud call is reported per project and per location and does
 # not abort the run; the exit code only says whether every requested read succeeded.
@@ -622,7 +624,6 @@ def readiness_context(member: dict, at: datetime) -> dict:
         CONTEXT_LOCATION: member["location"],
         CONTEXT_CLUSTER: member["cluster"],
         CONTEXT_RUNNER: run_cmd,
-        CONTEXT_TIMEOUT: GCLOUD_TIMEOUT_SECONDS,
         CONTEXT_AT: at,
         CONTEXT_CACHE: {},
     }
@@ -640,7 +641,7 @@ def assess_readiness(cluster: dict, member: dict, items: list | None, read_error
     context = readiness_context(member, at) if context is None else context
     rules = readiness.evaluate_extra_rules(cluster, member, items, target, context)
     status = readiness.readiness_status(pdbs, maintenance, skew, target is not None, rules)
-    audit = (context.get(CONTEXT_CACHE) or {}).get(audit_log.CACHE_KEY) or {}
+    audit_reads = (context.get(CONTEXT_CACHE) or {}).get(audit_log.CACHE_KEY) or {}
 
     notes = []
     if read_error:
@@ -676,12 +677,7 @@ def assess_readiness(cluster: dict, member: dict, items: list | None, read_error
         "maintenance": maintenance,
         "skew": skew,
         "rules": rules,
-        "audit_log": {
-            "command": audit.get("command"),
-            "entries": audit.get("entries"),
-            "truncated": audit.get("truncated"),
-            "error": audit.get("error"),
-        },
+        "audit_log": {which: {key: read.get(key) for key in AUDIT_LOG_SUMMARY_KEYS} for which, read in audit_reads.items()},
         "note": NOTE_SEPARATOR.join(notes),
     }
 
@@ -716,9 +712,9 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
                     errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": read_error})
                 context = readiness_context(member, readiness_options["at"])
                 member["readiness"] = assess_readiness(cluster, member, items, read_error, readiness_options["at"], path, context)
-                audit_error = member["readiness"]["audit_log"]["error"]
-                if audit_error:
-                    errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": AUDIT_LOG_ERROR_FORMAT.format(error=audit_error)})
+                for which, read in member["readiness"]["audit_log"].items():
+                    if read.get("error"):
+                        errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": AUDIT_LOG_ERROR_FORMAT.format(read=which, error=read["error"])})
             members.append(member)
     errors.extend(cache.errors)
     members.sort(key=lambda m: (m["project"], m["location"], m["cluster"]))

@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-deprecated_api_callers.py — catalogue entry 9: a client calls an API that is deprecated
-and still served.
+deprecated_api_callers.py — catalogue entry 9: a client writes through an API that is
+deprecated and still served.
 
 The API server stamps every request for a deprecated API version with the audit
 annotation `k8s.io/deprecated=true`, a Cloud Logging entry label; an API with a removal
 scheduled also carries `k8s.io/removed-release`, and those callers are the removed-API
-rule's. This rule reads the shared audit-log read (one `gcloud logging read` per member,
-last seven days) and files each operator-owned caller of a deprecated API as a risk,
-named with its principal, its user agent and the API, with the successor where the
-tables name one: nothing breaks on upgrade day, and the count is what a later removal
-turns into an outage. GKE's own callers (kube-system's endpoint-controller is stamped on
-every Service's Endpoints it writes) are counted in the note, not filed.
+rule's. This rule reads the shared deprecated-or-kubectl read (paged `gcloud logging
+read`, the seven days ending at the evaluation instant, the provider's principals excluded
+in the filter) and files each operator caller of a deprecated API as a risk, named with its
+principal, user agent and API, with the successor where the tables name one: nothing
+breaks on upgrade day, and the count is what a later removal turns into an outage. A
+principal the rule cannot place is a risk naming it. The provider's callers that the filter
+did not express (kube-system's endpoint-controller is stamped on every Service's Endpoints
+it writes) are counted in the note, not filed.
 
-A read that fails or times out, and a page the limit cut, are `unknown` with the reason.
+The log carries writes only: a caller that only reads a deprecated API is not in it, and
+GKE Deprecation Insights are the cross-check. A read that fails or times out is `unknown`
+with the reason; a read that still filled its last page is graded on what it saw, with a note.
 """
 
 import upgrade_shape_tables as tables
@@ -22,16 +26,17 @@ from readiness_rules import audit_log, finding
 RULE_ID = "deprecated-api-callers"
 CATALOGUE_ENTRY = 9
 
-AUDIT_READ_FAILED = "deprecated-API callers not read: {reason}"
+AUDIT_READ_FAILED = "deprecated-API callers: {reason}"
 DEPRECATED_DETAIL = "deprecated and still served; the next removal is the outage, so plan the migration now"
-NOTE_PLATFORM_CALLERS = "{count} GKE-managed caller{plural} of deprecated APIs not filed ({callers})"
-NOTE_PLATFORM_MORE = ", and {more} more"
-NOTE_PLATFORM_SHOWN = 3
-NOTE_NONE = "no operator-owned caller of a deprecated API in {days}d"
-PLATFORM_CALLER_FORMAT = "{principal} on {api}"
+UNPLACED_DETAIL = "deprecated and still served; the principal is of a class this rule cannot place, so it is named here"
+NOTE_PROVIDER_CALLERS = "{count} provider caller{plural} of deprecated APIs not filed ({callers})"
+NOTE_PROVIDER_MORE = ", and {more} more"
+NOTE_PROVIDER_SHOWN = 3
+NOTE_NONE = "no operator caller of a deprecated API in {days}d ({writes_only})"
+PROVIDER_CALLER_FORMAT = "{principal} on {api}"
 CALLER_PLURAL = "s"
 LIST_SEPARATOR = ", "
-DESCRIBE_FORMAT = "{principal} via {user_agent} calls {api} ({count} call{plural} in {days}d, last {last_seen}): {detail}"
+DESCRIBE_FORMAT = "{principal} via {user_agent} writes {api} ({count} write{plural} in {days}d, last {last_seen}): {detail}"
 SUCCESSOR_FORMAT = "; successor {successor}"
 
 
@@ -40,6 +45,7 @@ def _finding(caller: dict, log: dict) -> dict:
         "rule": RULE_ID,
         "tier": finding.TIER_RISK,
         "principal": caller["principal"],
+        "caller_class": caller["caller_class"],
         "user_agent": caller["user_agent"],
         "api": caller["api"],
         "successor": tables.DEPRECATED_API_SUCCESSORS.get(caller["api"]),
@@ -47,33 +53,32 @@ def _finding(caller: dict, log: dict) -> dict:
         "first_seen": caller["first_seen"],
         "last_seen": caller["last_seen"],
         "window_days": log["window_days"],
-        "detail": DEPRECATED_DETAIL,
+        "detail": UNPLACED_DETAIL if caller["caller_class"] == audit_log.CLASS_UNPLACED else DEPRECATED_DETAIL,
     }
 
 
 def evaluate(cluster: dict, member: dict, items: list | None, target, context: dict) -> dict:
     result = finding.empty_result()
-    log = audit_log.read_callers(context)
+    log = audit_log.read_deprecated(context)
     if log["error"]:
         result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, AUDIT_READ_FAILED.format(reason=log["error"])))
-        return result
-    platform = []
+    provider = []
     for caller in log["callers"]:
         if not caller["deprecated"] or caller["removed_release"]:
             continue
-        if caller["platform"]:
-            platform.append(PLATFORM_CALLER_FORMAT.format(principal=caller["principal"], api=caller["api"]))
+        if caller["caller_class"] == audit_log.CLASS_PROVIDER:
+            provider.append(PROVIDER_CALLER_FORMAT.format(principal=caller["principal"], api=caller["api"]))
             continue
         result[finding.RESULT_RISKS].append(_finding(caller, log))
-    if log["truncated"]:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, audit_log.truncation_reason(log)))
-    if platform:
-        shown = LIST_SEPARATOR.join(platform[:NOTE_PLATFORM_SHOWN])
-        if len(platform) > NOTE_PLATFORM_SHOWN:
-            shown += NOTE_PLATFORM_MORE.format(more=len(platform) - NOTE_PLATFORM_SHOWN)
-        finding.add_note(result, NOTE_PLATFORM_CALLERS.format(count=len(platform), plural="" if len(platform) == 1 else CALLER_PLURAL, callers=shown))
-    if not result[finding.RESULT_RISKS] and not log["truncated"]:
-        finding.add_note(result, NOTE_NONE.format(days=log["window_days"]))
+    if log["sampled"]:
+        finding.add_note(result, audit_log.sampled_note(log))
+    if provider:
+        shown = LIST_SEPARATOR.join(provider[:NOTE_PROVIDER_SHOWN])
+        if len(provider) > NOTE_PROVIDER_SHOWN:
+            shown += NOTE_PROVIDER_MORE.format(more=len(provider) - NOTE_PROVIDER_SHOWN)
+        finding.add_note(result, NOTE_PROVIDER_CALLERS.format(count=len(provider), plural="" if len(provider) == 1 else CALLER_PLURAL, callers=shown))
+    if not result[finding.RESULT_RISKS] and not log["error"] and not log["sampled"]:
+        finding.add_note(result, NOTE_NONE.format(days=log["window_days"], writes_only=audit_log.WRITES_ONLY_NOTE))
     return result
 
 

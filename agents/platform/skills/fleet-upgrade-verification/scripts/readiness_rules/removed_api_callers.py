@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-removed_api_callers.py — catalogue entry 6: a client still calls an API version the target
-minor no longer serves.
+removed_api_callers.py — catalogue entry 6: a client still writes through an API version
+the target minor no longer serves.
 
 The API server stamps every request for a version it will stop serving with the audit
 annotation `k8s.io/removed-release=<minor>`, which Cloud Logging keeps as an entry label.
-The rule reads those entries through the shared audit-log read (one `gcloud logging read`
-per member, last seven days) and grades each caller against the target: a caller of an
-API removed at or before the target minor blocks the upgrade, named with its principal,
-its user agent, the API and the release; a caller of an API removed after the target is
-a risk for a later upgrade; a GKE-managed caller is a risk rather than a blocker, because
-GKE moves its own components with the control plane. Where the GitOps scan's removal
-table names a replacement for the API, the finding carries it.
+The rule reads those entries through the shared removed-release read (paged
+`gcloud logging read`, the seven days ending at the evaluation instant, the provider's
+principals excluded) and grades each caller against the target. An operator caller of an
+API removed at or before the target minor whose latest write is within the last 48 hours
+blocks the upgrade, named with its principal, user agent, API and release, and with the
+replacement where the GitOps scan's removal table names one; a caller silent for longer
+is a risk naming its last write, because a migrated caller must not block for a week. A
+removal after the target, a provider caller (GKE moves its own components), and a
+principal the rule cannot place are risks, never blockers.
 
-A read that fails or times out, a run without a target, and a page the limit cut are each
-`unknown` with the reason: the rule blocks on what it read and on nothing else.
+The log carries writes only: a caller that only reads a removed API is not in it, and GKE
+Deprecation Insights are the cross-check. A read that fails or times out is `unknown` with
+the reason; a read that still filled its last page is graded on what it saw, with a note.
 """
+
+from datetime import timedelta
 
 import upgrade_shape_tables as tables
 from readiness_rules import audit_log, finding
@@ -23,18 +28,27 @@ from readiness_rules import audit_log, finding
 RULE_ID = "removed-api-callers"
 CATALOGUE_ENTRY = 6
 
-AUDIT_READ_FAILED = "removed-API callers not read: {reason}"
-NO_TARGET_REASON = "no target; whether a stamped removal falls inside this upgrade needs one"
-BLOCKS_DETAIL = "removed at or before the target {target}; this caller fails the moment the control plane reaches it"
+# A caller blocks only while it is still writing: a write within this many hours of the
+# evaluation instant. Two days covers a daily job that ran yesterday; anything older
+# within the seven-day window is graded as a risk naming its last write.
+BLOCKING_RECENCY_HOURS = 48
+HOURS_PER_DAY = 24
+
+AUDIT_READ_FAILED = "removed-API callers: {reason}"
+BLOCKS_DETAIL = "removed at or before the target {target}, last write {last_seen}; this caller fails the moment the control plane reaches it"
+STALE_DETAIL = "removed at or before the target {target}, but the last write was {last_seen}, more than {hours}h before {at}; a risk until a write recurs"
+LAST_SEEN_UNPARSABLE_DETAIL = "removed at or before the target {target}; the last write's time {last_seen!r} did not parse, so recency could not be judged"
 AFTER_TARGET_DETAIL = "removed after the target {target}; a later upgrade removes it"
-PLATFORM_DETAIL = "GKE-managed caller; GKE moves it with the control plane, so it is not the operator's to fix"
+PROVIDER_DETAIL = "the provider's caller; GKE moves it with the control plane, so it is not the operator's to fix"
+UNPLACED_DETAIL = "a principal of a class this rule cannot place ({principal}); named, not filed as a blocker"
 RELEASE_UNPARSABLE_DETAIL = "the stamped release {release!r} did not parse; not graded against the target"
 NO_TARGET_DETAIL = "removed in {release}; whether this upgrade crosses it needs a target"
-NOTE_ENTRIES_READ = "{entries} stamped audit entr{plural} read over {days}d"
+NOTE_NO_TARGET = "no target; stamped callers filed as risks"
+NOTE_ENTRIES_READ = "{entries} removed-release entr{plural} read over {days}d ({writes_only})"
 ENTRY_SINGULAR = "y"
 ENTRY_PLURAL = "ies"
 CALL_PLURAL = "s"
-DESCRIBE_FORMAT = "{principal} via {user_agent} calls {api}, removed in {release} ({count} call{plural} in {days}d, last {last_seen}): {detail}"
+DESCRIBE_FORMAT = "{principal} via {user_agent} writes {api}, removed in {release} ({count} write{plural} in {days}d, last {last_seen}): {detail}"
 REPLACEMENT_FORMAT = "; replacement {replacement}"
 
 
@@ -43,11 +57,11 @@ def _finding(caller: dict, tier: str, detail: str, log: dict) -> dict:
         "rule": RULE_ID,
         "tier": tier,
         "principal": caller["principal"],
+        "caller_class": caller["caller_class"],
         "user_agent": caller["user_agent"],
         "api": caller["api"],
         "removed_release": caller["removed_release"],
         "replacement": tables.replacement_for(caller["api"]),
-        "platform": caller["platform"],
         "count": caller["count"],
         "first_seen": caller["first_seen"],
         "last_seen": caller["last_seen"],
@@ -56,34 +70,53 @@ def _finding(caller: dict, tier: str, detail: str, log: dict) -> dict:
     }
 
 
+def _recent(caller: dict, context: dict) -> bool | None:
+    """Whether the caller's last write is within BLOCKING_RECENCY_HOURS of the instant; None when unreadable."""
+    last = audit_log.parse_timestamp(caller["last_seen"])
+    at = context.get(audit_log.CONTEXT_AT_KEY)
+    if last is None or at is None:
+        return None
+    return at - last <= timedelta(hours=BLOCKING_RECENCY_HOURS)
+
+
 def evaluate(cluster: dict, member: dict, items: list | None, target, context: dict) -> dict:
     result = finding.empty_result()
-    log = audit_log.read_callers(context)
+    log = audit_log.read_removed(context)
     if log["error"]:
         result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, AUDIT_READ_FAILED.format(reason=log["error"])))
-        return result
     target_minor = (target[0], target[1]) if target else None
     target_text = tables.format_minor(target_minor) if target_minor else None
+    at_text = audit_log.format_rfc3339(context[audit_log.CONTEXT_AT_KEY]) if context.get(audit_log.CONTEXT_AT_KEY) else None
     for caller in log["callers"]:
         release_text = caller["removed_release"]
         if not release_text:
             continue
         release = tables.parse_minor(release_text)
         if release is None:
-            result[finding.RESULT_RISKS].append(_finding(caller, finding.TIER_RISK, RELEASE_UNPARSABLE_DETAIL.format(release=release_text), log))
+            tier, detail = finding.TIER_RISK, RELEASE_UNPARSABLE_DETAIL.format(release=release_text)
         elif target_minor is None:
-            result[finding.RESULT_RISKS].append(_finding(caller, finding.TIER_RISK, NO_TARGET_DETAIL.format(release=release_text), log))
+            tier, detail = finding.TIER_RISK, NO_TARGET_DETAIL.format(release=release_text)
         elif release > target_minor:
-            result[finding.RESULT_RISKS].append(_finding(caller, finding.TIER_RISK, AFTER_TARGET_DETAIL.format(target=target_text), log))
-        elif caller["platform"]:
-            result[finding.RESULT_RISKS].append(_finding(caller, finding.TIER_RISK, PLATFORM_DETAIL, log))
+            tier, detail = finding.TIER_RISK, AFTER_TARGET_DETAIL.format(target=target_text)
+        elif caller["caller_class"] == audit_log.CLASS_PROVIDER:
+            tier, detail = finding.TIER_RISK, PROVIDER_DETAIL
+        elif caller["caller_class"] == audit_log.CLASS_UNPLACED:
+            tier, detail = finding.TIER_RISK, UNPLACED_DETAIL.format(principal=caller["principal"])
         else:
-            result[finding.RESULT_BLOCKING].append(_finding(caller, finding.TIER_BLOCKING, BLOCKS_DETAIL.format(target=target_text), log))
-    if target_minor is None:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, NO_TARGET_REASON))
-    if log["truncated"]:
-        result[finding.RESULT_UNKNOWN].append(finding.unknown(RULE_ID, audit_log.truncation_reason(log)))
-    finding.add_note(result, NOTE_ENTRIES_READ.format(entries=log["entries"], plural=ENTRY_SINGULAR if log["entries"] == 1 else ENTRY_PLURAL, days=log["window_days"]))
+            recent = _recent(caller, context)
+            if recent is True:
+                tier, detail = finding.TIER_BLOCKING, BLOCKS_DETAIL.format(target=target_text, last_seen=caller["last_seen"])
+            elif recent is False:
+                tier, detail = finding.TIER_RISK, STALE_DETAIL.format(target=target_text, last_seen=caller["last_seen"], hours=BLOCKING_RECENCY_HOURS, at=at_text)
+            else:
+                tier, detail = finding.TIER_RISK, LAST_SEEN_UNPARSABLE_DETAIL.format(target=target_text, last_seen=caller["last_seen"])
+        result[finding.RESULT_BLOCKING if tier == finding.TIER_BLOCKING else finding.RESULT_RISKS].append(_finding(caller, tier, detail, log))
+    if target_minor is None and any(c["removed_release"] for c in log["callers"]):
+        finding.add_note(result, NOTE_NO_TARGET)
+    if log["sampled"]:
+        finding.add_note(result, audit_log.sampled_note(log))
+    if not log["error"]:
+        finding.add_note(result, NOTE_ENTRIES_READ.format(entries=log["entries"], plural=ENTRY_SINGULAR if log["entries"] == 1 else ENTRY_PLURAL, days=log["window_days"], writes_only=audit_log.WRITES_ONLY_NOTE))
     return result
 
 

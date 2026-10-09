@@ -895,11 +895,17 @@ class FakeReadinessCommands(FakeGcloud):
     def __call__(self, cmd, timeout=None, env=None):
         if cmd[:3] == ["gcloud", "logging", "read"]:
             self.calls.append(cmd)
-            match = re.search(r'cluster_name="([^"]+)"', cmd[3])
+            filter_text = cmd[3]
+            match = re.search(r'cluster_name="([^"]+)"', filter_text)
             name = match.group(1) if match else None
             if name in self.failing_logging:
                 return -1, "", "timed out after 60 seconds"
-            return 0, json.dumps(self.audit_by_cluster.get(name, [])), ""
+            if 'timestamp<"' in filter_text:
+                return 0, "[]", ""  # a later page: the canned lists are one page
+            entries = self.audit_by_cluster.get(name, [])
+            removed = [e for e in entries if "k8s.io/removed-release" in (e.get("labels") or {})]
+            page = [e for e in entries if e not in removed] if 'k8s.io/deprecated"="true"' in filter_text else removed
+            return 0, json.dumps(page), ""
         if cmd[:4] == ["gcloud", "container", "clusters", "get-credentials"]:
             self.calls.append(cmd)
             self.current_cluster = cmd[4]
@@ -1097,39 +1103,58 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("| unknown | none |", stdout.getvalue())
         self.assertIn("no target; exclusion scope and skew not graded", stdout.getvalue())
 
-    def test_logging_read_is_one_per_member_with_the_window_and_limit(self):
+    def test_logging_reads_are_two_per_member_with_the_window_and_limit(self):
         fake = FakeReadinessCommands(self.clusters, {}, self.objects)
         rc, text, data = self._run(fake)
         self.assertEqual(rc, report.EXIT_OK)
         reads = [c for c in fake.calls if c[:3] == ["gcloud", "logging", "read"]]
-        self.assertEqual(len(reads), 3)
-        by_cluster = {re.search(r'cluster_name="([^"]+)"', c[3]).group(1): c for c in reads}
-        b = by_cluster["seeded-b"]
-        self.assertIn('resource.type="k8s_cluster"', b[3])
-        self.assertIn('resource.labels.location="us-central1-a"', b[3])
-        self.assertIn('labels."k8s.io/removed-release":*', b[3])
-        self.assertIn('labels."k8s.io/deprecated"="true"', b[3])
-        self.assertEqual(b[4:], ["--project=p1", "--freshness=7d", "--limit=1000", "--format=json"])
+        self.assertEqual(len(reads), 6)
+        b = [c for c in reads if 'cluster_name="seeded-b"' in c[3]]
+        self.assertEqual(len(b), 2)
+        removed = next(c for c in b if "k8s.io/deprecated" not in c[3])
+        deprecated = next(c for c in b if "k8s.io/deprecated" in c[3])
+        for c in (removed, deprecated):
+            self.assertIn('resource.type="k8s_cluster"', c[3])
+            self.assertIn('resource.labels.location="us-central1-a"', c[3])
+            # The window is the seven days ending at --at, in the filter rather than --freshness.
+            self.assertIn('timestamp>="2026-09-07T15:00:00Z" AND timestamp<="2026-09-14T15:00:00Z"', c[3])
+            self.assertIn('protoPayload.authenticationInfo.principalEmail!~"^system:"', c[3])
+            self.assertEqual(c[4:], ["--project=p1", "--limit=1000", "--format=json"])
+        self.assertIn('labels."k8s.io/removed-release":*', removed[3])
+        self.assertIn('((labels."k8s.io/deprecated"="true" AND NOT labels."k8s.io/removed-release":*) OR protoPayload.requestMetadata.callerSuppliedUserAgent:"kubectl/")', deprecated[3])
         a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
-        self.assertEqual(a["audit_log"]["entries"], 0)
-        self.assertIsNone(a["audit_log"]["error"])
+        self.assertEqual(set(a["audit_log"]), {"removed", "deprecated"})
+        for read in a["audit_log"].values():
+            self.assertEqual((read["entries"], read["pages"], read["sampled"], read["error"]), (0, 1, False, None))
+            self.assertEqual((read["window_start"], read["window_end"]), ("2026-09-07T15:00:00Z", "2026-09-14T15:00:00Z"))
+            self.assertEqual(len(read["commands"]), 1)
         self.assertEqual(list(a["rules"]), ["removed-api-callers", "deprecated-api-callers", "client-addon-skew", "changed-defaults"])
         self.assertEqual(a["status"], "ready")
         self.assertIn("| other rules |", text)
         self.assertIn("0 risk(s) from the other rules", text)
 
-    def test_audit_log_read_failure_is_unknown_and_an_error_row(self):
+    def test_readiness_context_carries_the_contract_keys(self):
+        member = {"project": "p1", "cluster": "seeded-a", "location": "us-central1-a"}
+        at = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
+        context = report.readiness_context(member, at)
+        self.assertEqual(set(context), {"project", "location", "cluster_name", "run_cmd", "at", "cache"})
+        self.assertIs(context["run_cmd"], report.run_cmd)
+        self.assertIs(context["at"], at)
+
+    def test_audit_log_read_failure_is_unknown_and_an_error_row_per_read(self):
         fake = FakeReadinessCommands(self.clusters, {}, self.objects, failing_logging=["seeded-a"])
         rc, text, data = self._run(fake)
         self.assertEqual(rc, report.EXIT_PARTIAL)
         a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
         self.assertEqual(a["status"], "unknown")
-        self.assertIn("timed out after 60 seconds", a["audit_log"]["error"])
+        self.assertIn("timed out after 60 seconds", a["audit_log"]["removed"]["error"])
+        self.assertIn("timed out after 60 seconds", a["audit_log"]["deprecated"]["error"])
         self.assertEqual(a["rules"]["removed-api-callers"]["blocking"], [])
         self.assertIn("timed out after 60 seconds", a["rules"]["removed-api-callers"]["unknown"][0]["reason"])
-        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
-        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: audit log not read: `gcloud logging read` failed (rc=-1): timed out after 60 seconds", text)
-        self.assertIn("unknown: removed-API callers not read", text)
+        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a", "seeded-a"])
+        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: audit log (removed read) not read: `gcloud logging read` (removed read, page 1) failed (rc=-1): timed out after 60 seconds", text)
+        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-a: audit log (deprecated read) not read:", text)
+        self.assertIn("unknown: removed-API callers: `gcloud logging read` (removed read, page 1) failed", text)
         # The other members read their logs and are graded as before.
         self.assertEqual({m["cluster"]: m["readiness"]["status"] for m in data["members"] if m["cluster"] != "seeded-a"}, {"seeded-b": "blocked", "robot-host": "blocked"})
 
@@ -1137,7 +1162,9 @@ class ReadinessTest(unittest.TestCase):
         with open(os.path.join(os.path.dirname(__file__), "testdata", "audit_log_sample.json"), encoding="utf-8") as f:
             sample = json.load(f)
         fake = FakeReadinessCommands(self.clusters, {}, self.objects, audit_by_cluster={"seeded-a": sample})
-        rc, text, data = self._run(fake)
+        # Two hours after the sample's last write, so the removed-API caller is recent; the
+        # later --at wins over the one _run passes.
+        rc, text, data = self._run(fake, "--at", "2026-09-29T16:00:00Z")
         self.assertEqual(rc, report.EXIT_OK)
         a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
         self.assertEqual(a["status"], "blocked")
@@ -1146,15 +1173,26 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(blocking[0]["removed_release"], "1.32")
         deprecated = {r["principal"] for r in a["rules"]["deprecated-api-callers"]["risks"]}
         self.assertIn("system:serviceaccount:seeded-deprecation:legacy-endpoints-writer", deprecated)
-        self.assertEqual(a["audit_log"]["entries"], 8)
+        self.assertEqual((a["audit_log"]["removed"]["entries"], a["audit_log"]["deprecated"]["entries"]), (2, 6))
         self.assertEqual(data["readiness"]["summary"], {"blocked": 3, "ready": 0, "unknown": 0})
         self.assertEqual(data["readiness"]["risks"], 3)
         row = next(l for l in text.splitlines() if l.startswith("| p1 | seeded-a |") and "blocks:" in l)
-        self.assertIn("blocks: system:serviceaccount:kubeagents-system:legacy-flowcontrol-tuner via legacy-flowcontrol-tuner/0.3 calls flowcontrol.apiserver.k8s.io/v1beta3 flowschemas, removed in 1.32", row)
-        self.assertIn("risk: system:serviceaccount:seeded-deprecation:legacy-endpoints-writer via Python-urllib/3.12 calls core/v1 endpoints", row)
+        self.assertIn("blocks: system:serviceaccount:kubeagents-system:legacy-flowcontrol-tuner via legacy-flowcontrol-tuner/0.3 writes flowcontrol.apiserver.k8s.io/v1beta3 flowschemas, removed in 1.32", row)
+        self.assertIn("risk: system:serviceaccount:seeded-deprecation:legacy-endpoints-writer via Python-urllib/3.12 writes core/v1 endpoints", row)
         self.assertIn("risk: kubectl v1.29 from principal system:serviceaccount:seeded-shapes:stale-kubectl-client", row)
-        self.assertIn("deprecated-api-callers: 1 GKE-managed caller of deprecated APIs not filed", row)
+        self.assertIn("deprecated-api-callers: 1 provider caller of deprecated APIs not filed", row)
         self.assertIn("3 risk(s) from the other rules", text)
+
+    def test_a_removed_api_caller_silent_for_two_days_is_a_risk_not_a_blocker(self):
+        with open(os.path.join(os.path.dirname(__file__), "testdata", "audit_log_sample.json"), encoding="utf-8") as f:
+            sample = json.load(f)
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects, audit_by_cluster={"seeded-a": sample})
+        rc, text, data = self._run(fake, "--at", "2026-10-05T16:00:00Z")
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual(a["status"], "ready")
+        self.assertEqual(a["rules"]["removed-api-callers"]["blocking"], [])
+        self.assertIn("more than 48h before 2026-10-05T16:00:00Z", a["rules"]["removed-api-callers"]["risks"][0]["detail"])
+        self.assertEqual(data["readiness"]["summary"], {"blocked": 2, "ready": 1, "unknown": 0})
 
     def test_default_kubeconfig_dir_follows_hermes_home(self):
         with patch.dict(os.environ, {"HERMES_HOME": "/home/hermes"}):

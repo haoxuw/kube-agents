@@ -21,13 +21,19 @@ from pathlib import Path
 
 # ------------------------------------------------ entries 6, 9, 10: the audit-log read
 
-# The audit-log rules (catalogue entries 6, 9 and 10): one `gcloud logging read` per
-# cluster over the last seven days. Seven days sees a CronJob caller on any schedule a
+# The audit-log rules (catalogue entries 6, 9 and 10): two paged `gcloud logging read`s
+# per cluster (the removed-release read and the deprecated-or-kubectl read) over the seven
+# days ending at the evaluation instant. Seven days sees a CronJob caller on any schedule a
 # readiness check should catch (the seeded fixture writes every ten minutes) and a weekly
-# batch job once. The page cap bounds the read beside the report's 60-second per-call
-# timeout; a full page is reported as a cut window rather than as an absence.
+# batch job once. A page is AUDIT_LOG_PAGE_LIMIT entries (`--limit`); a read pages by
+# timestamp bound for at most AUDIT_LOG_MAX_PAGES pages and starts no new page once
+# AUDIT_LOG_READ_BUDGET_SECONDS have elapsed, the same figure as the report's per-call cap,
+# so one read is at most one call over it; a read that still fills its last page is graded
+# on what it saw and noted as sampled, never reported as an absence or an unknown.
 AUDIT_LOG_WINDOW_DAYS = 7
-AUDIT_LOG_LIMIT = 1000
+AUDIT_LOG_PAGE_LIMIT = 1000
+AUDIT_LOG_MAX_PAGES = 3
+AUDIT_LOG_READ_BUDGET_SECONDS = 60
 
 # kubectl skew (entry 10). The Kubernetes version skew policy, read 2026-10-09: "kubectl
 # is supported within one minor version (older or newer) of kube-apiserver". The page
