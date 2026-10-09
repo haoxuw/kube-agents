@@ -18,10 +18,11 @@
 # minor stops serving are still called on each seeded cluster, and by what.
 # The answer ends in one declared line per cluster, in a fixed form. The
 # deterministic objectives read the planted cluster's line and nothing else.
-# `fleet_upgrade_report.py --readiness` reads the trail for the agent: one
-# `gcloud logging read` per cluster over the last seven days, and the
-# removed-api-callers rule blocks on the writer, naming its principal, user
-# agent, API and release. The report is graded, not the route.
+# `fleet_upgrade_report.py --readiness` reads the trail for the agent: a paged
+# `gcloud logging read` per cluster over the last seven days of writes, and the
+# removed-api-callers rule blocks on the writer while it still writes, naming
+# its principal, user agent, API and release. The report is graded, not the
+# route.
 #
 # Isolation class: read-only (chat prompt). Eligible tier: nightly once the
 # role exists.

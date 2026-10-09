@@ -408,15 +408,16 @@ per member, against the same target: PodDisruptionBudgets that would block a nod
 the maintenance window at a given instant (`--at`, default now), and node-pool version skew
 against the target control plane. It then runs the audit-log, client-skew and changed-defaults
 rules the fleet-upgrade-verification skill lists, which read each cluster's Kubernetes audit log
-(one `gcloud logging read` per member, the last seven days) and its namespaces: callers of an API
-the target removes (a blocker), callers of deprecated APIs, kubectl user agents and images outside
-the one-minor skew window, third-party add-on images against a sourced support table, and
-namespaces whose Pod Security pin follows the running minor. Run it before writing the plan; carry
-its `blocked` rows into the checklist rather than asking the operator to check those items by hand,
-and its risks as what to watch. The cluster reads cost one `get-credentials`, one `kubectl get` and
-one `gcloud logging read` per member and leave a per-member kubeconfig under
-`${{HERMES_HOME:-/opt/data}}/.kubeconfigs/`; an exclusion is reported as holding back automatic
-upgrades only.
+(two paged `gcloud logging read`s per member over the last seven days; writes only, so a caller
+that only reads is not in it) and its namespaces: callers of an API the target removes (a blocker
+while they still write, a risk once silent for two days), callers of deprecated APIs, kubectl user
+agents and images outside the one-minor skew window, third-party add-on images against a sourced
+support table, and namespaces whose Pod Security pin follows the running minor. Run it before
+writing the plan; carry its `blocked` rows into the checklist rather than asking the operator to
+check those items by hand, and its risks as what to watch. The cluster reads cost one
+`get-credentials`, one `kubectl get` and two paged `gcloud logging read`s per member and leave a
+per-member kubeconfig under `${{HERMES_HOME:-/opt/data}}/.kubeconfigs/`; an exclusion is reported as
+holding back automatic upgrades only.
 
 When the checklist's deprecated-API item comes up, the same skill's `api_deprecation_scan.py` scans
 the linked GitOps repositories' manifests for apiVersions the target removes and reports each with

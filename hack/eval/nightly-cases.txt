@@ -226,8 +226,9 @@
 # the thirteen come to ~583 serial minutes against the 480m deadline.
 #
 # 2026-10-09 adds upgrades-deprecated-api-caller-named: one case, three units
-# at the 200s default (a read-only chat turn; the readiness report adds one
-# `gcloud logging read` per cluster, under its 60-second cap). deployer: noop,
+# at the 200s default (a read-only chat turn; the readiness report adds two
+# paged `gcloud logging read`s per cluster, each call under its 60-second cap).
+# deployer: noop,
 # so the infra lock is untouched. It is the last entry below. Counted from the
 # lists rather than the paragraph above, which had fallen one behind:
 # sixty-seven cases (201 units) here, of an eighty-one-case, 243-unit matrix.

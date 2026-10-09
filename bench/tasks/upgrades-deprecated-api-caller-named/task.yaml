@@ -12,9 +12,9 @@
 # cluster, and what calls them. The answer ends in one declared line per
 # cluster, in a fixed form. The deterministic objectives read those lines
 # and nothing else. The readiness report reads the trail for the agent:
-# `fleet_upgrade_report.py --readiness` runs one `gcloud logging read` per
-# cluster over the last seven days, and its deprecated-api-callers rule names
-# the writer's principal, user agent and API as a risk. The agent can also
+# `fleet_upgrade_report.py --readiness` pages each cluster's audit log over the
+# last seven days of writes, and its deprecated-api-callers rule names the
+# writer's principal, user agent and API as a risk. The agent can also
 # read Cloud Logging itself (the k8s.io/deprecated label and the caller
 # system:serviceaccount:seeded-deprecation:legacy-endpoints-writer), or the
 # namespace (the CronJob and the Endpoints object it writes). The report is

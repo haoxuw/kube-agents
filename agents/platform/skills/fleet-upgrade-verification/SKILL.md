@@ -54,9 +54,11 @@ The script runs `gcloud container clusters list`, `gcloud container get-server-c
 `gcloud projects list` and `gcloud config get-value project` (plus `gcloud projects describe` for a
 project whose `clusters list` was refused as API-disabled or whose configured identifier is a
 project number), each with a 60-second timeout, and
-with `--readiness` one `gcloud container clusters get-credentials`, one `kubectl get` and one
-`gcloud logging read` (the last seven days of the member's audit log, at most 1000 entries, under
-the same 60-second cap) per member.
+with `--readiness` one `gcloud container clusters get-credentials`, one `kubectl get` and two
+paged `gcloud logging read`s (the seven days of the member's audit log ending at `--at`, writes
+only, 1000 entries a page, at most three pages each, every call under the same 60-second cap) per
+member. Give the terminal call a timeout of at least 600 seconds on a fleet of more than a few
+members: the members are read in sequence, and each can cost up to eight 60-second calls.
 It changes nothing in GCP or in any cluster; the only things it writes are its own record under
 `/opt/data/state/fleet-upgrade-verification/`, the per-member kubeconfig files `--readiness`
 needs, and the `--output` file. A failed or timed-out read is listed under the table and sets
@@ -198,36 +200,49 @@ maintenance rule departs from its SOP where the two differ, and says so below:
   more than 2, or a different major, blocks the control-plane upgrade until the pool moves
   (GKE keeps nodes within two minors of the control plane); exactly 2 is at the ceiling and
   goes in the note. Autopilot members read `n/a`.
-- **Removed-API callers** (`readiness_rules/removed_api_callers.py`, catalogue entry 6). One
-  `gcloud logging read` per member, shared with the two rules below, over the last seven days
-  of the cluster's Kubernetes audit log (`resource.type="k8s_cluster"`, the member's name and
-  location, at most 1000 entries): the entries the API server stamped `k8s.io/removed-release`
-  or `k8s.io/deprecated`, plus kubectl user agents. Each caller is one principal, user agent and
-  API (`core/v1 endpoints`). A caller of an API removed at or before the target minor blocks,
-  named with the release and, where `removed_apis.json` knows one, the replacement; a removal
-  after the target is a risk; a GKE-managed caller (kube-system's service accounts, the control
-  plane's components, the node identities, GKE's service agents) is a risk, because GKE moves
-  its own components. A read that fails or times out is `unknown` with the reason, never a
-  blocker; so is a full page, because a caller absent from a cut window may still exist.
+- **Removed-API callers** (`readiness_rules/removed_api_callers.py`, catalogue entry 6). Two
+  paged `gcloud logging read`s per member, shared with the two rules below, over the seven days
+  of the cluster's Kubernetes audit log ending at `--at` (`resource.type="k8s_cluster"`, the
+  member's name and location, the window as timestamp bounds in the filter): the removed-release
+  read for entries the API server stamped `k8s.io/removed-release`, and the deprecated-or-kubectl
+  read for `k8s.io/deprecated` stamps without a removal release and for kubectl user agents, so a
+  chatty deprecated writer cannot fill the page a removed-API caller would have been on. The
+  provider's principals are excluded in the filter. Each read is 1000 entries a page, pages by a
+  `timestamp<` bound on the oldest entry seen, stops at three pages or once 60 seconds have
+  elapsed, and a read that still filled its last page is graded on what it saw with the note
+  "sampled N entries; more callers possible". The log is the Admin Activity log and carries writes
+  only: a caller that only reads an API is not in it, and GKE Deprecation Insights are the
+  cross-check. Each caller is one principal, user agent and API (`core/v1 endpoints`). The
+  operator's callers are user accounts, service accounts, and Kubernetes service accounts outside
+  the system namespaces (`kube-system`, `kube-public`, `kube-node-lease`, `gatekeeper-system`,
+  `cnrm-system`, `asm-system`, and the `gke-`, `gmp-` and `config-management-` namespaces); every
+  other `system:` principal, the node identities and Google-managed service agents are the
+  provider's. An operator caller of an API removed at or before the target minor whose last write
+  is within 48 hours blocks, named with the release and, where `removed_apis.json` knows one, the
+  replacement; one silent for longer is a risk naming its last write, since a migrated caller must
+  not block for a week. A removal after the target, a provider caller (GKE moves its own
+  components) and a principal the rule cannot place are risks, never blockers. A read that fails
+  or times out is `unknown` with the reason, graded on the pages before it.
 - **Deprecated-API callers** (`readiness_rules/deprecated_api_callers.py`, entry 9). From the
-  same read: each operator-owned caller of an API stamped `k8s.io/deprecated` with no removal
-  release is a risk named with its principal, user agent, API and, for Endpoints, the successor
-  (EndpointSlice). GKE's own callers are counted in the note, not filed; kube-system's
-  endpoint-controller is stamped on every Service's Endpoints it writes, so the label alone
-  identifies nothing.
+  deprecated-or-kubectl read: each operator caller of an API stamped `k8s.io/deprecated` with no
+  removal release is a risk named with its principal, user agent, API and, for Endpoints, the
+  successor (EndpointSlice); a principal the rule cannot place is a risk naming it. The
+  provider's callers that the filter did not express are counted in the note, not filed;
+  kube-system's endpoint-controller is stamped on every Service's Endpoints it writes, so the
+  label alone identifies nothing. Writes only, as above.
 - **Client and add-on skew** (`readiness_rules/client_addon_skew.py`, entry 10). kubectl is
   supported within one minor of kube-apiserver (`upgrade_shape_tables.KUBECTL_SKEW_SOURCE`, the
-  Kubernetes version skew policy): a `kubectl/vX.Y` user agent in the same audit read, or a
-  workload image whose repository ends in `kubectl`, further than one minor from the target is a
-  risk naming the version and the principal or workload. A client-go user agent carries the
-  binary's version, not the library's, so those callers are counted, not graded; Admin Activity
-  logs carry writes, so a kubectl that only reads is not in the log. `addonsConfig` names the
-  GKE-managed add-ons that are on; they expose no version and GKE owns them, so they are listed
-  in the note and not graded. A third-party add-on recognised by image repository is graded
-  against `upgrade_shape_tables.ADDON_SUPPORT` (the vendor's page and the day it was read): a
-  target outside the release's supported range is a risk; an add-on at a release the table does
-  not list is `unknown` with the page to read, and one with no table is `unknown` with the
-  vendor's matrix named as what to check. Nothing is inferred.
+  Kubernetes version skew policy): a `kubectl/vX.Y` user agent in the deprecated-or-kubectl read,
+  or a workload image whose repository ends in `kubectl`, further than one minor from the target
+  is a risk naming the version and the principal or workload. A client-go user agent carries the
+  binary's version, not the library's, so those callers are counted, not graded; the log carries
+  writes, so a kubectl that only reads is not in it. `addonsConfig` names the GKE-managed add-ons
+  that are on; they expose no version and GKE owns them, so they are listed in the note and not
+  graded. A third-party add-on recognised by image repository is graded against
+  `upgrade_shape_tables.ADDON_SUPPORT` (the vendor's page and the day it was read): a target
+  outside the release's supported range is a risk; an add-on with no table, or at a release the
+  table does not list, is a note ("version not graded") and changes no verdict. Nothing is
+  inferred.
 - **Changed defaults** (`readiness_rules/changed_defaults.py`, entry 8). The minors the upgrade
   crosses, from the control plane for an admission default and from the lowest node pool for a
   kubelet default, are looked up in `upgrade_shape_tables.DEFAULT_CHANGES_BY_MINOR`, each row
@@ -238,23 +253,25 @@ maintenance rule departs from its SOP where the two differ, and says so below:
   naming the namespace and the setting; a minor that only widens an allowlist is a note; a
   namespace pinned to a named version is the safe case and is counted. A workload with a
   `gitRepo` volume is a risk across 1.33 (disabled by default) and 1.36 (permanently). A target
-  past the table's `as_of` is `unknown`, not clean.
+  past the table's `as_of` (1.36) is graded on the minors the table covers, with a note that the
+  table ends there; the refresh is a row per later minor from its release notes.
 
 A member is `blocked` when any rule blocks, whatever else could not be evaluated; `unknown` when
 nothing blocked but a rule could not be evaluated (the cluster read failed, there is no target,
-an exclusion's scope or a pool's version was unreadable, the audit log was not read or was cut,
-the target is past the defaults table, an add-on has no sourced table); `ready` only when every
-rule was evaluated and none blocks. A risk from the registered rules is reported in the
-`other rules` column and changes no verdict. A failed `get-credentials` or `kubectl get` is
-listed under the table as a read failure for that member and sets exit code 1, like a failed
-gcloud read; the member's maintenance and skew rules are still graded, and the other members are
-unaffected. A failed or timed-out `gcloud logging read` is listed the same way and leaves that
-member's three audit-log rules `unknown`, the rest graded. `--at` with a value that is not RFC
-3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage error (exit 2). In the
-JSON, `members[].readiness.rules` holds each registered rule's result under its id (`blocking`,
-`risks`, `unknown` and `note`), `members[].readiness.audit_log` holds the read's `command`,
-`entries`, `truncated` and `error`, and the top-level `readiness.risks` counts the risks across
-members.
+an exclusion's scope or a pool's version was unreadable, an audit-log read failed or timed out);
+`ready` only when every rule was evaluated and none blocks. A risk from the registered rules is
+reported in the `other rules` column and changes no verdict; so does a note, which is where a
+sampled read, an add-on with no table and a target past the defaults table are reported. A failed
+`get-credentials` or `kubectl get` is listed under the table as a read failure for that member
+and sets exit code 1, like a failed gcloud read; the member's maintenance and skew rules are
+still graded, and the other members are unaffected. A failed or timed-out `gcloud logging read`
+is listed the same way, per read, and leaves the rules that read it `unknown`, graded on the
+pages it did return; the rest are graded. `--at` with a value that is not RFC 3339, or `--at` or
+`--kubeconfig-dir` without `--readiness`, is a usage error (exit 2). In the JSON,
+`members[].readiness.rules` holds each registered rule's result under its id (`blocking`,
+`risks`, `unknown` and `note`), `members[].readiness.audit_log` holds, per read (`removed`,
+`deprecated`), the `commands` run, `entries`, `pages`, `sampled`, `error` and the window bounds,
+and the top-level `readiness.risks` counts the risks across members.
 
 ## Scan the GitOps manifests
 
@@ -305,7 +322,8 @@ skipped files is clean for what it read, so say that.
 
 The scan reads what Git declares. Whether a client is still calling a deprecated API on a live
 cluster is a different question, answered from the cluster's audit log: `--readiness` reads it
-(the removed-API and deprecated-API rules above, seven days, one read per member), and GKE
+(the removed-API and deprecated-API rules above, seven days of writes, two paged reads per
+member), and GKE
 Deprecation Insights read the same log over thirty days through the console page the report's
 footer links, or `gcloud recommender insights list --insight-type=google.container.DiagnosisInsight`,
 which the report quotes for a human to run. That command is not in the agent's gcloud read
@@ -327,7 +345,8 @@ the removed-API caller with its principal, user agent, API and release. Name the
 risks as risks, not blockers: the deprecated-API caller with its principal and API, the kubectl
 client with its version and where it runs, the add-on with its supported range, the namespace
 that follows `latest` with the minor that changes its rule set. Where a cell reads `unknown`,
-say what was not read and why; never read it as clean.
+say what was not read and why; never read it as clean. A `sampled` note means a read stopped at
+its page ceiling, so more callers are possible; say so.
 Say what the operator has to change before the upgrade can proceed; do not change it, and do not
 propose deleting an exclusion. When the question is a target version's readiness, paste each
 repository's deprecation section too, with its source line, and state the floor and target the
