@@ -244,14 +244,16 @@ FIXTURE_NOT_READY = {
         "verification sweep"
     ),
     "upgrades-readiness-containerd-socket": (
-        "#2662: needs the containerd-socket-agent role (node-runtime-probe, a "
+        "#2275, where the closed scenario issue #2662 redirects: needs the "
+        "containerd-socket-agent role (node-runtime-probe, a "
         "DaemonSet mounting the containerd socket in seeded-shapes on slot a) "
         "applied to every pool project; the role is designed on the fleet-shape "
         "fixture branch and the catalogue on main does not define it, so the "
         "case's planted-object line has nothing to read"
     ),
     "upgrades-readiness-intree-volume": (
-        "#2668: needs the intree-pd-volume role (the in-tree gcePersistentDisk "
+        "#2275, where the closed scenario issue #2668 redirects: needs the "
+        "intree-pd-volume role (the in-tree gcePersistentDisk "
         "volume intree-pd, its claim and the intree-pd-reader Deployment in "
         "seeded-shapes on slot a) applied to every pool project; the role is "
         "designed on the fleet-shape fixture branch and the catalogue on main "

@@ -147,7 +147,7 @@ members missing this run.
 the same target as the member's version row, and a `readiness` object per member in the JSON
 (`members[].readiness`, with a top-level `readiness` block holding the instant evaluated and a
 count per verdict). Without the flag nothing changes. Three rules, each derived from a governance
-SOP check and named beside it, then five per-entry rules from the upgrade-failure catalogue; the
+SOP check and named beside it, then the per-entry rules from the upgrade-failure catalogue; the
 maintenance rule departs from its SOP where the two differ, and says so below:
 
 - **Drain-blocking PDBs** (`obtainability_audit_sop.md` §3.4). For each member the script runs
@@ -247,12 +247,14 @@ nothing blocked but a rule could not be evaluated (the cluster read failed, ther
 an exclusion's scope or a pool's version was unreadable, a per-entry rule said so); `ready` only
 when every rule was evaluated and none blocks. A risk never moves the verdict. In the JSON each
 member carries `readiness.rules` (every per-entry rule's result under its id), `rule_blocking` and
-`risks`; the top-level `readiness` block counts the members with risks. A failed `get-credentials` or `kubectl get` is listed under the table
-as a read failure for that member and sets exit code 1, like a failed gcloud read; the member's
-maintenance, skew and zonal-control-plane rules are still graded, the other per-entry rules
-read as unknown, and the other members are unaffected. `--at` with a
-value that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage
-error (exit 2).
+`risks`; the top-level `readiness` block counts the members with risks. A failed `get-credentials`
+or `kubectl get` is listed under the table as a read failure for that member and sets exit code 1,
+like a failed gcloud read; the member's maintenance, skew and zonal-control-plane rules are still
+graded, the other per-entry rules read as unknown where the read decides them (always for in-tree
+volumes; for a legacy-dataplane member, a pool that removes a node first below the target, or a
+pool whose containerd major changes), and the other members are unaffected. `--at` with a value
+that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage error
+(exit 2).
 
 ## Scan the GitOps manifests
 

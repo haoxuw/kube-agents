@@ -5,9 +5,9 @@
 # claim in seeded-shapes and mounted by the intree-pd-reader Deployment, so the
 # attach goes through CSI migration. The role is designed and not yet on the
 # pool projects, so this case waits in scripts/validate_bench_cases.py's
-# FIXTURE_NOT_READY under #2668 and runs nowhere until the pull request that
-# moves it to the nightly file cites a reconcile that planted the role on every
-# pool project.
+# FIXTURE_NOT_READY under #2275 (the tracker the closed scenario issue #2668
+# redirects to) and runs nowhere until the pull request that moves it to the
+# nightly file cites a reconcile that planted the role on every pool project.
 #
 # The readiness mode of fleet-upgrade-verification grades the entry with its
 # in-tree-volumes rule: every PersistentVolume with an in-tree source, its
@@ -69,7 +69,8 @@ domain: upgrades
 owner: haoxuw
 
 # Named by ROLE, not cluster: the role this case's issue plants, which the
-# fixture catalogue on main does not define yet (FIXTURE_NOT_READY, #2668).
+# fixture catalogue on main does not define yet (FIXTURE_NOT_READY, #2275;
+# the scenario's own issue #2668 is closed and redirects there).
 fixtures:
   - intree-pd-volume
 

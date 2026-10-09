@@ -167,12 +167,11 @@ Every check below carries a tier, and the tiers are what produce the verdict:
 The findings are the evidence behind the verdict; the verdict is the deliverable.
 
 Closest thing on `main`: `fleet-upgrade-verification --readiness` already emits
-`blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions, skew, a
-pool that removes a node before its replacement exists, and in-tree volumes the PD CSI driver add-on
-cannot attach, with a risks column for a zonal control plane, a containerd major change under agents
-on the runtime socket, and NetworkPolicies no dataplane enforces. Three things are missing — the
-verdict is per cluster, not per family; it reads eight inputs rather than every check here; and it
-runs only when asked, not on the schedule.
+`blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions, skew and
+the per-entry rules the Scope table credits (`surge-capacity` and `in-tree-volumes` can block;
+`zonal-control-plane`, `container-runtime` and `network-dataplane` are risks). Three things are
+missing — the verdict is per cluster, not per family; it reads a subset of the checks here, not
+every one; and it runs only when asked, not on the schedule.
 
 ## Version posture
 

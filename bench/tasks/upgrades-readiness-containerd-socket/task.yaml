@@ -4,8 +4,9 @@
 # /run/containerd/containerd.sock from the host, the agent shape a containerd
 # major change breaks. The role is designed and not yet on the pool projects, so
 # this case waits in scripts/validate_bench_cases.py's FIXTURE_NOT_READY under
-# #2662 and runs nowhere until the pull request that moves it to the nightly
-# file cites a reconcile that planted the role on every pool project.
+# #2275 (the tracker the closed scenario issue #2662 redirects to) and runs
+# nowhere until the pull request that moves it to the nightly file cites a
+# reconcile that planted the role on every pool project.
 #
 # The readiness mode of fleet-upgrade-verification grades the entry with its
 # container-runtime rule: the workload side is every pod or template mounting a
@@ -67,7 +68,8 @@ domain: upgrades
 owner: haoxuw
 
 # Named by ROLE, not cluster: the role this case's issue plants, which the
-# fixture catalogue on main does not define yet (FIXTURE_NOT_READY, #2662).
+# fixture catalogue on main does not define yet (FIXTURE_NOT_READY, #2275;
+# the scenario's own issue #2662 is closed and redirects there).
 fixtures:
   - containerd-socket-agent
 
