@@ -228,11 +228,12 @@
 #
 # 2026-10-07 adds findings-decision-covers-item: one case, three units at the
 # 200s default (one front-door turn; the plant and the teardown are a few
-# kubectl execs each). It is the next-to-last entry below: sixty-five cases
-# (195 units) here, of a seventy-nine-case, 237-unit matrix. Its stack holds
-# the infra lock, so it is the thirteenth tofu case: ~10 more serial minutes
-# there. With oobe-first-run-audits, the twelfth (~120 at its 2400s hint),
-# the thirteen come to ~583 serial minutes against the 480m deadline.
+# kubectl execs each). It is the entry after
+# backup-dr-cmek-selected-namespaces-probe below: sixty-five cases (195 units)
+# here, of a seventy-nine-case, 237-unit matrix. Its stack holds the infra
+# lock, so it is the thirteenth tofu case: ~10 more serial minutes there. With
+# oobe-first-run-audits, the twelfth (~120 at its 2400s hint), the thirteen
+# come to ~583 serial minutes against the 480m deadline.
 #
 # 2026-10-09 parks oobe-first-run-audits: it is in no roster file, and its
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py says what brings
@@ -260,7 +261,7 @@
 # 2026-10-08 adds upgrades-audit-reports-upgrade-blocked (rebased past the
 # 2026-10-09 entries above): one case, three units at the 900s hint the full
 # audits take (hack/ci-eval-pr.sh prices and ceilings it with its siblings).
-# Counted over every entry below, this case, the last entry after
+# Counted over every entry below, this case, the entry after
 # fleet-audit-unchanged-finding-keeps-wording, makes this file sixty-nine cases
 # (207 units) of an eighty-three-case, 249-unit matrix with the presubmit
 # file's fourteen.
@@ -351,6 +352,15 @@
 # Counted from the lists on 2026-10-14, after the merges of main to 1f9b84ba:
 # seventy-four cases (222 units) here, of an eighty-eight-case, 264-unit matrix
 # with the presubmit file's fourteen.
+#
+# 2026-10-13 adds upgrades-readiness-zonal-control-plane (rebased past the
+# gitops-drift-noise-filtered-triage and upgrades-fleet-readiness-failclosed-webhook
+# entries above): one case, three units at
+# the 200s default (a read-only chat turn that runs the readiness report; the
+# report alone measured 62s on the dev install). It is the last entry below.
+# Counted over every entry below: seventy-five cases (225 units) here, of an
+# eighty-nine-case, 267-unit matrix with the presubmit file's fourteen.
+# No stack, so the infra lock is untouched.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -942,3 +952,8 @@
 # upgrade, not a hand edit of the PlatformAgent (#2019). deployer: noop,
 # transcript-only, one delegation round trip.
 ./tasks/manage-cluster-exclusion-installer-route-probe/task.yaml
+# Upgrade-failure catalogue entry 11 through the readiness report's
+# zonal-control-plane rule: every seeded cluster's zonal control plane is a
+# risk, never a block, on the report. Read-only; no planted fixture. Nightly
+# from its first merge.
+./tasks/upgrades-readiness-zonal-control-plane/task.yaml
