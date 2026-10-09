@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
+import readiness_rules as shared  # noqa: E402
 import upgrade_readiness as r  # noqa: E402
 
 AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
@@ -376,6 +377,96 @@ class SkewTest(unittest.TestCase):
         self.assertEqual(result["unknown"], ["weird"])
 
 
+def rule_module(rule_id, entry=0, can_block=True, evaluate=None, describe=None):
+    """A stand-in for a rule module: a class carrying the contract's attributes."""
+
+    class Rule:
+        RULE_ID = rule_id
+        ENTRY = entry
+        CAN_BLOCK = can_block
+
+    Rule.evaluate = staticmethod(evaluate or (lambda cluster, member, read, target, context: shared.new_result()))
+    Rule.describe = staticmethod(describe or (lambda finding: "described " + str(finding.get("what"))))
+    return Rule
+
+
+def returning(**lists):
+    def evaluate(cluster, member, read, target, context):
+        out = shared.new_result()
+        for key, value in lists.items():
+            out[key].extend(value)
+        return out
+
+    return evaluate
+
+
+class ExtraRulesTest(unittest.TestCase):
+    """The fold: every registered rule runs over one member, findings carry their rule and
+    text, an `unknown` carries whether its rule can block, and a rule's defect is its own
+    unknown rather than a crash."""
+
+    READ = {"kubeconfig": "k", "items": [], "error": None, "read_errors": {kind: None for kind in shared.READ_KINDS}}
+
+    def test_findings_are_stamped_and_counted_per_rule(self):
+        blocker = rule_module("blocker", entry=2, evaluate=returning(blocking=[{"what": "no room"}], notes=["pool p has room"]))
+        risky = rule_module("risky", entry=11, can_block=False, evaluate=returning(risks=[{"what": "zonal"}], unknown=["odd location"]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[blocker, risky])
+        self.assertEqual(folded["blocking"], [{"what": "no room", "text": "described no room", "rule": "blocker", "entry": 2}])
+        self.assertEqual(folded["risks"], [{"what": "zonal", "text": "described zonal", "rule": "risky", "entry": 11}])
+        self.assertEqual(folded["unknown"], [{"reason": "odd location", "rule": "risky", "entry": 11, "can_block": False, "text": "risky: odd location"}])
+        self.assertEqual(folded["notes"], ["blocker: pool p has room"])
+        self.assertEqual(folded["rules"], {"blocker": {"entry": 2, "can_block": True, "blocking": 1, "risks": 0, "unknown": 0, "notes": 1}, "risky": {"entry": 11, "can_block": False, "blocking": 0, "risks": 1, "unknown": 1, "notes": 0}})
+
+    def test_unknown_entries_keep_their_fields_and_gain_a_reason(self):
+        b_style = {"rule": "x", "entry": 4, "grade": "unknown", "object": None, "detail": "the Node read failed"}
+        c_style = {"rule": "x", "tier": "unknown", "reason": "no runner"}
+        rule = rule_module("x", entry=4, evaluate=returning(unknown=[b_style, c_style, "plain"]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])
+        self.assertEqual([u["reason"] for u in folded["unknown"]], ["the Node read failed", "no runner", "plain"])
+        self.assertEqual(folded["unknown"][0]["detail"], "the Node read failed")
+        self.assertEqual(folded["unknown"][1]["tier"], "unknown")
+        self.assertTrue(all(u["can_block"] and u["rule"] == "x" and u["entry"] == 4 for u in folded["unknown"]))
+        self.assertEqual(folded["unknown"][2]["text"], "x: plain")
+
+    def test_a_rule_that_raises_is_unknown_not_a_crash(self):
+        def boom(*args):
+            raise ValueError("boom")
+
+        broken = rule_module("broken", entry=0, evaluate=boom)
+        fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
+        self.assertEqual([(u["rule"], u["reason"], u["can_block"]) for u in folded["unknown"]], [("broken", "rule raised ValueError('boom'); not evaluated", True)])
+        self.assertEqual(folded["rules"]["broken"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"])
+        # A describe that raises is the same defect, and a rule returning nothing is empty.
+        bad_describe = rule_module("bad-describe", evaluate=returning(risks=[{"what": "x"}]), describe=boom)
+        empty = rule_module("empty", evaluate=lambda *args: None)
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[bad_describe, empty])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["bad-describe"])
+        self.assertEqual(folded["rules"]["empty"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 0, "notes": 0})
+
+    def test_a_blocker_from_a_rule_that_cannot_block_is_demoted_to_a_risk_with_a_note(self):
+        rule = rule_module("cannot", entry=11, can_block=False, evaluate=returning(blocking=[{"what": "oops"}], risks=[{"what": "fine"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])
+        self.assertEqual(folded["blocking"], [])
+        self.assertEqual([f["what"] for f in folded["risks"]], ["oops", "fine"])
+        self.assertEqual(folded["notes"], ["cannot: filed a blocker but declares CAN_BLOCK False; reported as a risk"])
+        self.assertEqual(folded["rules"]["cannot"]["risks"], 2)
+
+    def test_the_registry_is_the_default_and_rules_selects(self):
+        registered = r.evaluate_extra_rules({"name": "c", "location": "us-central1-a"}, {}, self.READ, TARGET, {})
+        self.assertEqual(list(registered["rules"]), [m.RULE_ID for m in r.EXTRA_RULES])
+        self.assertEqual([f["rule"] for f in registered["risks"]], ["zonal-control-plane"])
+        only = r.evaluate_extra_rules({"name": "c", "location": "us-central1-a"}, {}, self.READ, TARGET, {}, rules=[rule_module("other")])
+        self.assertEqual(list(only["rules"]), ["other"])
+        self.assertEqual(only["risks"], [])
+
+    def test_text_set_by_the_rule_is_kept(self):
+        rule = rule_module("pre", evaluate=returning(risks=[{"what": "x", "text": "the rule's own"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])
+        self.assertEqual(folded["risks"][0]["text"], "the rule's own")
+
+
 class VerdictTest(unittest.TestCase):
     CLEAR = {"blocking_exclusions": [], "undecided_exclusions": []}
     NO_SKEW = {"blocking": [], "unknown": []}
@@ -392,6 +483,27 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(r.readiness_status({"blocking": [{"pdb": "a/b"}]}, self.CLEAR, self.NO_SKEW, False), "blocked")
         self.assertEqual(r.readiness_status(None, {"blocking_exclusions": ["x"], "undecided_exclusions": []}, self.NO_SKEW, True), "blocked")
         self.assertEqual(r.readiness_status(None, self.CLEAR, {"blocking": ["p"], "unknown": []}, True), "blocked")
+        rules = {"blocking": [{"rule": "x"}], "risks": [], "unknown": [{"rule": "y", "can_block": True}], "notes": [], "rules": {}}
+        self.assertEqual(r.readiness_status(None, self.CLEAR, self.NO_SKEW, False, rules), "blocked")
+
+    def test_extra_rules_fold_into_the_verdict_by_can_block(self):
+        pdbs = {"blocking": []}
+        clean = {"blocking": [], "risks": [], "unknown": [], "notes": [], "rules": {}}
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, clean), r.READINESS_READY)
+        # Risks and notes never move the verdict.
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "risks": [{"rule": "zonal-control-plane"}], "notes": ["x: y"]}), r.READINESS_READY)
+        # An unknown from a rule that can block is unknown; from one that cannot, it is not.
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "unknown": [{"rule": "surge-capacity", "can_block": True, "reason": "no target"}]}), r.READINESS_UNKNOWN)
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "unknown": [{"rule": "zonal-control-plane", "can_block": False, "reason": "odd"}]}), r.READINESS_READY)
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "unknown": [{"rule": "a", "can_block": False}, {"rule": "b", "can_block": True}]}), r.READINESS_UNKNOWN)
+        # An unknown of another shape counts, the conservative reading.
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "unknown": ["why"]}), r.READINESS_UNKNOWN)
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "unknown": [{"rule": "a"}]}), r.READINESS_UNKNOWN)
+        # Blocked beats an unknown from either kind of rule; the three rules' own unknown still holds.
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, {**clean, "blocking": [{"rule": "x"}], "unknown": [{"rule": "y", "can_block": False}]}), r.READINESS_BLOCKED)
+        self.assertEqual(r.readiness_status(None, self.CLEAR, self.NO_SKEW, True, clean), r.READINESS_UNKNOWN)
+        # None means the per-entry rules did not run; the three rules decide alone.
+        self.assertEqual(r.readiness_status(pdbs, self.CLEAR, self.NO_SKEW, True, None), r.READINESS_READY)
 
 
 if __name__ == "__main__":

@@ -15,10 +15,21 @@ three rules are the ones the governance SOPs define in prose:
   instant, §3.7;
 - node-pool version skew against the target control plane, §3.2: more than two minors, or
   a different major, blocks the control-plane upgrade until the pool moves.
+
+After those three, `evaluate_extra_rules` runs every module registered in `EXTRA_RULES`, one
+per entry of docs/designs/upgrade-failure-catalogue.md under `readiness_rules/`, whose
+package docstring is the contract a module meets. The fold stamps each finding with its
+rule; a rule's `blocking` joins the `blocked` verdict, an `unknown` from a rule that can block
+joins `unknown`, its `risks` the member's risks list, which the table and the report print
+under "risks", and its `notes` the note column. A rule that raises is one `unknown` finding,
+never a crash.
 """
 
 import re
 from datetime import datetime, time, timedelta, timezone
+
+import readiness_rules
+from readiness_rules import zonal_control_plane
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -123,6 +134,35 @@ SKEW_NOT_APPLICABLE = "n/a"
 SKEW_AUTOPILOT_REASON = "Autopilot: Google owns the node pools"
 SKEW_NO_TARGET_REASON = "no target to measure against"
 SKEW_MAJOR_DIFFERS = "major version differs from the target"
+
+# The per-entry rules (readiness_rules/, one module per entry of the upgrade-failure
+# catalogue; the package docstring is the contract), run after the three rules above, in
+# this order, which is the order the table and the JSON list their findings in. One list,
+# grouped by entry number, the entry in the comment.
+EXTRA_RULES = [
+    zonal_control_plane,  # entry 11
+]
+RULE_RESULT_KEYS = readiness_rules.RESULT_KEYS
+# What the fold stamps on a finding: the rule's id and entry on every one, the rule's own
+# rendering (`text`) on a blocker or risk and on an `unknown` entry (the note line), the
+# `reason` an `unknown` entry carries, and whether the rule could have blocked, which is
+# what decides whether its `unknown` moves the verdict.
+RULE_KEY = "rule"
+ENTRY_KEY = "entry"
+TEXT_KEY = "text"
+REASON_KEY = "reason"
+DETAIL_KEY = "detail"
+CAN_BLOCK_KEY = "can_block"
+RULE_ID_ATTRIBUTE = "RULE_ID"
+ENTRY_ATTRIBUTE = "ENTRY"
+CAN_BLOCK_ATTRIBUTE = "CAN_BLOCK"
+# What names a rule that has no RULE_ID: its module name, for the unknown entry it earns.
+MODULE_NAME_ATTRIBUTE = "__name__"
+RULE_PREFIX_FORMAT = "{rule}: {text}"
+RULE_FAILED_REASON = "rule raised {error}; not evaluated"
+# A rule that declares it cannot block and files a blocker anyway: the finding is kept as
+# a risk, and the note says so, so the invariant holds and the defect is visible.
+DEMOTED_BLOCKER_NOTE = "filed a blocker but declares CAN_BLOCK False; reported as a risk"
 
 
 # ---------------------------------------------------------------------------- PDBs
@@ -578,14 +618,89 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
     }
 
 
+# --------------------------------------------------------------------- extra rules
+
+
+def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
+    """One `unknown` entry as the JSON carries it: a dict with `reason`, the rule's id and
+    entry, whether the rule could have blocked, and the `text` the note column prints."""
+    out = dict(item) if isinstance(item, dict) else {}
+    reason = out.get(REASON_KEY) or out.get(DETAIL_KEY) or str(item)
+    out[REASON_KEY] = reason
+    out[RULE_KEY] = rule_id
+    out[ENTRY_KEY] = entry
+    out[CAN_BLOCK_KEY] = can_block
+    out[TEXT_KEY] = RULE_PREFIX_FORMAT.format(rule=rule_id, text=reason)
+    return out
+
+
+def _rule_result(rule, cluster: dict, member: dict, read, target, context: dict) -> dict:
+    """One rule's result, every key a list, each blocker and risk carrying its `text`.
+    Raises whatever the rule raises; the caller turns that into the rule's `unknown`."""
+    result = rule.evaluate(cluster, member, read, target, context) or {}
+    out = {key: list(result.get(key) or []) for key in RULE_RESULT_KEYS}
+    for finding in out["blocking"] + out["risks"]:
+        if TEXT_KEY not in finding:
+            finding[TEXT_KEY] = rule.describe(finding)
+    return out
+
+
+def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dict, rules: list | None = None) -> dict:
+    """Every registered rule (or `rules`) over one member, folded.
+
+    Returns the four result lists joined across rules in registration order, each blocker
+    and risk stamped with its `rule`, `entry` and `text`, each `unknown` entry a dict with
+    `reason`, `can_block` and the `text` the note column prints, each note prefixed with
+    its rule's id; and `rules`, per rule id, the rule's `entry`, `can_block` and a count per
+    list, so the findings are serialised once. A rule that raises is one `unknown` entry
+    naming the error, never a crash: one rule's defect must not hide the others' findings. A
+    blocker from a rule whose `CAN_BLOCK` is False is kept as a risk, with a note.
+    """
+    folded = {key: [] for key in RULE_RESULT_KEYS}
+    folded["rules"] = {}
+    for rule in EXTRA_RULES if rules is None else rules:
+        rule_id = getattr(rule, RULE_ID_ATTRIBUTE, getattr(rule, MODULE_NAME_ATTRIBUTE, str(rule)))
+        entry = getattr(rule, ENTRY_ATTRIBUTE, None)
+        can_block = bool(getattr(rule, CAN_BLOCK_ATTRIBUTE, True))
+        try:
+            result = _rule_result(rule, cluster, member, read, target, context)
+        except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
+            result = {key: [] for key in RULE_RESULT_KEYS}
+            result["unknown"] = [RULE_FAILED_REASON.format(error=repr(e))]
+        if not can_block and result["blocking"]:
+            result["risks"] = result["blocking"] + result["risks"]
+            result["blocking"] = []
+            result["notes"].append(DEMOTED_BLOCKER_NOTE)
+        for finding in result["blocking"] + result["risks"]:
+            finding[RULE_KEY] = rule_id
+            finding[ENTRY_KEY] = entry
+        result["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in result["unknown"]]
+        result["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=note) for note in result["notes"]]
+        folded["rules"][rule_id] = {ENTRY_KEY: entry, CAN_BLOCK_KEY: can_block, **{key: len(result[key]) for key in RULE_RESULT_KEYS}}
+        for key in RULE_RESULT_KEYS:
+            folded[key].extend(result[key])
+    return folded
+
+
+def _unknown_moves_verdict(item) -> bool:
+    """An `unknown` entry moves the verdict unless its rule declared it cannot block; an
+    entry of another shape counts, the conservative reading."""
+    return bool(item.get(CAN_BLOCK_KEY, True)) if isinstance(item, dict) else True
+
+
 # ------------------------------------------------------------------------- verdict
 
 
-def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool) -> str:
+def readiness_status(pdbs: dict | None, maintenance: dict, skew: dict, target_known: bool, rules: dict | None = None) -> str:
     """`blocked` beats `unknown` beats `ready`: a definite blocker is reported whatever else
-    could not be evaluated, and a member is `ready` only when every rule was evaluated."""
-    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"]:
+    could not be evaluated, and a member is `ready` only when every rule was evaluated.
+    `rules` is `evaluate_extra_rules`' result: its `blocking` blocks, an `unknown` entry from
+    a rule that can block is unknown, an `unknown` from one that cannot is reported and moves
+    nothing, and its `risks` and `notes` never move the verdict."""
+    if (pdbs and pdbs["blocking"]) or maintenance["blocking_exclusions"] or skew["blocking"] or (rules and rules["blocking"]):
         return READINESS_BLOCKED
     if pdbs is None or not target_known or maintenance["undecided_exclusions"] or skew["unknown"]:
+        return READINESS_UNKNOWN
+    if rules and any(_unknown_moves_verdict(item) for item in rules["unknown"]):
         return READINESS_UNKNOWN
     return READINESS_READY
