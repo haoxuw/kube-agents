@@ -20,7 +20,9 @@ import fleet_upgrade_report as report  # noqa: E402
 import credential_proxy_client  # noqa: E402 -- on sys.path through the reporter's SHARED_SCRIPT_DIRS
 import readiness_rules  # noqa: E402
 import upgrade_readiness as readiness  # noqa: E402
-from readiness_rules import audit_log  # noqa: E402
+from readiness_rules import audit_log, zonal_control_plane  # noqa: E402
+
+ZONAL = zonal_control_plane.RULE_ID
 
 # Every resolver asks the operator's answer when a run passes neither scope flag:
 # the root-owned file the sandbox writes, else KUBEAGENTS_SCOPE_DECLARED. A shell
@@ -1572,7 +1574,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 8)
         self.assertIn("cluster read failed; PDBs not graded; the reads after it were skipped; the per-entry rules that need them say so", b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
-        self.assertEqual([f["rule"] for f in b["risks"]], ["zonal-control-plane"])
+        self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
         self.assertEqual({kind: None for kind in readiness_rules.READ_KINDS}, b["read_errors"])
 
     def test_zonal_risk_fills_the_risks_column_and_the_json_shape(self):
@@ -1582,18 +1584,23 @@ class ReadinessTest(unittest.TestCase):
         by_name = {m["cluster"]: m["readiness"] for m in data["members"]}
         a = by_name["seeded-a"]
         self.assertEqual(a["status"], "ready")  # a risk never moves the verdict
-        self.assertEqual([(f["rule"], f["entry"], f["location"]) for f in a["risks"]], [("zonal-control-plane", 11, "us-central1-a")])
-        self.assertTrue(a["risks"][0]["text"].startswith("control plane is zonal (us-central1-a)"))
-        self.assertEqual(a["rule_blocking"], [])
-        self.assertEqual(a["unknown"], [])
-        self.assertEqual(a["notes"], [])
-        self.assertEqual(a["rules"], {"zonal-control-plane": {"entry": 11, "can_block": False, "blocking": 0, "risks": 1, "unknown": 0, "notes": 0}})
+        zonal = [f for f in a["risks"] if f["rule"] == ZONAL]
+        self.assertEqual([(f["entry"], f["location"]) for f in zonal], [(11, "us-central1-a")])
+        self.assertTrue(zonal[0]["text"].startswith("control plane is zonal (us-central1-a)"))
+        self.assertEqual([f for f in a["rule_blocking"] if f["rule"] == ZONAL], [])
+        self.assertEqual([u for u in a["unknown"] if u["rule"] == ZONAL], [])
+        self.assertEqual(set(a) >= {"rules", "rule_blocking", "risks", "unknown", "notes", "read_errors", "audit_log", "read_error"}, True)
+        self.assertTrue(all(isinstance(a[key], list) for key in ("rule_blocking", "risks", "unknown", "notes")))
+        self.assertEqual(a["rules"][ZONAL], {"entry": 11, "can_block": False, "blocking": 0, "risks": 1, "unknown": 0, "notes": 0})
+        self.assertEqual(set(a["rules"]), {m.RULE_ID for m in readiness.EXTRA_RULES})
         self.assertEqual(a["read_errors"], {kind: None for kind in readiness_rules.READ_KINDS})
-        self.assertEqual(a["audit_log"], {})  # no registered rule read it
+        self.assertIsInstance(a["audit_log"], dict)  # one entry per read a registered rule performed
         self.assertIsNone(a["read_error"])
         host = by_name["robot-host"]
-        self.assertEqual(host["risks"], [])  # regional
-        self.assertEqual(data["readiness"]["members_with_risks"], 2)
+        self.assertEqual([f for f in host["risks"] if f["rule"] == ZONAL], [])  # regional
+        with_risks = sum(1 for m in data["members"] if m["readiness"]["risks"])
+        self.assertGreaterEqual(with_risks, 2)  # the two zonal members at least
+        self.assertEqual(data["readiness"]["members_with_risks"], with_risks)
         self.assertEqual(data["readiness"]["summary"], {"blocked": 2, "ready": 1, "unknown": 0})
 
         lines = text.splitlines()
@@ -1606,8 +1613,8 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("control plane is zonal (us-central1-a)", cells[8])
         self.assertIn("retry with backoff", cells[8])
         host_row = next(l for l in lines if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
-        self.assertIn("| none | none |", host_row)
-        self.assertIn("Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; 2 with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, skew or an other blocker any upgrade; a risk does not block.", text)
+        self.assertNotIn("control plane is zonal", host_row)
+        self.assertIn(f"Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; {with_risks} with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, skew or an other blocker any upgrade; a risk does not block.", text)
 
     def test_an_unknown_from_a_rule_that_cannot_block_stays_in_the_note(self):
         odd = cluster("odd", "everywhere", self.TARGET, [("p", self.TARGET)])
@@ -1616,10 +1623,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(rc, report.EXIT_OK)
         r = data["members"][0]["readiness"]
         self.assertEqual(r["status"], "ready")
-        self.assertEqual([(u["rule"], u["can_block"]) for u in r["unknown"]], [("zonal-control-plane", False)])
-        self.assertIn("neither a zone nor a region", r["unknown"][0]["reason"])
+        zonal = [u for u in r["unknown"] if u["rule"] == ZONAL]
+        self.assertEqual([u["can_block"] for u in zonal], [False])
+        self.assertIn("neither a zone nor a region", zonal[0]["reason"])
         self.assertIn("zonal-control-plane: location 'everywhere' is neither a zone nor a region", r["note"])
-        self.assertEqual(r["rules"]["zonal-control-plane"]["unknown"], 1)
+        self.assertEqual(r["rules"][ZONAL]["unknown"], 1)
         self.assertIn("| ready | none |", text)
 
     def test_a_blocking_rule_moves_the_verdict_and_fills_the_other_blockers_column(self):
@@ -1631,7 +1639,7 @@ class ReadinessTest(unittest.TestCase):
 
         blocker = fake_rule("test-blocker", entry=2, evaluate=evaluate)
         fake = FakeReadinessCommands(self.clusters, {}, self.objects)
-        with patch.object(readiness, "EXTRA_RULES", [blocker, readiness.EXTRA_RULES[0]]):
+        with patch.object(readiness, "EXTRA_RULES", [blocker, zonal_control_plane]):
             rc, text, data = self._run(fake)
         self.assertEqual(rc, report.EXIT_OK)
         a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]

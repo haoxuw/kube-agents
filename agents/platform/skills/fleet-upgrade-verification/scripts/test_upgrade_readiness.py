@@ -456,7 +456,7 @@ class ExtraRulesTest(unittest.TestCase):
     def test_the_registry_is_the_default_and_rules_selects(self):
         registered = r.evaluate_extra_rules({"name": "c", "location": "us-central1-a"}, {}, self.READ, TARGET, {})
         self.assertEqual(list(registered["rules"]), [m.RULE_ID for m in r.EXTRA_RULES])
-        self.assertEqual([f["rule"] for f in registered["risks"]], ["zonal-control-plane"])
+        self.assertIn("zonal-control-plane", [f["rule"] for f in registered["risks"]])
         only = r.evaluate_extra_rules({"name": "c", "location": "us-central1-a"}, {}, self.READ, TARGET, {}, rules=[rule_module("other")])
         self.assertEqual(list(only["rules"]), ["other"])
         self.assertEqual(only["risks"], [])

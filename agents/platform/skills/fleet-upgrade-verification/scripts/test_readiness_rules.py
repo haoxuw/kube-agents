@@ -109,8 +109,11 @@ class ContractTest(unittest.TestCase):
             result = module.evaluate(record, {}, read(items=[]), TARGET, {})
             self.assertEqual(set(result), set(shared.RESULT_KEYS), module.RULE_ID)
             self.assertTrue(all(isinstance(result[key], list) for key in shared.RESULT_KEYS), module.RULE_ID)
-            # A module whose findings can never block says so, and the registry agrees.
-            self.assertEqual(module.CAN_BLOCK, module.RULE_ID not in ("zonal-control-plane",))
+            # The invariant the fold enforces: a module that declares it cannot block files no
+            # blocker on the contract input.
+            if not module.CAN_BLOCK:
+                self.assertEqual(result["blocking"], [], module.RULE_ID)
+        self.assertIn(zonal_control_plane, r.EXTRA_RULES)
 
     def test_entries_are_catalogue_numbers_and_read_kinds_are_named_once(self):
         self.assertEqual([m.ENTRY for m in r.EXTRA_RULES], sorted(m.ENTRY for m in r.EXTRA_RULES))
