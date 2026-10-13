@@ -1,6 +1,6 @@
 ---
 name: fleet-upgrade-verification
-description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, node-pool version skew, and what the per-entry rules of the upgrade-failure catalogue find, each a blocker or a risk that does not block (a zonal control plane is one). Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get, the audit-log reads a registered rule performs with gcloud logging read, and repository reads, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
+description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, node-pool version skew, and what the per-entry rules of the upgrade-failure catalogue find, each a blocker or a risk that does not block (a zonal control plane is one). Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, plus the audit log through gcloud logging read when a registered rule reads it, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
 ---
 
 # Fleet upgrade verification
@@ -297,9 +297,10 @@ it through the script's own runner, under the same per-call cap. The audit-log r
 rules (`readiness_rules/audit_log.py`) is that kind of read: two paged `gcloud logging read`s per
 member over the seven days ending at `--at`, cached so every rule that asks reads once, and
 writes only, because the Admin Activity log carries no reads, so a caller that only reads an API
-is not in it. Each audit-log read a member performed is listed in the JSON under `audit_log`
-with its commands, entry and page counts, whether it was sampled and its error, and a failed one
-is listed under the table as a read failure and sets exit code 1. Each rule returns blockers,
+is not in it. Each audit-log read a member's rules performed is listed in the JSON under
+`audit_log` (empty for a member whose rules performed none) with its commands, entry and page
+counts, whether it was sampled, its error and the window bounds, and a failed one is listed under
+the table as a read failure and sets exit code 1. Each rule returns blockers,
 risks, reasons it could not decide, and notes, and declares whether it can block at all; a
 blocker joins the verdict, a risk never does, and the table prints them under `other blockers`
 and `risks`, each as its rule describes it. The rules registered today, with the catalogue entry
