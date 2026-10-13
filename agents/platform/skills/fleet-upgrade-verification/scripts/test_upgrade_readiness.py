@@ -573,6 +573,43 @@ class ExtraRulesTest(unittest.TestCase):
         ctx = context()
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("nulling", evaluate=nulling), rule_module("reader", evaluate=reading_with_risk)])
         self.assertEqual(([u["rule"] for u in folded["unknown"]], [f["rule"] for f in folded["risks"]], list(audit_log.summaries(ctx))), (["nulling"], ["reader"], ["removed"]))
+        # The cache is put back on the raising path too, so the raising rule is the one
+        # charged and the next rule reads what `read` stored; and a well-formed overwrite
+        # that drops or changes a stored read is damage, not a clean cache.
+        def damaging_raiser(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"] = None
+            raise ValueError("boom")
+
+        def nulling_raiser(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE] = None
+            raise ValueError("boom")
+
+        def emptying(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = {}
+            return shared.new_result()
+
+        def replacing(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE] = {audit_log.CACHE_KEY: dict(ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY])}
+            return shared.new_result()
+
+        def reading_deprecated(cluster, member, read, target, ctx):
+            audit_log.read_deprecated(ctx)
+            out = shared.new_result()
+            out["risks"].append({"what": "d"})
+            return out
+
+        for name, offender in (("damaging-raiser", damaging_raiser), ("nulling-raiser", nulling_raiser)):
+            ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
+            self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [(name, "rule raised ValueError('boom'); not evaluated")], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
+            self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
+        for name, offender, reason in (("emptying", emptying, "the 'removed' read stored before the rule is gone or changed"), ("replacing", replacing, "the readiness context's cache was replaced")):
+            ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn("the rule left the audit-log cache unreadable: " + reason, folded["unknown"][0]["reason"], name)
+            self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
 
     def test_findings_are_copied_before_they_are_stamped(self):
         shared_finding = {"what": "pool p"}

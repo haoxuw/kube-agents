@@ -241,6 +241,20 @@ SHELL_ARITHMETIC_CLOSE = "))"  # what closes arithmetic; `((` closed by a lone `
 SHELL_ANSI_QUOTE = "$'"  # bash's ANSI-C quoting, a span to the first `'` not escaped
 SHELL_CASE_WORD = "case"  # a `case … esac` inside a substitution: its patterns' `)` close nothing
 SHELL_ESAC_WORD = "esac"
+# Reserved words are words only at command position (the start of a command list, after a
+# separator, a parenthesis, a newline, or one of the words below, after which a command
+# follows); `grep case file` names a file. `coproc` and a process substitution (`<(…)`,
+# `>(…)`) run their command list asynchronously, so each is a fork, emitted as one.
+SHELL_COPROC_WORD = "coproc"
+SHELL_COMMAND_PREFIX_WORDS = ("if", "then", "else", "elif", "while", "until", "do", "{", "!", "time")
+SHELL_COMMAND_SEPARATORS = ";&|"
+SHELL_REDIRECTION_CHARS = "<>"
+SHELL_PROCESS_SUBSTITUTIONS = ("<(", ">(")
+SHELL_FORK_MARK = " & "
+# Substitutions and expansions open at once; deeper is unread. With the end of each
+# arithmetic span memoised per call, the scan is polynomial in the depth, and the cap keeps
+# a crafted container command from costing the report more than a bounded walk.
+SHELL_NESTING_CAP = 64
 PATH_SEPARATOR = "/"
 
 
@@ -631,26 +645,49 @@ def shell_forks(script) -> bool | None:
     is read with the same rules wherever it stands: `$(…)` and backticks in a word, in
     double quotes, in `${…}`, in `$((…))` and in an unquoted heredoc body, so
     `"$(sleep 9 &)"`, `${SIDECAR:-$(sleep 9 &)}` and a heredoc line `$(start-agent &)` fork;
-    a quoted heredoc body is text.
+    a quoted heredoc body is text, and a delimiter is read with its quotes removed across
+    the whole word (`E"O"F` is `EOF`, quoted). A process substitution (`>(…)`, `<(…)`) and
+    `coproc` run their command list asynchronously and are forks.
 
     The scanner reads the script as bash does, which is also how zsh and a busybox ash with
     the bash extensions read it: `((…))` closed by `))` is arithmetic and otherwise two
     subshells (so `((sleep 10; kill 1) &)` forks), `&>` is a redirection, `$'…'` is a quoted
-    string. `sh` on a Debian image is dash, which reads `((x & 1))` as two subshells with a
-    fork inside and `cmd &>f` as `cmd &` then `>f`, two forks the scanner does not report;
-    a rule that grades an `sh -c` script with those two spellings grades it as bash would.
-    A `case … esac` inside a substitution is read as one, its patterns' `)` closing nothing.
+    string, and `case`, `esac` and `coproc` are words only at command position (`grep case
+    file` names a file). `sh` on a Debian image is dash, which reads `((x & 1))` as two
+    subshells with a fork inside and `cmd &>f` as `cmd &` then `>f`, two forks the scanner
+    does not report; a rule that grades an `sh -c` script with those two spellings grades it
+    as bash would. A `case … esac` inside a substitution is read as one, its patterns' `)`
+    closing nothing.
 
     None when the script cannot be read this way: an unterminated quote, heredoc, command
-    substitution or expansion, or a trailing backslash, which a rule reports as unknown,
-    never as clean."""
+    substitution or expansion, a trailing backslash, or substitutions and expansions nested
+    more than SHELL_NESTING_CAP deep, which a rule reports as unknown, never as clean."""
     if not isinstance(script, str):
         return None
-    out: list[str] = []
-    pending: list[tuple[str, bool, bool]] = []  # heredoc delimiters whose bodies start at the next newline: word, strip tabs, quoted
-    if _shell_scan(script, 0, out, pending, None) is None or pending:
+    state = _ShellScan()
+    if _shell_scan(script, 0, state, None) is None or state.pending:
         return None
-    return any(SHELL_FORK_OPERATOR in _shell_operators(run) for run in SHELL_OPERATOR_RUN_RE.findall("".join(out)))
+    return any(SHELL_FORK_OPERATOR in _shell_operators(run) for run in SHELL_OPERATOR_RUN_RE.findall("".join(state.out)))
+
+
+class _ShellScan:
+    """What one `shell_forks` call carries through the scan: the cleaned text (`out`), the
+    heredoc delimiters whose bodies start at the next newline (`pending`: word, strip tabs,
+    quoted), where each arithmetic span was found to end (`arithmetic_ends`, so a nested
+    span answers that question once, not once per level above it), and how many
+    substitutions and expansions are open (`nesting`, capped at SHELL_NESTING_CAP)."""
+
+    __slots__ = ("out", "pending", "arithmetic_ends", "nesting")
+
+    def __init__(self, out=None, pending=None, arithmetic_ends=None, nesting: int = 0):
+        self.out: list[str] = [] if out is None else out
+        self.pending: list[tuple[str, bool, bool]] = [] if pending is None else pending
+        self.arithmetic_ends: dict[int, int | None] = {} if arithmetic_ends is None else arithmetic_ends
+        self.nesting = nesting
+
+    def scratch(self) -> "_ShellScan":
+        """A state that shares the memo and the depth and discards what it emits."""
+        return _ShellScan([], [], self.arithmetic_ends, self.nesting)
 
 
 def _shell_operators(run: str) -> list[str]:
@@ -664,16 +701,19 @@ def _shell_operators(run: str) -> list[str]:
     return out
 
 
-def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str | None) -> int | None:
+def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> int | None:
     """Scans the command list at `i` to the end of `script`, or to the `closer` that ends a
-    command substitution (`)` at its own depth, or a backtick), appending to `out` every
-    character outside a quoted span or an expansion, those as SHELL_NEUTRAL, with comments
-    and heredoc bodies left out, and to `pending` each heredoc delimiter whose body starts
-    at the next newline. Returns the index after the closer (the end, at the top level);
-    None when a quote, expansion or heredoc is unterminated or a backslash ends the script."""
+    command substitution (`)` at its own depth, or a backtick), appending to `state.out`
+    every character outside a quoted span or an expansion, those as SHELL_NEUTRAL, with
+    comments and heredoc bodies left out, and to `state.pending` each heredoc delimiter
+    whose body starts at the next newline. Returns the index after the closer (the end, at
+    the top level); None when a quote, expansion or heredoc is unterminated, a backslash
+    ends the script, or the nesting cap is passed."""
     n = len(script)
+    out = state.out
     depth = 0  # subshell parentheses open in this command list
     case_depth = 0  # `case` statements open: a pattern's `)` then closes no substitution
+    command = True  # at command position, where a reserved word is a word
     while i < n:
         c = script[i]
         if closer == SHELL_BACKTICK and c == SHELL_BACKTICK:
@@ -683,50 +723,64 @@ def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str 
                 return None
             if script[i + 1] != SHELL_NEWLINE:  # a line continuation is nothing; an escaped character is a word character
                 out.append(SHELL_NEUTRAL)
+                command = False
             i += SHELL_ESCAPED_PAIR
         elif script.startswith(SHELL_ANSI_QUOTE, i):
             i = _shell_ansi_quoted(script, i + len(SHELL_ANSI_QUOTE))
             if i is None:
                 return None
             out.append(SHELL_NEUTRAL)
+            command = False
         elif c == SHELL_SINGLE_QUOTE:
             end = script.find(SHELL_SINGLE_QUOTE, i + 1)
             if end < 0:
                 return None
             out.append(SHELL_NEUTRAL)
             i = end + 1
+            command = False
         elif c == SHELL_DOUBLE_QUOTE:
-            i = _shell_double_quoted(script, i + 1, out, pending)
+            i = _shell_double_quoted(script, i + 1, state)
             if i is None:
                 return None
+            command = False
         elif c == SHELL_COMMENT and (not out or out[-1] in SHELL_WORD_BREAKS):
             end = script.find(SHELL_NEWLINE, i)
             i = n if end < 0 else end
         elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
-            i = _shell_expansion(script, i, out, pending)
+            i = _shell_expansion(script, i, state)
             if i is None:
                 return None
+            command = False
         elif script.startswith(SHELL_ARITHMETIC_COMMAND, i):
             start = i + len(SHELL_ARITHMETIC_COMMAND)
-            arithmetic = _shell_closes_arithmetic(script, start)
+            arithmetic = _shell_closes_arithmetic(script, start, state)
             if arithmetic is None:
                 return None
             if arithmetic:
-                i = _shell_balanced(script, start, SHELL_OPEN_PAREN, SHELL_CLOSE_PAREN, SHELL_ARITHMETIC_DEPTH, out, pending)
+                i = _shell_arithmetic_span(script, start, state)
                 if i is None:
                     return None
-                out.append(SHELL_NEUTRAL)
+                command = False
             else:  # `((` closed by a lone `)`: a subshell in a subshell, as bash reads it; the second `(` is read next
                 depth += 1
                 out.append(SHELL_OPEN_PAREN)
                 i += 1
+                command = True
         elif script.startswith(SHELL_COMMAND_SUBSTITUTION, i) or c == SHELL_BACKTICK:
-            i = _shell_substitution(script, i, out, pending)
+            i = _shell_substitution(script, i, state)
             if i is None:
                 return None
+            command = False
+        elif script.startswith(SHELL_PROCESS_SUBSTITUTIONS, i):  # run asynchronously: a fork, then its command list
+            out.extend(SHELL_FORK_MARK)
+            i = _shell_nested_list(script, i + len(SHELL_PROCESS_SUBSTITUTIONS[0]), SHELL_CLOSE_PAREN, state)
+            if i is None:
+                return None
+            command = False
         elif script.startswith(SHELL_HERESTRING_OPERATOR, i):  # a here-string's word is an ordinary word
             out.extend(SHELL_HERESTRING_OPERATOR)
             i += len(SHELL_HERESTRING_OPERATOR)
+            command = False
         elif script.startswith(SHELL_HEREDOC_OPERATOR, i):
             out.extend(SHELL_HEREDOC_OPERATOR)
             i += len(SHELL_HEREDOC_OPERATOR)
@@ -739,31 +793,43 @@ def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str 
             if word is None:
                 return None
             out.append(SHELL_NEUTRAL)
-            pending.append((word, strip_tabs, quoted))
+            state.pending.append((word, strip_tabs, quoted))
+            command = False
         elif c == SHELL_NEWLINE:
             out.append(c)
             i += 1
-            while pending:
-                word, strip_tabs, quoted = pending.pop(0)
+            while state.pending:
+                word, strip_tabs, quoted = state.pending.pop(0)
                 body = _shell_heredoc_end(script, i, word, strip_tabs)
                 if body is None:
                     return None
                 body_end, resume = body
-                if not quoted and _shell_heredoc_body(script[i:body_end], out) is None:
+                if not quoted and _shell_heredoc_body(script[i:body_end], state) is None:
                     return None
                 i = resume
-        elif _shell_word_at(script, i, SHELL_CASE_WORD, out):
+            command = True
+        elif command and _shell_word_at(script, i, SHELL_CASE_WORD, out):
             case_depth += 1
             out.extend(SHELL_CASE_WORD)
             i += len(SHELL_CASE_WORD)
-        elif _shell_word_at(script, i, SHELL_ESAC_WORD, out):
+            command = False
+        elif command and _shell_word_at(script, i, SHELL_ESAC_WORD, out):
             case_depth = max(case_depth - 1, 0)
             out.extend(SHELL_ESAC_WORD)
             i += len(SHELL_ESAC_WORD)
+            command = False
+        elif command and _shell_word_at(script, i, SHELL_COPROC_WORD, out):  # runs its command asynchronously: a fork
+            out.extend(SHELL_FORK_MARK)
+            out.extend(SHELL_COPROC_WORD)
+            i += len(SHELL_COPROC_WORD)
+        elif command and (prefix := _shell_prefix_word_at(script, i, out)) is not None:  # a command follows the word
+            out.extend(prefix)
+            i += len(prefix)
         elif c == SHELL_OPEN_PAREN:
             depth += 1
             out.append(c)
             i += 1
+            command = True
         elif c == SHELL_CLOSE_PAREN:
             if closer == SHELL_CLOSE_PAREN and depth == 0 and case_depth == 0:
                 return i + 1
@@ -771,9 +837,22 @@ def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str 
                 depth -= 1
             out.append(c)
             i += 1
+            command = True
+        elif c in SHELL_COMMAND_SEPARATORS:
+            out.append(c)
+            i += 1
+            command = True
+        elif c in SHELL_REDIRECTION_CHARS:  # a file name follows, not a command
+            out.append(c)
+            i += 1
+            command = False
+        elif c in SHELL_BLANKS:
+            out.append(c)
+            i += 1
         else:
             out.append(c)
             i += 1
+            command = False
     return None if closer is not None else n
 
 
@@ -782,6 +861,14 @@ def _shell_word_at(script: str, i: int, word: str, out: list[str]) -> bool:
     what was scanned, and one (or the end) after it."""
     end = i + len(word)
     return script.startswith(word, i) and (not out or out[-1] in SHELL_WORD_BREAKS) and (end >= len(script) or script[end] in SHELL_WORD_BREAKS)
+
+
+def _shell_prefix_word_at(script: str, i: int, out: list[str]) -> str | None:
+    """The reserved word at `i` after which a command follows, or None."""
+    for word in SHELL_COMMAND_PREFIX_WORDS:
+        if _shell_word_at(script, i, word, out):
+            return word
+    return None
 
 
 def _shell_ansi_quoted(script: str, i: int) -> int | None:
@@ -798,24 +885,24 @@ def _shell_ansi_quoted(script: str, i: int) -> int | None:
     return None
 
 
-def _shell_double_quoted(script: str, i: int, out: list[str], pending: list) -> int | None:
+def _shell_double_quoted(script: str, i: int, state: _ShellScan) -> int | None:
     """The index after the double quote that closes the span open before `i`, the span one
-    neutral character in `out` except the command lists in it, which are scanned; None when
-    the quote never closes."""
+    neutral character in `state.out` except the command lists in it, which are scanned;
+    None when the quote never closes."""
     n = len(script)
     while i < n:
         c = script[i]
         if c == SHELL_DOUBLE_QUOTE:
-            out.append(SHELL_NEUTRAL)
+            state.out.append(SHELL_NEUTRAL)
             return i + 1
         if c == SHELL_ESCAPE:
             i += SHELL_ESCAPED_PAIR
         elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
-            i = _shell_expansion(script, i, out, pending)
+            i = _shell_expansion(script, i, state)
             if i is None:
                 return None
         elif script.startswith(SHELL_COMMAND_SUBSTITUTION, i) or c == SHELL_BACKTICK:
-            i = _shell_substitution(script, i, out, pending)
+            i = _shell_substitution(script, i, state)
             if i is None:
                 return None
         else:
@@ -823,114 +910,153 @@ def _shell_double_quoted(script: str, i: int, out: list[str], pending: list) -> 
     return None
 
 
-def _shell_closes_arithmetic(script: str, start: int) -> bool | None:
+def _shell_closes_arithmetic(script: str, start: int, state: _ShellScan) -> bool | None:
     """Whether the `((` whose contents start at `start` is closed by `))`, which makes it
     arithmetic, rather than by a lone `)`, which makes it two parentheses; None when it
-    never closes."""
-    end = _shell_balanced(script, start, SHELL_OPEN_PAREN, SHELL_CLOSE_PAREN, SHELL_ARITHMETIC_DEPTH, [], [])
+    never closes. Where the span ends is memoised in the state, so a span nested in others
+    answers once however many levels ask."""
+    if start not in state.arithmetic_ends:
+        state.arithmetic_ends[start] = _shell_balanced(script, start, SHELL_OPEN_PAREN, SHELL_CLOSE_PAREN, SHELL_ARITHMETIC_DEPTH, state.scratch())
+    end = state.arithmetic_ends[start]
     if end is None:
         return None
     return script[end - len(SHELL_ARITHMETIC_CLOSE) : end] == SHELL_ARITHMETIC_CLOSE
 
 
-def _shell_expansion(script: str, i: int, out: list[str], pending: list) -> int | None:
-    """The index after the parameter expansion `${…}` or arithmetic expansion `$((…))` at
-    `i`, one neutral character in `out` with the command lists inside it scanned; `$((` not
-    closed by `))` is `$(` opening a subshell, as bash reads it. None when it never closes."""
-    if script.startswith(SHELL_PARAMETER_EXPANSION, i):
-        end = _shell_balanced(script, i + len(SHELL_PARAMETER_EXPANSION), SHELL_OPEN_BRACE, SHELL_CLOSE_BRACE, 1, out, pending)
-    else:
-        start = i + len(SHELL_ARITHMETIC_EXPANSION)
-        arithmetic = _shell_closes_arithmetic(script, start)
-        if arithmetic is None:
-            return None
-        if not arithmetic:
-            return _shell_substitution(script, i, out, pending)
-        end = _shell_balanced(script, start, SHELL_OPEN_PAREN, SHELL_CLOSE_PAREN, SHELL_ARITHMETIC_DEPTH, out, pending)
+def _shell_arithmetic_span(script: str, start: int, state: _ShellScan) -> int | None:
+    """The index after the arithmetic span whose contents start at `start`, the span one
+    neutral character in `state.out` with the command lists inside it scanned."""
+    end = _shell_balanced(script, start, SHELL_OPEN_PAREN, SHELL_CLOSE_PAREN, SHELL_ARITHMETIC_DEPTH, state)
     if end is None:
         return None
-    out.append(SHELL_NEUTRAL)
+    state.out.append(SHELL_NEUTRAL)
     return end
 
 
-def _shell_balanced(script: str, i: int, opener: str, closer: str, depth: int, out: list[str], pending: list) -> int | None:
+def _shell_expansion(script: str, i: int, state: _ShellScan) -> int | None:
+    """The index after the parameter expansion `${…}` or arithmetic expansion `$((…))` at
+    `i`, one neutral character in `state.out` with the command lists inside it scanned;
+    `$((` not closed by `))` is `$(` opening a subshell, as bash reads it. None when it
+    never closes."""
+    if script.startswith(SHELL_PARAMETER_EXPANSION, i):
+        end = _shell_balanced(script, i + len(SHELL_PARAMETER_EXPANSION), SHELL_OPEN_BRACE, SHELL_CLOSE_BRACE, 1, state)
+        if end is None:
+            return None
+        state.out.append(SHELL_NEUTRAL)
+        return end
+    start = i + len(SHELL_ARITHMETIC_EXPANSION)
+    arithmetic = _shell_closes_arithmetic(script, start, state)
+    if arithmetic is None:
+        return None
+    if not arithmetic:
+        return _shell_substitution(script, i, state)
+    return _shell_arithmetic_span(script, start, state)
+
+
+def _shell_balanced(script: str, i: int, opener: str, closer: str, depth: int, state: _ShellScan) -> int | None:
     """The index after the `closer` that brings the span open at `i` (`depth` already open)
     to zero, skipping its text as a word while scanning the command lists in it (`$(…)`,
-    backticks, those inside double quotes or nested expansions) into `out`; None when it
-    never closes."""
-    n = len(script)
-    while i < n:
-        c = script[i]
-        if c == SHELL_ESCAPE:
-            i += SHELL_ESCAPED_PAIR
-        elif script.startswith(SHELL_ANSI_QUOTE, i):
-            i = _shell_ansi_quoted(script, i + len(SHELL_ANSI_QUOTE))
-            if i is None:
-                return None
-        elif c == SHELL_SINGLE_QUOTE:
-            end = script.find(SHELL_SINGLE_QUOTE, i + 1)
-            if end < 0:
-                return None
-            i = end + 1
-        elif c == SHELL_DOUBLE_QUOTE:
-            i = _shell_double_quoted(script, i + 1, out, pending)
-            if i is None:
-                return None
-        elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
-            i = _shell_expansion(script, i, out, pending)
-            if i is None:
-                return None
-        elif script.startswith(SHELL_COMMAND_SUBSTITUTION, i) or c == SHELL_BACKTICK:
-            i = _shell_substitution(script, i, out, pending)
-            if i is None:
-                return None
-        elif c == opener:
-            depth += 1
-            i += 1
-        elif c == closer:
-            depth -= 1
-            i += 1
-            if depth == 0:
-                return i
-        else:
-            i += 1
-    return None
-
-
-def _shell_substitution(script: str, i: int, out: list[str], pending: list) -> int | None:
-    """The index after the command substitution at `i` (`$(…)` or backticks), its command
-    list scanned into `out` between an opening parenthesis (so a comment may start it) and
-    a neutral character (so its last operator does not run into the next); None when it
-    never closes."""
-    if script.startswith(SHELL_COMMAND_SUBSTITUTION, i):
-        start, closer = i + len(SHELL_COMMAND_SUBSTITUTION), SHELL_CLOSE_PAREN
-    else:
-        start, closer = i + len(SHELL_BACKTICK), SHELL_BACKTICK
-    out.append(SHELL_OPEN_PAREN)
-    end = _shell_scan(script, start, out, pending, closer)
-    if end is None:
+    backticks, those inside double quotes or nested expansions) into `state.out`; None
+    when it never closes or the nesting cap is passed."""
+    state.nesting += 1
+    try:
+        if state.nesting > SHELL_NESTING_CAP:
+            return None
+        n = len(script)
+        while i < n:
+            c = script[i]
+            if c == SHELL_ESCAPE:
+                i += SHELL_ESCAPED_PAIR
+            elif script.startswith(SHELL_ANSI_QUOTE, i):
+                i = _shell_ansi_quoted(script, i + len(SHELL_ANSI_QUOTE))
+                if i is None:
+                    return None
+            elif c == SHELL_SINGLE_QUOTE:
+                end = script.find(SHELL_SINGLE_QUOTE, i + 1)
+                if end < 0:
+                    return None
+                i = end + 1
+            elif c == SHELL_DOUBLE_QUOTE:
+                i = _shell_double_quoted(script, i + 1, state)
+                if i is None:
+                    return None
+            elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
+                i = _shell_expansion(script, i, state)
+                if i is None:
+                    return None
+            elif script.startswith(SHELL_COMMAND_SUBSTITUTION, i) or c == SHELL_BACKTICK:
+                i = _shell_substitution(script, i, state)
+                if i is None:
+                    return None
+            elif c == opener:
+                depth += 1
+                i += 1
+            elif c == closer:
+                depth -= 1
+                i += 1
+                if depth == 0:
+                    return i
+            else:
+                i += 1
         return None
-    out.append(SHELL_NEUTRAL)
-    return end
+    finally:
+        state.nesting -= 1
+
+
+def _shell_substitution(script: str, i: int, state: _ShellScan) -> int | None:
+    """The index after the command substitution at `i` (`$(…)` or backticks), its command
+    list scanned; None when it never closes."""
+    if script.startswith(SHELL_COMMAND_SUBSTITUTION, i):
+        return _shell_nested_list(script, i + len(SHELL_COMMAND_SUBSTITUTION), SHELL_CLOSE_PAREN, state)
+    return _shell_nested_list(script, i + len(SHELL_BACKTICK), SHELL_BACKTICK, state)
+
+
+def _shell_nested_list(script: str, start: int, closer: str, state: _ShellScan) -> int | None:
+    """The index after the embedded command list starting at `start` and ending at
+    `closer`, scanned into `state.out` between an opening parenthesis (so a comment may
+    start it) and a neutral character (so its last operator does not run into the next);
+    None when it never closes or the nesting cap is passed."""
+    state.nesting += 1
+    try:
+        if state.nesting > SHELL_NESTING_CAP:
+            return None
+        state.out.append(SHELL_OPEN_PAREN)
+        end = _shell_scan(script, start, state, closer)
+        if end is None:
+            return None
+        state.out.append(SHELL_NEUTRAL)
+        return end
+    finally:
+        state.nesting -= 1
 
 
 def _shell_heredoc_word(script: str, i: int) -> tuple[str | None, int, bool]:
-    """The heredoc delimiter at `i`, where it ends, and whether it was quoted (quotes or a
-    backslash, which makes the body text rather than a subject of expansion); the word is
-    None for an empty or unterminated one."""
+    """The heredoc delimiter at `i` as the shell reads it, its quotes removed across the
+    whole word (`E"O"F` is `EOF`), where it ends, and whether any part was quoted (quotes
+    or a backslash), which makes the body text rather than a subject of expansion; the word
+    is None for an empty or unterminated one."""
     n = len(script)
-    if i < n and script[i] in SHELL_QUOTES:
-        end = script.find(script[i], i + 1)
-        if end < 0 or SHELL_NEWLINE in script[i + 1 : end]:
-            return None, i, True
-        return script[i + 1 : end] or None, end + 1, True
-    quoted = script.startswith(SHELL_ESCAPE, i)
-    if quoted:
-        i += 1
-    start = i
-    while i < n and script[i] not in SHELL_WORD_BREAKS and script[i] not in SHELL_QUOTES:
-        i += 1
-    return script[start:i] or None, i, quoted
+    parts: list[str] = []
+    quoted = False
+    while i < n and script[i] not in SHELL_WORD_BREAKS:
+        c = script[i]
+        if c in SHELL_QUOTES:
+            end = script.find(c, i + 1)
+            if end < 0 or SHELL_NEWLINE in script[i + 1 : end]:
+                return None, i, True
+            parts.append(script[i + 1 : end])
+            quoted = True
+            i = end + 1
+        elif c == SHELL_ESCAPE:
+            if i + 1 >= n:
+                return None, i, True
+            parts.append(script[i + 1])
+            quoted = True
+            i += SHELL_ESCAPED_PAIR
+        else:
+            parts.append(c)
+            i += 1
+    return "".join(parts) or None, i, quoted
 
 
 def _shell_heredoc_end(script: str, i: int, word: str, strip_tabs: bool) -> tuple[int, int] | None:
@@ -946,23 +1072,23 @@ def _shell_heredoc_end(script: str, i: int, word: str, strip_tabs: bool) -> tupl
         i = end + 1
 
 
-def _shell_heredoc_body(body: str, out: list[str]) -> int | None:
+def _shell_heredoc_body(body: str, state: _ShellScan) -> int | None:
     """An unquoted heredoc body: text, except the command lists it embeds (`$(…)`,
     backticks, those inside `${…}` and `$((…))`), which the shell runs and which are
-    scanned into `out`; a backslash escapes the next character. None when a command list
-    in it never closes."""
-    pending: list = []
+    scanned into `state.out`; a backslash escapes the next character. None when a command
+    list in it never closes."""
+    inner = _ShellScan(state.out, [], {}, state.nesting)  # the body is another string: its own memo, no heredocs of its own
     j, n = 0, len(body)
     while j < n:
         c = body[j]
         if c == SHELL_ESCAPE:
             j += SHELL_ESCAPED_PAIR
         elif body.startswith(SHELL_ARITHMETIC_EXPANSION, j) or body.startswith(SHELL_PARAMETER_EXPANSION, j):
-            j = _shell_expansion(body, j, out, pending)
+            j = _shell_expansion(body, j, inner)
         elif body.startswith(SHELL_COMMAND_SUBSTITUTION, j) or c == SHELL_BACKTICK:
-            j = _shell_substitution(body, j, out, pending)
+            j = _shell_substitution(body, j, inner)
         else:
             j += 1
         if j is None:
             return None
-    return None if pending else n
+    return None if inner.pending else n

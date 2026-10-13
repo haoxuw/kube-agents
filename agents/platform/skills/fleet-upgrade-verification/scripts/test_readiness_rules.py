@@ -5,6 +5,7 @@ here, on canned cluster records and kubectl objects."""
 
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -420,6 +421,14 @@ class ShapeTablesTest(unittest.TestCase):
             'echo "$(case $MODE in dev) sleep 9 & ;; esac)"',
             "exec ${X:-$(case $m in a) sleep 1 & ;; esac)} app",
             "cat <<EOF\n$(case $m in a) sleep 1 & ;; esac)\nEOF\n",
+            # A process substitution and `coproc` run their command list asynchronously; a
+            # `case` that is an argument is a word, so the fork after it is read.
+            "exec > >(tee -a /var/log/app.log) 2>&1; ./app",
+            "diff <(a) <(b)",
+            "coproc tee -a log",
+            'echo "$(grep case app.log)"; sleep 9 &',
+            'cat <<E"O"F\nx\nEOF\nsleep 1 &',
+            "if true; then coproc sleep 9; fi",
         )
         not_forks = (
             "a && b",
@@ -465,6 +474,15 @@ class ShapeTablesTest(unittest.TestCase):
             'echo "$(case $x in a|b) echo ok;; *) echo no;; esac)"',
             "x=$(case $1 in (a) echo a;; esac); echo $x",
             'echo "$(case $x in a) (b);; esac)"',
+            # `case` is a word away from command position; a half-quoted delimiter is `EOF`,
+            # quoted; three nested arithmetic levels are words.
+            "x=$(grep -c case file); exec app",
+            "$(find . -name case) && exec app",
+            'echo "$(grep case app.log)"',
+            "case $x in a) echo case;; esac",
+            'cat <<E"O"F\n$(start-agent &)\nEOF\necho done',
+            "echo $(($(($((1))))))",
+            "cmd < file; cat > case",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
@@ -472,8 +490,14 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertIs(shared.shell_forks(text), False, text)
         # What cannot be read this way is unread, never clean: an unterminated quote or
         # heredoc, a trailing backslash, no script at all.
-        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", 'echo "$(case $x in a) echo', None, 3):
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", 'echo "$(case $x in a) echo', "echo " + "$((" * 70 + "1" + "))" * 70, None, 3):
             self.assertIsNone(shared.shell_forks(text), text)
+        # A span nested forty deep is walked a bounded number of times, not once per level
+        # above it; past the nesting cap the script is unread.
+        started = time.perf_counter()
+        self.assertIs(shared.shell_forks("echo " + "$((" * 40 + "1" + "))" * 40), False)
+        self.assertIs(shared.shell_forks("echo " + "$(" * 40 + "sleep 1 &" + ")" * 40), True)
+        self.assertLess(time.perf_counter() - started, 1.0)
         self.assertFalse(hasattr(tables, "SHELL_FORK_RE") or hasattr(tables, "SHELL_QUOTED_SPAN_RE"))
 
     def test_stateful_volume_names_match_how_the_database_charts_spell_them(self):

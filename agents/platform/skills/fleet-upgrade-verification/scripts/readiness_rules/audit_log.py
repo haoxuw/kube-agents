@@ -173,6 +173,8 @@ LOG_NOT_A_READ = "cache[{key!r}][{read!r}] is not the read's result: {detail}"
 LOG_WRONG_TYPE = "{type}, not a dict"
 LOG_WRONG_READ = "its `read` is not {read!r}"
 LOG_MISSING_KEYS = "missing {keys}"
+CACHE_REPLACED = "the readiness context's cache was replaced"
+READ_LOST = "the {read!r} read stored before the rule is gone or changed"
 STDERR_EXCERPT_CHARS = 300
 STDERR_JOIN = " "
 NO_STDERR = "no stderr"
@@ -530,8 +532,9 @@ def cache_defect(context) -> str | None:
     cache must be a dict, its `audit_log` entry a dict keyed by read name, and each value a
     read result: a dict whose `read` is that name, carrying every summary key, JSON values
     with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
-    a rule runs, and a defect the rule left (`cache_changed`) is the rule's `unknown`, with
-    the cache put back (`cache_restore`) so no later rule or reader meets it."""
+    a rule runs, and damage the rule left (`cache_damage`: this, or a stored read gone or
+    changed) is the rule's `unknown`, with the cache put back (`cache_restore`) whether the
+    rule returned or raised, so no later rule or reader meets it."""
     if not isinstance(context, dict) or CONTEXT_CACHE not in context:
         return None
     cache = context[CONTEXT_CACHE]
@@ -567,7 +570,7 @@ def _read_result_defect(which, log) -> str | None:
 
 
 def cache_snapshot(context) -> tuple:
-    """The audit-log cache as it stands, for `cache_changed` and `cache_restore` around a
+    """The audit-log cache as it stands, for `cache_damage` and `cache_restore` around a
     rule: the context's cache object (None when the context has none) and a deep copy of
     its `audit_log` entry (None when absent)."""
     cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
@@ -575,12 +578,22 @@ def cache_snapshot(context) -> tuple:
     return cache, copy.deepcopy(logs)
 
 
-def cache_changed(context, snapshot) -> bool:
-    """Whether the audit-log cache differs from `snapshot`: another cache object under the
-    context key, or another `audit_log` entry by value."""
+def cache_damage(context, snapshot) -> str | None:
+    """Why the audit-log cache is not as `snapshot` left it plus what `read` added, or None:
+    a shape defect (`cache_defect`), the cache object replaced, or a read stored before the
+    rule now gone or changed. A rule may add reads; it may not alter or drop the ones
+    already stored, however well-formed what it writes."""
     cache, logs = snapshot
     now_cache, now_logs = cache_snapshot(context)
-    return now_cache is not cache or now_logs != logs
+    defect = cache_defect(context)
+    if defect is not None:  # a defect the rule inherited and left as it was is not the rule's
+        return defect if (now_cache is not cache or now_logs != logs) else None
+    if cache is not None and now_cache is not cache:
+        return CACHE_REPLACED
+    for which, log in (logs.items() if isinstance(logs, dict) else ()):
+        if not isinstance(now_logs, dict) or which not in now_logs or now_logs[which] != log:
+            return READ_LOST.format(read=which)
+    return None
 
 
 def cache_restore(context, snapshot) -> None:
