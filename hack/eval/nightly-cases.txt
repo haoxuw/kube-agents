@@ -371,6 +371,16 @@
 # lists on 2026-10-15, after the rebase onto `02f251ff`: seventy-nine cases
 # (237 units) here, of a ninety-three-case, 279-unit matrix, the paragraphs
 # above included.
+#
+# 2026-10-13 adds upgrades-deprecated-api-caller-named,
+# upgrades-pod-security-latest-pinned-named and upgrades-stale-client-skew-named
+# (rebased past the zonal and stop-on-permission-refusal entries above): three
+# cases, nine units at the 200s default (read-only chat turns; the readiness
+# report adds two paged `gcloud logging read`s per cluster, each call under its
+# 60-second cap). deployer: noop, so the infra lock is untouched. They are the
+# last three entries below. Counted over every entry below on 2026-10-15, after
+# the rebase onto `02f251ff`: eighty-two cases (246 units) here, of a
+# ninety-six-case, 288-unit matrix with the presubmit file's fourteen.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -985,3 +995,30 @@
 # and no delegated worker retries the change another way after it (the
 # order-aware worker_commands check, #2173). deployer: noop, transcript-only.
 ./tasks/stop-on-permission-refusal/task.yaml
+
+# Upgrade-failure catalogue entry 9 (a feature is deprecated but still served):
+# the audit log's k8s.io/deprecated stamps on seeded-a's legacy-endpoints-writer,
+# read through the readiness report's deprecated-api-callers rule or by hand,
+# graded on a declared line per seeded cluster. deployer: noop; reads the
+# deprecated-api-caller role and the three slot roles beside it, mutates
+# nothing. Nightly from its first merge; a presubmit seat is a later pull
+# request that cites its record.
+./tasks/upgrades-deprecated-api-caller-named/task.yaml
+
+# Upgrade-failure catalogue entry 8 (a default changes in the new minor): the
+# seeded-defaults namespace on seeded-a, whose Pod Security Admission version
+# follows the running minor, read from the namespace labels or through the
+# readiness report's changed-defaults rule, graded on a declared line per such
+# namespace. deployer: noop; reads the moving-admission-default role, mutates
+# nothing. Nightly from its first merge; a presubmit seat is a later pull
+# request that cites its record.
+./tasks/upgrades-pod-security-latest-pinned-named/task.yaml
+
+# Upgrade-failure catalogue entry 10 (add-on and client skew): seeded-a's
+# stale-kubectl-client CronJob, a kubectl several minors outside the skew
+# window, read from the workload's image or through the readiness report's
+# client-addon-skew rule, graded on a declared line per such workload.
+# deployer: noop; reads the stale-client-skew role, mutates nothing. Nightly
+# from its first merge; a presubmit seat is a later pull request that cites
+# its record.
+./tasks/upgrades-stale-client-skew-named/task.yaml

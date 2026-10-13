@@ -181,6 +181,9 @@ ADDED_AFTER_THE_MOVE = [
     "manage-cluster-exclusion-installer-route-probe",  # the exclusion route on an installer-made install
     "upgrades-readiness-zonal-control-plane",  # catalogue entry 11 through the readiness report's per-entry rules
     "stop-on-permission-refusal",  # retry after a command-policy refusal, #1948
+    "upgrades-deprecated-api-caller-named",  # catalogue entry 9, the audit-log read on the deprecated-api-caller role
+    "upgrades-pod-security-latest-pinned-named",  # catalogue entry 8, the moving-admission-default role
+    "upgrades-stale-client-skew-named",  # catalogue entry 10, the stale-client-skew role
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.
