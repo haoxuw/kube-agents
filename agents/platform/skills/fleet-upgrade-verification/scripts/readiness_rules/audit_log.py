@@ -101,6 +101,11 @@ JSON_FORMAT_FLAG = "--format=json(" + ",".join(PROJECTED_FIELDS) + ")"
 READ_REMOVED = "removed"
 READ_DEPRECATED = "deprecated"
 READS = (READ_REMOVED, READ_DEPRECATED)
+# What the report keeps of each read, for the JSON and its read-failure list. A rule may
+# write anything under the cache key; `cache_defect` is what the fold holds a rule to, and
+# `summaries` hands the report only entries that pass it.
+SUMMARY_KEYS = ("commands", "entries", "pages", "sampled", "error", "window_start", "window_end")
+READ_KEY = "read"
 SCOPE_CLAUSE = 'resource.type="{resource_type}" AND logName:"{activity_log}" AND resource.labels.cluster_name="{cluster}" AND resource.labels.location="{location}"'
 REMOVED_CLAUSE = 'labels."{removed}":*'
 DEPRECATED_CLAUSE = '((labels."{deprecated}"="{deprecated_true}" AND NOT labels."{removed}":*) OR {user_agent_field}:"{kubectl}")'
@@ -160,6 +165,13 @@ OUTPUT_CUT_REASON = "`gcloud logging read` ({read} read, page {page}) output was
 READ_RAISED_REASON = "the {read} read raised {error}; the pages read before it are not graded"
 SAMPLED_NOTE = "sampled {entries} entries over {pages} page(s) of the {read} read; more callers possible"
 WRITES_ONLY_NOTE = "writes only; a caller that only reads is not in this log"
+CACHE_NOT_A_DICT = "the readiness context's cache is {type}, not a dict"
+LOGS_NOT_A_DICT = "cache[{key!r}] is {type}, not a dict of read results"
+LOG_UNKNOWN_READ = "cache[{key!r}] carries {read!r}, which is not one of the reads"
+LOG_NOT_A_READ = "cache[{key!r}][{read!r}] is not the read's result: {detail}"
+LOG_WRONG_TYPE = "{type}, not a dict"
+LOG_WRONG_READ = "its `read` is not {read!r}"
+LOG_MISSING_KEYS = "missing {keys}"
 STDERR_EXCERPT_CHARS = 300
 STDERR_JOIN = " "
 NO_STDERR = "no stderr"
@@ -504,6 +516,58 @@ def _unseen(page: list, seen: set) -> list:
             if key is not None:
                 seen.add(key)
     return fresh
+
+
+def cache_defect(context) -> str | None:
+    """Why the audit-log cache cannot be read as the reads left it, or None. The context's
+    cache must be a dict, its `audit_log` entry a dict keyed by read name, and each value a
+    read result: a dict whose `read` is that name, carrying every summary key, JSON values
+    with no NaN or infinity. A rule writes the cache; the fold calls this before and after a
+    rule runs and makes a defect the rule's `unknown`."""
+    cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
+    if cache is None:
+        return None
+    if not isinstance(cache, dict):
+        return CACHE_NOT_A_DICT.format(type=type(cache).__name__)
+    logs = cache.get(CACHE_KEY)
+    if logs is None:
+        return None
+    if not isinstance(logs, dict):
+        return LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=type(logs).__name__)
+    for which, log in logs.items():
+        defect = _read_result_defect(which, log)
+        if defect is not None:
+            return defect
+    return None
+
+
+def _read_result_defect(which, log) -> str | None:
+    if which not in READS:
+        return LOG_UNKNOWN_READ.format(key=CACHE_KEY, read=which)
+    if not isinstance(log, dict):
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_TYPE.format(type=type(log).__name__))
+    if log.get(READ_KEY) != which:
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_READ.format(read=which))
+    missing = [key for key in SUMMARY_KEYS if key not in log]
+    if missing:
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_MISSING_KEYS.format(keys=missing))
+    try:
+        json.dumps({key: log[key] for key in SUMMARY_KEYS}, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=str(e))
+    return None
+
+
+def summaries(context) -> dict[str, dict]:
+    """The reads' summaries for the report, `{read: {summary key: value}}`, from the cache
+    as the reads left it. An entry a rule wrote in another shape is left out, the fold
+    having named it as that rule's `unknown`, so the writer sees only what `read` stored.
+    Never raises."""
+    cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
+    logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
+    if not isinstance(logs, dict):
+        return {}
+    return {which: {key: log[key] for key in SUMMARY_KEYS} for which, log in logs.items() if _read_result_defect(which, log) is None}
 
 
 def read_removed(context: dict) -> dict:

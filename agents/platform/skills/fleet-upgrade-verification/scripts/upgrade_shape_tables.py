@@ -55,13 +55,16 @@ NODEPOOL_LABEL = "cloud.google.com/gke-nodepool"
 
 # ------------------------------------------------------------------ entry 4: data on the node
 
-# A cache is the acceptable use the catalogue names, so it is not here. The long words
-# match inside a name, which is how the database charts spell the volume (`pgdata`,
-# `datadir`, `database`, `mysqldata`); the two short ones need a non-letter on each side,
-# so `dbus` and `walrus` do not match while `pg-wal` and `db` do. `nginx-cache` matches
-# nothing; `wal-e-bin` matches on `wal`, the name of a WAL directory more often than of
-# WAL-E's binaries.
-STATEFUL_VOLUME_NAME_RE = re.compile(r"data|state|queue|store|journal|persist|(?<![a-z])(?:db|wal)(?![a-z])", re.I)
+# A cache is the acceptable use the catalogue names, so it is not here. Each word stands
+# on its own in the name, a non-letter (a dash, an underscore, a digit, an end) on each
+# side, so `restore`, `metadata`, `logdatadog`, `dequeue`, `firestore`, `dbus` and `walrus`
+# do not match while `data-0`, `pg-wal`, `redis_data` and `db` do; the charts' spellings
+# that run words together (`pgdata`, `datadir`, `database`, `mysqldata`, `mongodata`) are
+# named whole. `nginx-cache` matches nothing; `wal-e-bin` matches on `wal`, the name of a
+# WAL directory more often than of WAL-E's binaries.
+STATEFUL_VOLUME_WORDS = ("data", "state", "queue", "store", "storage", "journal", "persist", "persistent", "persistence", "db", "wal")
+STATEFUL_VOLUME_CHART_SPELLINGS = ("pgdata", "datadir", "database", "mysqldata", "mongodata")
+STATEFUL_VOLUME_NAME_RE = re.compile(r"(?<![a-z])(?:" + "|".join(STATEFUL_VOLUME_CHART_SPELLINGS + STATEFUL_VOLUME_WORDS) + r")(?![a-z])", re.I)
 # Where a node exposes Local SSD: Compute Engine formats and mounts Local SSD under
 # /mnt/disks (cloud.google.com/compute/docs/disks/add-local-ssd#formatandmount); GKE's
 # ephemeral Local SSD lives under /mnt/stateful_partition on Container-Optimized OS

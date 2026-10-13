@@ -1645,6 +1645,27 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(r["rules"][ZONAL]["unknown"], 1)
         self.assertIn("| ready | none |", text)
 
+    def test_a_rule_that_breaks_the_audit_log_cache_is_one_unknown_and_the_report_still_writes(self):
+        # `assess_readiness` builds the JSON's `audit_log` from the cache the rules fill; a
+        # rule that writes another shape there is its own `unknown`, named inside the fold's
+        # guard, and the report carries only what `audit_log.read` stored.
+        def evaluate(cluster, member, read, target, context):
+            context[readiness_rules.CONTEXT_CACHE][report.audit_log.CACHE_KEY] = [{"error": "x"}]
+            return readiness_rules.new_result()
+
+        spoiler = fake_rule("spoiler", entry=6, evaluate=evaluate)
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects)
+        with patch.object(readiness, "EXTRA_RULES", [spoiler, zonal_control_plane]):
+            rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_OK)
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual([(u["rule"], u["can_block"]) for u in a["unknown"]], [("spoiler", True)])
+        self.assertIn("the rule left the audit-log cache unreadable: cache['audit_log'] is list, not a dict of read results", a["unknown"][0]["reason"])
+        self.assertEqual(a["audit_log"], {})
+        self.assertEqual([f["rule"] for f in a["risks"]], ["zonal-control-plane"])
+        self.assertFalse(any("audit log" in e["message"] for e in data["errors"]))
+        self.assertEqual(a["status"], "unknown")
+
     def test_a_blocking_rule_moves_the_verdict_and_fills_the_other_blockers_column(self):
         def evaluate(cluster, member, read, target, context):
             out = readiness_rules.new_result()

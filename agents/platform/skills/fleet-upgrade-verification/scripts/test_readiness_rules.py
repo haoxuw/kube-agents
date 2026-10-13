@@ -394,6 +394,17 @@ class ShapeTablesTest(unittest.TestCase):
             "x=`sleep 1 &`",
             'echo "$(a; (b) &)"',
             "echo $(date)& wait",
+            # The constructs rounds 4 and 5 named: two parentheses that are not arithmetic, a
+            # substitution in an unquoted heredoc body, in a parameter default, in arithmetic,
+            # in backticks inside `${…}`, and a fork after an ANSI-C quoted word.
+            "((sleep 10; kill 1) &); exec app",
+            "cat <<EOF >/tmp/boot\n$(start-agent &)\nEOF\nexec app",
+            "exec ${SIDECAR:-$(sleep 9 &)} app",
+            "echo $(( $(sleep 9 &) ))",
+            "exec ${X:-`run &`}",
+            "echo $'it\\'s up'; sleep 1 &",
+            'echo "${X:-"$(sleep 1 &)"}"',
+            "$( ((a) &) )",
         )
         not_forks = (
             "a && b",
@@ -426,6 +437,15 @@ class ShapeTablesTest(unittest.TestCase):
             'echo "$(echo "a&b")"',
             "echo $(( $(nproc) & 1 ))",
             "x=$(cat <<EOF)\na & b\nEOF\necho $x",
+            # Read as bash reads them: a quoted or backslash-quoted heredoc delimiter makes
+            # the body text, an escaped `$` is text, `$'…'` is one quoted word, `((…))`
+            # closed by `))` is arithmetic.
+            "echo $'don\\'t' && exec app",
+            "cat <<'EOF'\n$(start-agent &)\nEOF\n",
+            "cat <<\\EOF\n$(start-agent &)\nEOF\n",
+            "cat <<EOF\n\\$(start-agent &)\nEOF\n",
+            "echo $(( (1 + 2) * 3 ))",
+            "echo ${a:-$(nproc)} && exec app",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
@@ -433,13 +453,15 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertIs(shared.shell_forks(text), False, text)
         # What cannot be read this way is unread, never clean: an unterminated quote or
         # heredoc, a trailing backslash, no script at all.
-        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", None, 3):
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", None, 3):
             self.assertIsNone(shared.shell_forks(text), text)
         self.assertFalse(hasattr(tables, "SHELL_FORK_RE") or hasattr(tables, "SHELL_QUOTED_SPAN_RE"))
 
     def test_stateful_volume_names_match_how_the_database_charts_spell_them(self):
-        stateful = ("data", "pgdata", "datadir", "database", "mysqldata", "state", "pg-wal", "wal", "db", "journal", "queue", "store", "persist", "wal-e-bin")
-        scratch = ("nginx-cache", "cache", "tmp", "dbus", "walrus", "config", "logs", "bin")
+        stateful = ("data", "pgdata", "datadir", "database", "mysqldata", "mongodata", "state", "pg-wal", "wal", "db", "journal", "queue", "store", "persist", "wal-e-bin", "redis_data", "data-0", "es-data-1", "persistent-storage", "DATA")
+        # Each word on its own: a stem inside an unrelated word (`restore`, `metadata`,
+        # `logdatadog`, `dequeue`, `firestore`, `statefulset`) is not the volume it names.
+        scratch = ("nginx-cache", "cache", "tmp", "dbus", "walrus", "config", "logs", "bin", "restore-scripts", "backup-restore", "pod-metadata", "logdatadog", "dequeue-worker", "firestore-creds", "statefulset-config")
         for name in stateful:
             self.assertTrue(tables.STATEFUL_VOLUME_NAME_RE.search(name), name)
         for name in scratch:

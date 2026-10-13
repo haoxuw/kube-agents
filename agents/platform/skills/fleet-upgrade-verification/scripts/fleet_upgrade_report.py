@@ -362,7 +362,7 @@ NOTE_ERROR_CHARS = readiness_rules.NOTE_EXCERPT_CHARS
 # the rules' findings, and how a failed one is listed under the table: a read failure like
 # a failed kubectl, with the member it belongs to, exit code 1, the rules that read it
 # `unknown`.
-AUDIT_LOG_SUMMARY_KEYS = ("commands", "entries", "pages", "sampled", "error", "window_start", "window_end")
+AUDIT_LOG_SUMMARY_KEYS = audit_log.SUMMARY_KEYS  # what `audit_log.summaries` keeps of each read for the JSON
 AUDIT_LOG_ERROR_FORMAT = "audit log ({read} read) not read: {error}"
 KUBECONFIG_ENV = "KUBECONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
@@ -952,7 +952,6 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime, flee
     context = readiness_context(member, at, fleet if fleet is not None else [cluster], pools, master, autopilot)
     rules = readiness.evaluate_extra_rules(cluster, member, read, target, context)
     status = readiness.readiness_status(pdbs, maintenance, skew, target is not None, rules)
-    audit_reads = (context.get(readiness_rules.CONTEXT_CACHE) or {}).get(audit_log.CACHE_KEY) or {}
 
     notes = []
     if read_error:
@@ -995,7 +994,9 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime, flee
         "risks": rules["risks"],
         "unknown": rules["unknown"],
         "notes": rules["notes"],
-        "audit_log": {which: {key: log.get(key) for key in AUDIT_LOG_SUMMARY_KEYS} for which, log in audit_reads.items()},
+        # From the cache as the reads left it: an entry a rule wrote in another shape is that
+        # rule's `unknown` (the fold checks the cache around each rule) and is not read here.
+        "audit_log": audit_log.summaries(context),
         "note": NOTE_SEPARATOR.join(notes),
     }
 
@@ -1592,9 +1593,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.output:
         # Serialised whole before the file is opened, so a value JSON cannot carry leaves no
-        # half-written file behind for the readers of `--output`.
+        # half-written file behind for the readers of `--output`; a NaN or infinite float,
+        # which `json.dumps` would otherwise write as a bare token no JSON parser reads, is
+        # refused the same way.
         try:
-            rendered = json.dumps(report, indent=JSON_INDENT)
+            rendered = json.dumps(report, indent=JSON_INDENT, allow_nan=False)
         except (TypeError, ValueError) as e:
             sys.stderr.write(f"failed to serialise the report for {args.output}: {e}\n")
             rendered = None

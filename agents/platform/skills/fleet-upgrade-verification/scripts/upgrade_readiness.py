@@ -32,7 +32,7 @@ import re
 from datetime import datetime, time, timedelta, timezone
 
 import readiness_rules
-from readiness_rules import zonal_control_plane
+from readiness_rules import audit_log, zonal_control_plane
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -188,9 +188,15 @@ FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
 FINDING_TEXT_NOT_TEXT = "a {kind} finding's text is {type}, not a string"
 NOTE_NOT_TEXT = "a note is {type}, not a string"
 # The findings go to `--output` as they are, so a value JSON cannot carry (a set, a
-# datetime, a tuple-keyed dict) would fail the writer after every member was read; the fold
-# probes each result and makes it the rule's defect instead.
+# datetime, a tuple-keyed dict, a NaN or infinite float, which `json.dumps` would write as
+# a bare token no JSON parser reads) would fail the writer after every member was read; the
+# fold probes each result, with `allow_nan=False` as the writer does, and makes it the
+# rule's defect instead.
 RESULT_NOT_JSON = "the result is not JSON-serialisable: {error}"
+# The audit-log cache is the one thing the report reads that a rule wrote; a rule that
+# leaves it in a shape `audit_log.summaries` cannot read is held to it here, inside the
+# guard, so the report never meets it.
+CACHE_DEFECT_REASON = "the rule left the audit-log cache unreadable: {defect}"
 # A second module with a registered rule's id is not run: its findings would be stamped
 # with the other module's id and the per-rule counts would describe one of the two. The
 # registered module keeps the id; the duplicate is one `unknown` counted under it, with the
@@ -683,9 +689,15 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     rule's `describe`, unless the rule set it), its `rule` and `entry`, every note a string
     prefixed with the rule's id, a blocker from a rule that cannot block kept as a risk with
     a note, every `unknown` entry in the dict form `_unknown_entry` gives, and the whole, as
-    it will be written, a JSON value. Raises on a shape the contract forbids, and whatever
-    the rule raises; the caller turns either into the rule's `unknown`."""
+    it will be written, a JSON value; and the audit-log cache, the one thing the report reads
+    that a rule may write, as `audit_log.read` leaves it. Raises on a shape the contract
+    forbids, and whatever the rule raises; the caller turns either into the rule's
+    `unknown`."""
+    cache_before = audit_log.cache_defect(context)
     result = rule.evaluate(cluster, member, read, target, context)
+    cache_after = audit_log.cache_defect(context)
+    if cache_after is not None and cache_after != cache_before:
+        raise TypeError(CACHE_DEFECT_REASON.format(defect=cache_after))
     if result is None:
         result = {}
     if not isinstance(result, dict):
@@ -723,7 +735,7 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     out["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in out["unknown"]]
     out["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=readiness_rules.one_line(note)) for note in out["notes"]]
     try:
-        json.dumps(out)
+        json.dumps(out, allow_nan=False)
     except (TypeError, ValueError) as e:
         raise TypeError(RESULT_NOT_JSON.format(error=e)) from e
     return out
@@ -759,7 +771,7 @@ def _rule_attributes(rule) -> tuple[str, object, bool, str | None]:
 
 def _is_json(value) -> bool:
     try:
-        json.dumps(value)
+        json.dumps(value, allow_nan=False)
     except (TypeError, ValueError):
         return False
     return True

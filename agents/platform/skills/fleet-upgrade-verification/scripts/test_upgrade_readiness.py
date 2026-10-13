@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(__file__))
 import readiness_rules as shared  # noqa: E402
 import upgrade_readiness as r  # noqa: E402
+from readiness_rules import audit_log  # noqa: E402
 
 AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
 TARGET_TEXT = "1.35.1-gke.1000"
@@ -483,7 +484,9 @@ class ExtraRulesTest(unittest.TestCase):
     def test_a_finding_json_cannot_carry_is_the_rules_defect_not_the_writers(self):
         # The findings go to `--output` as they are; a set, a datetime or a tuple-keyed dict
         # would fail json.dump after every member was read, so the fold refuses it here.
-        for name, value in (("set", {"a", "b"}), ("datetime", AT), ("tuple-keys", {(1, 2): "x"})):
+        # A NaN or infinite float is refused too: `json.dumps` would write it as a bare
+        # token (`NaN`, `Infinity`) that no JSON parser reads.
+        for name, value in (("set", {"a", "b"}), ("datetime", AT), ("tuple-keys", {(1, 2): "x"}), ("nan", float("nan")), ("inf", float("inf"))):
             broken = rule_module(name, evaluate=returning(risks=[{"what": value}]))
             fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
@@ -491,6 +494,56 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertIn("the result is not JSON-serialisable", folded["unknown"][0]["reason"], name)
             self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
             json.dumps(folded)
+
+    def test_a_rules_bad_audit_log_cache_entry_is_its_unknown_not_the_reports_crash(self):
+        # The report reads the audit-log summaries from the cache the rules fill, after the
+        # fold returns; a rule that wrote another shape there raised out of `assess_readiness`
+        # after every member was read. The fold checks the cache around each rule, so the
+        # defect is that rule's `unknown`, and `summaries` hands the report only what `read`
+        # stored.
+        def context():
+            return {shared.CONTEXT_PROJECT: "p", shared.CONTEXT_LOCATION: "us-central1-a", shared.CONTEXT_CLUSTER_NAME: "c", shared.CONTEXT_RUN_CMD: lambda cmd, timeout=None: (0, "[]", ""), shared.CONTEXT_AT: AT, shared.CONTEXT_CACHE: {}}
+
+        def writing(value):
+            def evaluate(cluster, member, read, target, ctx):
+                ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = value
+                return shared.new_result()
+
+            return evaluate
+
+        def reading(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            return shared.new_result()
+
+        fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
+        clean = audit_log.read_removed(context())
+        cases = {"list": [{"error": "x"}], "none-entry": {"removed": None}, "stranger": {"other": clean}, "nan-entry": {"removed": {**clean, "entries": float("nan")}}, "short": {"removed": {"read": "removed"}}}
+        for name, value in cases.items():
+            ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module(name, evaluate=writing(value)), fine])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn("the rule left the audit-log cache unreadable: ", folded["unknown"][0]["reason"], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
+            self.assertEqual(audit_log.summaries(ctx), {}, name)
+            json.dumps(folded)
+        # A read made through `audit_log.read` is kept, a later rule's damage to the other
+        # entry is that rule's, and the damaged entry alone is left out of the summaries.
+        def spoiling(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["deprecated"] = 3
+            return shared.new_result()
+
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading), rule_module("spoiler", evaluate=spoiling)])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["spoiler"])
+        self.assertEqual(list(audit_log.summaries(ctx)), ["removed"])
+        self.assertEqual({key: audit_log.summaries(ctx)["removed"][key] for key in ("entries", "pages", "sampled", "error")}, {"entries": 0, "pages": 1, "sampled": False, "error": None})
+        self.assertEqual(set(audit_log.summaries(ctx)["removed"]), set(audit_log.SUMMARY_KEYS))
+        # A defect already in the cache before a rule runs is not that rule's.
+        ctx = context()
+        ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = [1]
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[fine])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["fine"]))
+        self.assertEqual((audit_log.summaries(ctx), audit_log.summaries({}), audit_log.summaries({shared.CONTEXT_CACHE: None}), audit_log.cache_defect({})), ({}, {}, {}, None))
 
     def test_findings_are_copied_before_they_are_stamped(self):
         shared_finding = {"what": "pool p"}
@@ -537,6 +590,7 @@ class ExtraRulesTest(unittest.TestCase):
             "quiet_entry": (dict(RULE_ID="quiet", ENTRY={11}, CAN_BLOCK=True), None, "ENTRY is set, not a JSON value; not evaluated"),
             "loud_entry": (dict(RULE_ID="loud", ENTRY={11}, CAN_BLOCK=True), returning(blocking=[{"what": "b"}]), "ENTRY is set, not a JSON value; not evaluated"),
             "stringly": (dict(RULE_ID="stringly", ENTRY=5, CAN_BLOCK="False"), None, "CAN_BLOCK is str, not a bool; not evaluated"),
+            "nan_entry": (dict(RULE_ID="nan", ENTRY=float("nan"), CAN_BLOCK=True), None, "ENTRY is float, not a JSON value; not evaluated"),
         }
         for name, (attributes, evaluate, reason) in cases.items():
             broken = bare_module(name, evaluate=evaluate, **attributes)
