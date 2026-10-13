@@ -34,7 +34,12 @@ ENDPOINT_CONTROLLER = "system:serviceaccount:kube-system:endpoint-controller"
 AT = datetime(2026, 9, 29, 16, 0, tzinfo=timezone.utc)
 FAIL = "FAIL"
 DEPRECATED_MARKER = 'k8s.io/deprecated"="true"'
-PAGE_MARKER = 'timestamp<"'
+PAGE_BOUND = 'timestamp<="'
+
+
+def paged(filter_text):
+    """Whether a filter carries a page bound: the window clause has one `timestamp<=`, a later page two."""
+    return filter_text.count(PAGE_BOUND) > 1
 TIMEOUT = 45
 
 
@@ -50,10 +55,11 @@ def split_sample():
 
 
 def full_page(entry, count, start=datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)):
-    """`count` copies of `entry` with distinct, descending timestamps from `start`."""
+    """`count` copies of `entry` with distinct insertIds and distinct, descending timestamps from `start`."""
     page = []
     for i in range(count):
         copy = json.loads(json.dumps(entry))
+        copy["insertId"] = f"{copy.get('insertId', 'entry')}-{start:%H%M%S}-{i}"
         copy["timestamp"] = (start - timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         page.append(copy)
     return page
@@ -85,7 +91,7 @@ class FakeRunner:
             if page == FAIL:
                 return 1, "", "ERROR: (gcloud.logging.read) boom"
             return 0, json.dumps(page), ""
-        if PAGE_MARKER in filter_text:
+        if paged(filter_text):
             return 0, "[]", ""
         return 0, json.dumps(self.removed if which == audit_log.READ_REMOVED else self.deprecated), ""
 
@@ -139,7 +145,7 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual(cmd[4:], ["--project=example-project", "--limit=1000", audit_log.JSON_FORMAT_FLAG])
         # The page is projected to what caller_records reads, nothing less.
         self.assertTrue(audit_log.JSON_FORMAT_FLAG.startswith("--format=json(") and audit_log.JSON_FORMAT_FLAG.endswith(")"))
-        for field in ("timestamp", "labels", "protoPayload.authenticationInfo", "protoPayload.requestMetadata.callerSuppliedUserAgent", "protoPayload.resourceName", "protoPayload.methodName"):
+        for field in ("insertId", "timestamp", "labels", "protoPayload.authenticationInfo", "protoPayload.requestMetadata.callerSuppliedUserAgent", "protoPayload.resourceName", "protoPayload.methodName"):
             self.assertIn(field, audit_log.PROJECTED_FIELDS)
         self.assertFalse(any(flag.startswith("--freshness") or flag.startswith("--page-size") for flag in cmd))
         self.assertEqual((tables.AUDIT_LOG_WINDOW_DAYS, tables.AUDIT_LOG_PAGE_LIMIT, tables.AUDIT_LOG_MAX_PAGES, tables.AUDIT_LOG_READ_BUDGET_SECONDS), (7, 1000, 3, 60))
@@ -240,7 +246,7 @@ class AuditLogReadTest(unittest.TestCase):
         class CuttingRunner(FakeRunner):
             def __call__(self, cmd, timeout=None, env=None):
                 rc, stdout, stderr = super().__call__(cmd, timeout, env)
-                if PAGE_MARKER in cmd[3]:
+                if paged(cmd[3]):
                     return 0, stdout[: len(stdout) // 2], "credential proxy output truncated\n"
                 return rc, stdout, stderr
 
@@ -296,10 +302,41 @@ class AuditLogReadTest(unittest.TestCase):
         runner = FakeRunner(pages={audit_log.READ_REMOVED: [first, second]})
         result = audit_log.read_removed(context_with(runner))
         self.assertEqual((result["entries"], result["pages"], result["sampled"], result["error"]), (1400, 2, False, None))
-        self.assertNotIn(PAGE_MARKER, runner.calls[0][3])
-        self.assertIn(' AND timestamp<"' + first[-1]["timestamp"] + '"', runner.calls[1][3])
+        self.assertFalse(paged(runner.calls[0][3]))
+        self.assertTrue(paged(runner.calls[1][3]))
+        self.assertIn(' AND timestamp<="' + first[-1]["timestamp"] + '"', runner.calls[1][3])
         self.assertIn('timestamp>="2026-09-22T16:00:00Z"', runner.calls[1][3])
         self.assertEqual(result["callers"][0]["count"], 1400)
+
+    def test_the_page_bound_is_inclusive_and_the_entries_already_read_are_dropped(self):
+        # The API server stamps several writes with one microsecond. A strict `timestamp<`
+        # bound on the page's oldest timestamp dropped every entry at that timestamp that
+        # did not fit the page, and the read still said complete. The bound is inclusive
+        # and the entries already read are dropped by insertId: the first page ends on three
+        # entries at T, the next page returns them again with two more at T and the older
+        # ones, and every entry is counted once.
+        removed, _ = split_sample()
+        boundary = "2026-09-29T11:43:21.000000Z"
+        first = full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT)
+        for entry in first[-3:]:
+            entry["timestamp"] = boundary
+        second = full_page(removed[0], 5, start=datetime(2026, 9, 29, 11, 0, tzinfo=timezone.utc))
+        for entry in second[:2]:
+            entry["timestamp"] = boundary
+        runner = FakeRunner(pages={audit_log.READ_REMOVED: [first, first[-3:] + second]})
+        result = audit_log.read_removed(context_with(runner))
+        self.assertIn(' AND timestamp<="' + boundary + '"', runner.calls[1][3])
+        self.assertEqual((result["entries"], result["pages"], result["sampled"], result["error"]), (1005, 2, False, None))
+        self.assertEqual(result["callers"][0]["count"], 1005)
+        # A full page that adds nothing (more entries share the boundary timestamp than a
+        # page holds) is sampled, not read again.
+        same = full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT)
+        for entry in same:
+            entry["timestamp"] = boundary
+        stuck = audit_log.read_removed(context_with(FakeRunner(pages={audit_log.READ_REMOVED: [same, same, same]})))
+        self.assertEqual((stuck["entries"], stuck["pages"], stuck["sampled"], stuck["error"]), (1000, 2, True, None))
+        # An entry with no insertId is never dropped.
+        self.assertEqual(len(audit_log._unseen([{"timestamp": boundary}, {"timestamp": boundary}], set())), 2)
 
     def test_page_ceiling_and_time_budget_sample_rather_than_fail(self):
         removed, _ = split_sample()
@@ -323,7 +360,7 @@ class AuditLogReadTest(unittest.TestCase):
         runner = FakeRunner(pages={audit_log.READ_REMOVED: [page, []]})
         result = audit_log.read_removed(context_with(runner))
         self.assertEqual((result["pages"], result["entries"], result["error"]), (2, 1000, None))
-        self.assertIn(' AND timestamp<"2026-09-29T12:00:19Z"', runner.calls[1][3])
+        self.assertIn(' AND timestamp<="2026-09-29T12:00:19Z"', runner.calls[1][3])
         self.assertNotIn("19.112Z", runner.calls[1][3])
         caller = result["callers"][0]
         self.assertEqual((caller["first_seen"], caller["last_seen"]), ("2026-09-29T12:00:19Z", "2026-09-29T12:00:20.500000Z"))

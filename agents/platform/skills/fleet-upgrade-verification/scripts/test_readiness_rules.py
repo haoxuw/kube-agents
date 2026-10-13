@@ -378,7 +378,23 @@ class ShapeTablesTest(unittest.TestCase):
         # The round-1 strings keep their verdicts; what a regex guessed at (`|&`, a heredoc
         # body, a comment, an escaped quote, a quoted or escaped `&`, `;&`) is not a fork,
         # and a forked subshell (`)&`) or a fork after a redirection is.
-        forks = ("a & b & wait", "nginx -p 8080& php-fpm", "./a 1& ./b 2& wait", "sleep 1 &", "cmd & wait", "(cd /srv && ./run)&", "cmd 2>&1 &", "cat <<EOF | grep x &\na & b\nEOF\n", "echo a#b&c")
+        forks = (
+            "a & b & wait",
+            "nginx -p 8080& php-fpm",
+            "./a 1& ./b 2& wait",
+            "sleep 1 &",
+            "cmd & wait",
+            "(cd /srv && ./run)&",
+            "cmd 2>&1 &",
+            "cat <<EOF | grep x &\na & b\nEOF\n",
+            "echo a#b&c",
+            # A command substitution is the command list it runs, inside double quotes too.
+            'echo "$(sleep 9 &)"',
+            "x=$(sleep 1 &); echo $x",
+            "x=`sleep 1 &`",
+            'echo "$(a; (b) &)"',
+            "echo $(date)& wait",
+        )
         not_forks = (
             "a && b",
             "cmd 2>&1",
@@ -398,6 +414,18 @@ class ShapeTablesTest(unittest.TestCase):
             "cmd <<<'a & b'",
             "case $1 in a) x;& b) y;; esac",
             "cmd &>>log",
+            # Arithmetic and parameter expansions are words: `&` and `<<` in them are not operators.
+            "flags=$((mode & 4)); exec app",
+            "echo $((5 & 3))",
+            "n=$((1<<2)); exec ./app",
+            "(( x & 1 )) && echo odd",
+            "curl ${URL:-http://h/p?a=1&b=2}",
+            "echo ${PORT:-80&}",
+            "echo ${s//&/and}",
+            'echo "${X:-"a&b"}"',
+            'echo "$(echo "a&b")"',
+            "echo $(( $(nproc) & 1 ))",
+            "x=$(cat <<EOF)\na & b\nEOF\necho $x",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
@@ -405,7 +433,7 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertIs(shared.shell_forks(text), False, text)
         # What cannot be read this way is unread, never clean: an unterminated quote or
         # heredoc, a trailing backslash, no script at all.
-        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", None, 3):
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", None, 3):
             self.assertIsNone(shared.shell_forks(text), text)
         self.assertFalse(hasattr(tables, "SHELL_FORK_RE") or hasattr(tables, "SHELL_QUOTED_SPAN_RE"))
 

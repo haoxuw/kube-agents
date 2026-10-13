@@ -36,7 +36,10 @@ The context the reads run through is the per-member one readiness_rules document
 `gcloud logging read` is on the agent's gcloud read allowlist
 (agents/platform/scripts/command_policy.py) with `--limit`, `--project` and `--format`
 among the flags it admits. The command has no `--page-size`, so a page is `--limit` and the
-next page is a `timestamp<` bound on the oldest entry seen; `--freshness` is not used,
+next page is a `timestamp<=` bound on the oldest entry seen, inclusive because the API
+server stamps several writes with one microsecond and a strict bound would drop the ones at
+the boundary that did not fit the page, with the entries already read dropped by
+`insertId`; `--freshness` is not used,
 because gcloud refuses it beside a timestamp in the filter, and the window is in the filter.
 The page is projected to the fields read here (PROJECTED_FIELDS), and a page the credential
 proxy still cut at its output cap is the read's error, naming the cap, with the pages before
@@ -80,8 +83,11 @@ LIMIT_FLAG = "--limit={limit}"
 # The page is projected to the fields `caller_records` reads: a full AuditLog entry carries
 # the request and response bodies, several kilobytes each, and a thousand of them would
 # pass the credential proxy's output cap; the projection keeps the nested shape gcloud
-# prints, so the parser reads the same paths as an unprojected entry.
+# prints, so the parser reads the same paths as an unprojected entry. `insertId` is the
+# page cursor's key: the next page's bound is inclusive, so the entries at the boundary
+# timestamp come back and are dropped by id.
 PROJECTED_FIELDS = (
+    "insertId",
     "timestamp",
     "labels",
     "protoPayload.authenticationInfo",
@@ -99,7 +105,7 @@ SCOPE_CLAUSE = 'resource.type="{resource_type}" AND logName:"{activity_log}" AND
 REMOVED_CLAUSE = 'labels."{removed}":*'
 DEPRECATED_CLAUSE = '((labels."{deprecated}"="{deprecated_true}" AND NOT labels."{removed}":*) OR {user_agent_field}:"{kubectl}")'
 WINDOW_CLAUSE = 'timestamp>="{start}" AND timestamp<="{end}"'
-PAGE_CLAUSE = 'timestamp<"{before}"'
+PAGE_CLAUSE = 'timestamp<="{before}"'
 CLAUSE_SEPARATOR = " AND "
 RFC3339_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -159,6 +165,7 @@ STDERR_JOIN = " "
 NO_STDERR = "no stderr"
 
 # Audit entry fields.
+INSERT_ID = "insertId"
 PROTO_PAYLOAD = "protoPayload"
 LABELS = "labels"
 TIMESTAMP = "timestamp"
@@ -380,7 +387,7 @@ def _parse_page(stdout) -> list | None:
 
 
 def _oldest_timestamp(page: list) -> str | None:
-    """The text of the page's oldest timestamp by parsed time, the next page's `timestamp<`
+    """The text of the page's oldest timestamp by parsed time, the next page's `timestamp<=`
     bound; None when no entry carries one that parses."""
     stamped = [(parsed, e[TIMESTAMP]) for e in page if isinstance(e, dict) and (parsed := parse_timestamp(e.get(TIMESTAMP))) is not None]
     return min(stamped)[1] if stamped else None
@@ -395,8 +402,10 @@ def read(context: dict, which: str) -> dict:
     that is not a list, a page the credential proxy cut at its output cap, or an exception
     inside the read); the pages before it are kept and graded, except after an exception,
     which leaves `callers` empty. `sampled` says the last page was full and no further
-    page was read: the page count reached its ceiling, the read's time budget ran out, or
-    the page carried no timestamp to bound the next one on. The result enters the cache
+    page was read: the page count reached its ceiling, the read's time budget ran out, the
+    page carried no timestamp to bound the next one on, or a full page added no entry not
+    already read (more entries share the boundary timestamp than a page holds). The result
+    enters the cache
     only once the read is complete, so a rule that raises mid-read never leaves a clean
     half-built result for the next rule to find.
     """
@@ -448,6 +457,7 @@ def _read_pages(context: dict, which: str, result: dict) -> None:
     started = clock()
     before = None
     entries: list = []
+    seen: set = set()
     while True:
         filter_text = base if before is None else base + CLAUSE_SEPARATOR + PAGE_CLAUSE.format(before=before)
         cmd = build_command(project, filter_text)
@@ -469,16 +479,31 @@ def _read_pages(context: dict, which: str, result: dict) -> None:
         if page is None:
             result["error"] = UNPARSABLE_REASON.format(read=which, page=result["pages"])
             break
-        entries.extend(page)
+        fresh = _unseen(page, seen)
+        entries.extend(fresh)
         if len(page) < tables.AUDIT_LOG_PAGE_LIMIT:
             break
         oldest = _oldest_timestamp(page)
-        if oldest is None or result["pages"] >= tables.AUDIT_LOG_MAX_PAGES or clock() - started >= tables.AUDIT_LOG_READ_BUDGET_SECONDS:
+        if not fresh or oldest is None or result["pages"] >= tables.AUDIT_LOG_MAX_PAGES or clock() - started >= tables.AUDIT_LOG_READ_BUDGET_SECONDS:
             result["sampled"] = True
             break
         before = oldest
     result["entries"] = len(entries)
     result["callers"] = caller_records(entries)
+
+
+def _unseen(page: list, seen: set) -> list:
+    """The page's entries not read on an earlier page, by `insertId`, which the inclusive
+    page bound brings back for the entries at the previous page's oldest timestamp; an
+    entry with no id is kept."""
+    fresh = []
+    for entry in page:
+        key = entry.get(INSERT_ID) if isinstance(entry, dict) else None
+        if key is None or key not in seen:
+            fresh.append(entry)
+            if key is not None:
+                seen.add(key)
+    return fresh
 
 
 def read_removed(context: dict) -> dict:
