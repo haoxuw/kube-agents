@@ -14,6 +14,7 @@ deprecated-or-kubectl read by their filters.
 
 import json
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import readiness_rules as shared  # noqa: E402
 import upgrade_shape_tables as tables  # noqa: E402
 from readiness_rules import audit_log  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
 SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "testdata", "audit_log_sample.json")
 TUNER = "system:serviceaccount:kubeagents-system:legacy-flowcontrol-tuner"
@@ -117,7 +119,13 @@ class AuditLogReadTest(unittest.TestCase):
             self.assertIn('resource.type="k8s_cluster" AND resource.labels.cluster_name="seeded-a" AND resource.labels.location="us-central1-a"', text)
             self.assertIn('timestamp>="2026-09-22T16:00:00Z" AND timestamp<="2026-09-29T16:00:00Z"', text)
             self.assertIn('(protoPayload.authenticationInfo.principalEmail!~"^system:" OR protoPayload.authenticationInfo.principalEmail=~"^system:serviceaccount:")', text)
-            self.assertIn('principalEmail!~"^system:serviceaccount:(kube\\-system|kube\\-public|kube\\-node\\-lease|gatekeeper\\-system|cnrm\\-system|asm\\-system|gke-[a-z0-9-]*|gmp-[a-z0-9-]*|config-management-[a-z0-9-]*):"', text)
+            # The namespaces come from the one table every rule reads, so the clause and
+            # `caller_class` cannot disagree; the prefixes are the table's two.
+            names = "|".join([re.escape(n) for n in sorted(tables.SYSTEM_NAMESPACES)] + [p + "[a-z0-9-]*" for p in tables.SYSTEM_NAMESPACE_PREFIXES])
+            self.assertIn(f'principalEmail!~"^system:serviceaccount:({names}):"', text)
+            self.assertIn("istio\\-system", text)
+            self.assertIn("configconnector\\-operator\\-system", text)
+            self.assertNotIn("gmp-[a-z0-9-]*", text)
             self.assertIn('principalEmail!~"@(gcp-sa-[a-z0-9-]+[.]iam|container-engine-robot[.]iam|cloudservices|system)[.]gserviceaccount[.]com$"', text)
             self.assertNotIn("\\.", text.replace("\\-", ""))
         self.assertIn(' AND labels."k8s.io/removed-release":* AND ', removed)
@@ -125,7 +133,11 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertIn('((labels."k8s.io/deprecated"="true" AND NOT labels."k8s.io/removed-release":*) OR protoPayload.requestMetadata.callerSuppliedUserAgent:"kubectl/")', deprecated)
         cmd = audit_log.build_command("example-project", removed)
         self.assertEqual(cmd[:3], ["gcloud", "logging", "read"])
-        self.assertEqual(cmd[4:], ["--project=example-project", "--limit=1000", "--format=json"])
+        self.assertEqual(cmd[4:], ["--project=example-project", "--limit=1000", audit_log.JSON_FORMAT_FLAG])
+        # The page is projected to what caller_records reads, nothing less.
+        self.assertTrue(audit_log.JSON_FORMAT_FLAG.startswith("--format=json(") and audit_log.JSON_FORMAT_FLAG.endswith(")"))
+        for field in ("timestamp", "labels", "protoPayload.authenticationInfo", "protoPayload.requestMetadata.callerSuppliedUserAgent", "protoPayload.resourceName", "protoPayload.methodName"):
+            self.assertIn(field, audit_log.PROJECTED_FIELDS)
         self.assertFalse(any(flag.startswith("--freshness") or flag.startswith("--page-size") for flag in cmd))
         self.assertEqual((tables.AUDIT_LOG_WINDOW_DAYS, tables.AUDIT_LOG_PAGE_LIMIT, tables.AUDIT_LOG_MAX_PAGES, tables.AUDIT_LOG_READ_BUDGET_SECONDS), (7, 1000, 3, 60))
 
@@ -153,6 +165,9 @@ class AuditLogReadTest(unittest.TestCase):
             "system:anonymous",
             "system:serviceaccount:gke-managed-system:x",
             "system:serviceaccount:gmp-system:collector",
+            "system:serviceaccount:gmp-public:x",
+            "system:serviceaccount:istio-system:istiod",
+            "system:serviceaccount:configconnector-operator-system:x",
             "system:serviceaccount:config-management-system:reconciler",
             "system:serviceaccount:gatekeeper-system:gatekeeper-admin",
             "service-123@container-engine-robot.iam.gserviceaccount.com",
@@ -185,6 +200,50 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual(callers[(ENDPOINT_CONTROLLER, "core/v1 endpoints")]["caller_class"], audit_log.CLASS_PROVIDER)
         self.assertTrue(callers[(STALE_KUBECTL, "core/v1 configmaps")]["kubectl"])
         self.assertFalse(callers[(STALE_KUBECTL, "core/v1 configmaps")]["deprecated"])
+
+    def test_malformed_entries_are_counted_under_the_unknown_principal_and_agent(self):
+        entries = [
+            {"timestamp": "2026-09-29T12:00:00Z", "labels": {}, "protoPayload": {"authenticationInfo": "not-a-dict", "requestMetadata": ["x"], "resourceName": "core/v1/nodes/n1"}},
+            {"timestamp": "2026-09-29T12:00:01Z", "labels": [], "protoPayload": {"authenticationInfo": {"principalEmail": {"nested": 1}}, "requestMetadata": {"callerSuppliedUserAgent": 7}, "methodName": "io.k8s.core.v1.nodes.patch"}},
+            {"timestamp": "2026-09-29T12:00:02Z", "protoPayload": "nothing"},
+        ]
+        callers = audit_log.caller_records(entries)
+        self.assertEqual([(c["principal"], c["user_agent"], c["api"], c["count"]) for c in callers], [(audit_log.UNKNOWN_PRINCIPAL, audit_log.UNKNOWN_USER_AGENT, audit_log.UNKNOWN_API, 1), (audit_log.UNKNOWN_PRINCIPAL, audit_log.UNKNOWN_USER_AGENT, "core/v1 nodes", 2)])
+        self.assertTrue(all(c["caller_class"] == audit_log.CLASS_UNPLACED for c in callers))
+
+    def test_a_read_that_raises_is_cached_as_its_error_not_as_a_clean_window(self):
+        context = sample_context()
+        with patch.object(audit_log, "caller_records", side_effect=ValueError("boom")):
+            first = audit_log.read_removed(context)
+        self.assertIn("the removed read raised ValueError('boom')", first["error"])
+        self.assertEqual(first["callers"], [])
+        # The next rule asking for the same read gets the error, not an empty, clean page.
+        second = audit_log.read_removed(context)
+        self.assertIs(second, first)
+        self.assertIsNotNone(second["error"])
+        self.assertEqual(len(context["run_cmd"].calls), 1)
+
+    def test_a_page_the_proxy_cut_is_the_reads_error_naming_the_cap(self):
+        removed, _ = split_sample()
+        first = full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT)
+
+        class CuttingRunner(FakeRunner):
+            def __call__(self, cmd, timeout=None, env=None):
+                rc, stdout, stderr = super().__call__(cmd, timeout, env)
+                if PAGE_MARKER in cmd[3]:
+                    return 0, stdout[: len(stdout) // 2], "credential proxy output truncated\n"
+                return rc, stdout, stderr
+
+        runner = CuttingRunner(pages={audit_log.READ_REMOVED: [first, first]})
+        result = audit_log.read_removed(context_with(runner))
+        self.assertEqual((result["pages"], result["entries"], result["sampled"]), (2, 1000, False))
+        self.assertEqual(result["error"], "`gcloud logging read` (removed read, page 2) output was cut at the credential proxy's output cap, so the page did not fit in one read")
+        self.assertNotIn("not a JSON list", result["error"])
+        self.assertEqual(result["callers"][0]["count"], 1000)
+        # A first page cut: nothing graded, the cap named rather than the JSON.
+        cut_first = audit_log.read_removed(context_with(FakeRunner(rc=0, stdout='[{"timestamp": "2026-', stderr="credential proxy output truncated")))
+        self.assertIn("(removed read, page 1) output was cut at the credential proxy's output cap", cut_first["error"])
+        self.assertEqual((cut_first["entries"], cut_first["callers"]), (0, []))
 
     def test_each_read_runs_once_per_context_and_is_cached(self):
         context = sample_context()

@@ -34,6 +34,9 @@ The context the reads run through is the per-member one readiness_rules document
 among the flags it admits. The command has no `--page-size`, so a page is `--limit` and the
 next page is a `timestamp<` bound on the oldest entry seen; `--freshness` is not used,
 because gcloud refuses it beside a timestamp in the filter, and the window is in the filter.
+The page is projected to the fields read here (PROJECTED_FIELDS), and a page the credential
+proxy still cut at its output cap is the read's error, naming the cap, with the pages before
+it kept.
 """
 
 import json
@@ -42,7 +45,18 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import upgrade_shape_tables as tables
-from readiness_rules import CONTEXT_AT, CONTEXT_CACHE, CONTEXT_CLOCK, CONTEXT_CLUSTER_NAME, CONTEXT_LOCATION, CONTEXT_PROJECT, CONTEXT_RUN_CMD, CONTEXT_TIMEOUT_SECONDS
+from readiness_rules import (
+    CONTEXT_AT,
+    CONTEXT_CACHE,
+    CONTEXT_CLOCK,
+    CONTEXT_CLUSTER_NAME,
+    CONTEXT_LOCATION,
+    CONTEXT_PROJECT,
+    CONTEXT_RUN_CMD,
+    CONTEXT_TIMEOUT_SECONDS,
+    PROXY_TRUNCATION_MARKER,
+    is_system_namespace,
+)
 
 # The command. Cloud Logging keeps GKE's Kubernetes audit entries under resource type
 # k8s_cluster, with the cluster and location as resource labels, the API server's audit
@@ -58,7 +72,19 @@ PRINCIPAL_FIELD = "protoPayload.authenticationInfo.principalEmail"
 KUBECTL_USER_AGENT_PREFIX = "kubectl/"
 PROJECT_FLAG = "--project={project}"
 LIMIT_FLAG = "--limit={limit}"
-JSON_FORMAT_FLAG = "--format=json"
+# The page is projected to the fields `caller_records` reads: a full AuditLog entry carries
+# the request and response bodies, several kilobytes each, and a thousand of them would
+# pass the credential proxy's output cap; the projection keeps the nested shape gcloud
+# prints, so the parser reads the same paths as an unprojected entry.
+PROJECTED_FIELDS = (
+    "timestamp",
+    "labels",
+    "protoPayload.authenticationInfo",
+    "protoPayload.requestMetadata.callerSuppliedUserAgent",
+    "protoPayload.resourceName",
+    "protoPayload.methodName",
+)
+JSON_FORMAT_FLAG = "--format=json(" + ",".join(PROJECTED_FIELDS) + ")"
 
 # The two reads and their filters.
 READ_REMOVED = "removed"
@@ -73,19 +99,19 @@ CLAUSE_SEPARATOR = " AND "
 RFC3339_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Who a principal is. The operator's callers are user accounts, service accounts, and
-# Kubernetes service accounts outside the namespaces GKE and its Fleet features manage;
-# every other `system:` principal (the control plane's components, the node identities,
-# the anonymous and unsecured users), the service accounts in those namespaces, and
-# Google-managed service agents are the provider's, and GKE moves them with the version.
-# A principal of no recognisable shape is unplaced: named, never blocked on.
+# Kubernetes service accounts outside the namespaces GKE and its add-ons occupy
+# (`upgrade_shape_tables.SYSTEM_NAMESPACES` and its prefixes, the one predicate every rule
+# reads through `readiness_rules.is_system_namespace`); every other `system:` principal
+# (the control plane's components, the node identities, the anonymous and unsecured
+# users), the service accounts in those namespaces, and Google-managed service agents are
+# the provider's, and GKE moves them with the version. A principal of no recognisable
+# shape is unplaced: named, never blocked on.
 CLASS_OPERATOR = "operator"
 CLASS_PROVIDER = "provider"
 CLASS_UNPLACED = "unplaced"
 SYSTEM_PREFIX = "system:"
 SERVICEACCOUNT_PREFIX = "system:serviceaccount:"
 SERVICEACCOUNT_SEPARATOR = ":"
-PROVIDER_NAMESPACES = ("kube-system", "kube-public", "kube-node-lease", "gatekeeper-system", "cnrm-system", "asm-system")
-PROVIDER_NAMESPACE_PREFIXES = ("gke-", "gmp-", "config-management-")
 EMAIL_MARKER = "@"
 GOOGLE_SERVICE_AGENT_SUFFIXES = (
     "@container-engine-robot.iam.gserviceaccount.com",
@@ -95,10 +121,11 @@ GOOGLE_SERVICE_AGENT_SUFFIXES = (
 GOOGLE_SERVICE_AGENT_MARKER = "@gcp-sa-"
 GOOGLE_SERVICE_AGENT_IAM_SUFFIX = ".iam.gserviceaccount.com"
 # The same classes as the query language can state them, so the provider's callers never
-# fill a page. RE2 has no lookahead, so "every system: principal except a service account"
-# is two clauses; dots are character classes because a backslash inside a quoted filter
-# string would need an escape of its own. `caller_class` is still applied to what comes
-# back, so a principal the regexes do not express is placed on the way in.
+# fill a page: the system namespaces and their prefixes come from the same table
+# `caller_class` reads. RE2 has no lookahead, so "every system: principal except a service
+# account" is two clauses; dots are character classes because a backslash inside a quoted
+# filter string would need an escape of its own. `caller_class` is still applied to what
+# comes back, so a principal the regexes do not express is placed on the way in.
 PROVIDER_EXCLUSION_CLAUSE = '({principal}!~"{system_re}" OR {principal}=~"{serviceaccount_re}") AND {principal}!~"{system_namespaces_re}" AND {principal}!~"{service_agents_re}"'
 SYSTEM_PRINCIPAL_RE = "^system:"
 SERVICEACCOUNT_RE = "^system:serviceaccount:"
@@ -118,6 +145,8 @@ NO_RUNNER_REASON = "no command runner in the readiness context; the audit log wa
 NO_SCOPE_REASON = "the readiness context carries no project, location or cluster name for the log filter"
 READ_FAILED_REASON = "`gcloud logging read` ({read} read, page {page}) failed (rc={rc}): {stderr}"
 UNPARSABLE_REASON = "`gcloud logging read` ({read} read, page {page}) returned output that is not a JSON list of entries (rc=0)"
+OUTPUT_CUT_REASON = "`gcloud logging read` ({read} read, page {page}) output was cut at the credential proxy's output cap, so the page did not fit in one read"
+READ_RAISED_REASON = "the {read} read raised {error}; the pages read before it are not graded"
 SAMPLED_NOTE = "sampled {entries} entries over {pages} page(s) of the {read} read; more callers possible"
 WRITES_ONLY_NOTE = "writes only; a caller that only reads is not in this log"
 STDERR_EXCERPT_CHARS = 300
@@ -178,7 +207,7 @@ def parse_timestamp(text) -> datetime | None:
 
 
 def provider_exclusion_clause() -> str:
-    namespaces = [re.escape(n) for n in PROVIDER_NAMESPACES] + [p + NAMESPACE_PREFIX_TAIL_RE for p in PROVIDER_NAMESPACE_PREFIXES]
+    namespaces = [re.escape(n) for n in sorted(tables.SYSTEM_NAMESPACES)] + [p + NAMESPACE_PREFIX_TAIL_RE for p in tables.SYSTEM_NAMESPACE_PREFIXES]
     return PROVIDER_EXCLUSION_CLAUSE.format(
         principal=PRINCIPAL_FIELD,
         system_re=SYSTEM_PRINCIPAL_RE,
@@ -226,7 +255,7 @@ def caller_class(principal) -> str:
         namespace, separator, name = rest.partition(SERVICEACCOUNT_SEPARATOR)
         if not namespace or not separator or not name:
             return CLASS_UNPLACED
-        if namespace in PROVIDER_NAMESPACES or namespace.startswith(PROVIDER_NAMESPACE_PREFIXES):
+        if is_system_namespace(namespace):
             return CLASS_PROVIDER
         return CLASS_OPERATOR
     if text.startswith(SYSTEM_PREFIX):
@@ -270,10 +299,10 @@ def caller_records(entries: list) -> list[dict]:
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
-        payload = entry.get(PROTO_PAYLOAD) if isinstance(entry.get(PROTO_PAYLOAD), dict) else {}
-        labels = entry.get(LABELS) if isinstance(entry.get(LABELS), dict) else {}
-        principal = (payload.get(AUTHENTICATION_INFO) or {}).get(PRINCIPAL_EMAIL) or UNKNOWN_PRINCIPAL
-        user_agent = (payload.get(REQUEST_METADATA) or {}).get(CALLER_SUPPLIED_USER_AGENT) or UNKNOWN_USER_AGENT
+        payload = _dict_field(entry, PROTO_PAYLOAD)
+        labels = _dict_field(entry, LABELS)
+        principal = _text_field(_dict_field(payload, AUTHENTICATION_INFO), PRINCIPAL_EMAIL) or UNKNOWN_PRINCIPAL
+        user_agent = _text_field(_dict_field(payload, REQUEST_METADATA), CALLER_SUPPLIED_USER_AGENT) or UNKNOWN_USER_AGENT
         api = api_of(payload.get(RESOURCE_NAME), payload.get(METHOD_NAME))
         key = (principal, user_agent, api)
         record = grouped.setdefault(
@@ -309,6 +338,18 @@ def caller_records(entries: list) -> list[dict]:
     return sorted(grouped.values(), key=lambda r: (r["principal"], r["user_agent"], r["api"]))
 
 
+def _dict_field(obj, key: str) -> dict:
+    """The dict under `key`, or an empty one when the entry spells it as anything else."""
+    value = obj.get(key) if isinstance(obj, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _text_field(obj: dict, key: str) -> str | None:
+    """The string under `key`, or None when it is absent or not a string."""
+    value = obj.get(key)
+    return value if isinstance(value, str) and value else None
+
+
 def _one_line(stderr) -> str:
     """gcloud's stderr as one line, so a multi-line error never splits a table row."""
     return STDERR_JOIN.join(str(stderr or "").split())[:STDERR_EXCERPT_CHARS] or NO_STDERR
@@ -337,9 +378,13 @@ def read(context: dict, which: str) -> dict:
     Returns `{"read", "commands", "error", "entries", "pages", "sampled", "callers",
     "window_days", "page_limit", "window_start", "window_end"}`. `error` is the reason the
     read stopped producing usable pages (no runner, a failed or timed-out command, output
-    that is not a list); the pages before it are kept and graded. `sampled` says the last
-    page was full and no further page was read: the page count reached its ceiling, the
-    read's time budget ran out, or the page carried no timestamp to bound the next one on.
+    that is not a list, a page the credential proxy cut at its output cap, or an exception
+    inside the read); the pages before it are kept and graded, except after an exception,
+    which leaves `callers` empty. `sampled` says the last page was full and no further
+    page was read: the page count reached its ceiling, the read's time budget ran out, or
+    the page carried no timestamp to bound the next one on. The result enters the cache
+    only once the read is complete, so a rule that raises mid-read never leaves a clean
+    half-built result for the next rule to find.
     """
     cache = context.setdefault(CONTEXT_CACHE, {}).setdefault(CACHE_KEY, {})
     if which in cache:
@@ -357,17 +402,28 @@ def read(context: dict, which: str) -> dict:
         "window_start": None,
         "window_end": None,
     }
-    cache[which] = result
+    try:
+        _read_pages(context, which, result)
+    except Exception as e:  # noqa: BLE001 - the failure is the read's error, never a clean cached window
+        result["error"] = READ_RAISED_REASON.format(read=which, error=repr(e))
+        result["callers"] = []
+    finally:
+        cache[which] = result
+    return result
+
+
+def _read_pages(context: dict, which: str, result: dict) -> None:
+    """Fills `result` from the runner in the context, page by page."""
     run = context.get(CONTEXT_RUN_CMD)
     project = context.get(CONTEXT_PROJECT)
     location = context.get(CONTEXT_LOCATION)
     cluster = context.get(CONTEXT_CLUSTER_NAME)
     if run is None:
         result["error"] = NO_RUNNER_REASON
-        return result
+        return
     if not (project and location and cluster):
         result["error"] = NO_SCOPE_REASON
-        return result
+        return
     at = context.get(CONTEXT_AT)
     end = at.astimezone(timezone.utc) if isinstance(at, datetime) else datetime.now(timezone.utc)
     start = end - timedelta(days=tables.AUDIT_LOG_WINDOW_DAYS)
@@ -390,6 +446,11 @@ def read(context: dict, which: str) -> dict:
         if rc != 0:
             result["error"] = READ_FAILED_REASON.format(read=which, page=result["pages"], rc=rc, stderr=_one_line(stderr))
             break
+        # The proxy cuts a page past its output cap and prints the marker with rc 0; the
+        # marker, not the parse failure, names the cause, and the pages before it are kept.
+        if PROXY_TRUNCATION_MARKER in str(stderr or ""):
+            result["error"] = OUTPUT_CUT_REASON.format(read=which, page=result["pages"])
+            break
         page = _parse_page(stdout)
         if page is None:
             result["error"] = UNPARSABLE_REASON.format(read=which, page=result["pages"])
@@ -404,7 +465,6 @@ def read(context: dict, which: str) -> dict:
         before = oldest
     result["entries"] = len(entries)
     result["callers"] = caller_records(entries)
-    return result
 
 
 def read_removed(context: dict) -> dict:

@@ -165,6 +165,19 @@ RULE_FAILED_REASON = "rule raised {error}; not evaluated"
 # A rule that declares it cannot block and files a blocker anyway: the finding is kept as
 # a risk, and the note says so, so the invariant holds and the defect is visible.
 DEMOTED_BLOCKER_NOTE = "filed a blocker but declares CAN_BLOCK False; reported as a risk"
+# The shapes a rule's result must have for the fold to read it. A result that breaks one is
+# the rule's defect and costs one `unknown`, like a rule that raises: a string under a list
+# key would otherwise be read letter by letter, and a finding that is not a dict or whose
+# `text` is not a string would fail the stamping or the table after every member was read.
+RESULT_NOT_A_DICT = "evaluate returned {type}, not a dict"
+RESULT_KEY_NOT_A_LIST = "{key} is {type}, not a list"
+FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
+FINDING_TEXT_NOT_TEXT = "a {kind} finding's text is {type}, not a string"
+NOTE_NOT_TEXT = "a note is {type}, not a string"
+# A second module with a registered rule's id is not run: its findings would be stamped
+# with the other module's id and the per-rule counts would describe one of the two. The
+# registered module keeps the id; the duplicate is one `unknown` counted under it.
+DUPLICATE_RULE_REASON = "a second module registers RULE_ID {rule}; the duplicate was not evaluated"
 
 
 # ---------------------------------------------------------------------------- PDBs
@@ -642,15 +655,44 @@ def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
     return out
 
 
-def _rule_result(rule, cluster: dict, member: dict, read, target, context: dict) -> dict:
-    """One rule's result, every key a list, each blocker and risk carrying its `text`.
-    Raises whatever the rule raises; the caller turns that into the rule's `unknown`."""
-    result = rule.evaluate(cluster, member, read, target, context) or {}
-    out = {key: list(result.get(key) or []) for key in RULE_RESULT_KEYS}
-    for finding in out["blocking"] + out["risks"]:
-        if TEXT_KEY not in finding:
-            finding[TEXT_KEY] = rule.describe(finding)
+def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, target, context: dict) -> dict:
+    """One rule's result checked against the contract: every key a list, every blocker and
+    risk a dict carrying a string `text` (the rule's `describe`, unless the rule set it),
+    its `rule` and `entry` stamped, every note a string. Raises on a shape the contract
+    forbids, and whatever the rule raises; the caller turns either into the rule's `unknown`."""
+    result = rule.evaluate(cluster, member, read, target, context)
+    if result is None:
+        result = {}
+    if not isinstance(result, dict):
+        raise TypeError(RESULT_NOT_A_DICT.format(type=type(result).__name__))
+    out = {}
+    for key in RULE_RESULT_KEYS:
+        value = result.get(key)
+        if value is None:
+            value = []
+        if not isinstance(value, list):
+            raise TypeError(RESULT_KEY_NOT_A_LIST.format(key=key, type=type(value).__name__))
+        out[key] = list(value)
+    for kind in ("blocking", "risks"):
+        for finding in out[kind]:
+            if not isinstance(finding, dict):
+                raise TypeError(FINDING_NOT_A_DICT.format(kind=kind, type=type(finding).__name__))
+            if TEXT_KEY not in finding:
+                finding[TEXT_KEY] = rule.describe(finding)
+            if not isinstance(finding[TEXT_KEY], str):
+                raise TypeError(FINDING_TEXT_NOT_TEXT.format(kind=kind, type=type(finding[TEXT_KEY]).__name__))
+            finding[RULE_KEY] = rule_id
+            finding[ENTRY_KEY] = entry
+    for note in out["notes"]:
+        if not isinstance(note, str):
+            raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
     return out
+
+
+def _failed_result(reason: str) -> dict:
+    result = {key: [] for key in RULE_RESULT_KEYS}
+    result["unknown"] = [reason]
+    return result
 
 
 def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dict, rules: list | None = None) -> dict:
@@ -660,9 +702,12 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     and risk stamped with its `rule`, `entry` and `text`, each `unknown` entry a dict with
     `reason`, `can_block` and the `text` the note column prints, each note prefixed with
     its rule's id; and `rules`, per rule id, the rule's `entry`, `can_block` and a count per
-    list, so the findings are serialised once. A rule that raises is one `unknown` entry
-    naming the error, never a crash: one rule's defect must not hide the others' findings. A
-    blocker from a rule whose `CAN_BLOCK` is False is kept as a risk, with a note.
+    list, so the findings are serialised once and `rules[id]` counts what the lists carry
+    under that id. A rule that raises, or returns a shape the contract forbids, is one
+    `unknown` entry naming the error, never a crash: one rule's defect must not hide the
+    others' findings. A blocker from a rule whose `CAN_BLOCK` is False is kept as a risk,
+    with a note. A second module carrying a registered id is not evaluated; it is one
+    `unknown` counted under that id.
     """
     folded = {key: [] for key in RULE_RESULT_KEYS}
     folded["rules"] = {}
@@ -670,18 +715,19 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
         rule_id = getattr(rule, RULE_ID_ATTRIBUTE, getattr(rule, MODULE_NAME_ATTRIBUTE, str(rule)))
         entry = getattr(rule, ENTRY_ATTRIBUTE, None)
         can_block = bool(getattr(rule, CAN_BLOCK_ATTRIBUTE, True))
+        if rule_id in folded["rules"]:
+            duplicate = _unknown_entry(DUPLICATE_RULE_REASON.format(rule=rule_id), rule_id, folded["rules"][rule_id][ENTRY_KEY], True)
+            folded["unknown"].append(duplicate)
+            folded["rules"][rule_id]["unknown"] += 1
+            continue
         try:
-            result = _rule_result(rule, cluster, member, read, target, context)
+            result = _rule_result(rule, rule_id, entry, cluster, member, read, target, context)
         except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
-            result = {key: [] for key in RULE_RESULT_KEYS}
-            result["unknown"] = [RULE_FAILED_REASON.format(error=repr(e))]
+            result = _failed_result(RULE_FAILED_REASON.format(error=repr(e)))
         if not can_block and result["blocking"]:
             result["risks"] = result["blocking"] + result["risks"]
             result["blocking"] = []
             result["notes"].append(DEMOTED_BLOCKER_NOTE)
-        for finding in result["blocking"] + result["risks"]:
-            finding[RULE_KEY] = rule_id
-            finding[ENTRY_KEY] = entry
         result["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in result["unknown"]]
         result["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=note) for note in result["notes"]]
         folded["rules"][rule_id] = {ENTRY_KEY: entry, CAN_BLOCK_KEY: can_block, **{key: len(result[key]) for key in RULE_RESULT_KEYS}}

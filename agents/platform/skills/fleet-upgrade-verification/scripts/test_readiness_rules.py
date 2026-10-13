@@ -358,6 +358,31 @@ class ShapeTablesTest(unittest.TestCase):
         self.assertEqual(tables.replacement_for("policy/v1beta1 podsecuritypolicies"), "none; Pod Security Admission or a policy controller")
         self.assertIsNone(tables.replacement_for("core/v1 endpoints"))
         self.assertIsNone(tables.replacement_for("nonsense"))
+        # The methodName fallback of audit_log.api_of spells a `*.k8s.io` group without the
+        # suffix; the lookup tries both spellings, so an entry with no resourceName still
+        # finds its row, and a group that never had the suffix still matches as before.
+        self.assertEqual(tables.replacement_for("flowcontrol.apiserver/v1beta3 flowschemas"), "flowcontrol.apiserver.k8s.io/v1")
+        self.assertIsNotNone(tables.replacement_for("networking.k8s.io/v1beta1 ingresses"))
+        self.assertEqual(tables.replacement_for("networking/v1beta1 ingresses"), tables.replacement_for("networking.k8s.io/v1beta1 ingresses"))
+        self.assertEqual(tables.replacement_for("rbac.authorization/v1beta1 roles"), tables.replacement_for("rbac.authorization.k8s.io/v1beta1 roles"))
+        self.assertIsNotNone(tables.replacement_for("apps/v1beta1 deployments"))
+        self.assertIsNone(tables.replacement_for("/v1 pods"))
+
+    def test_shell_fork_regex_reads_a_background_job_and_nothing_else(self):
+        forks = ("a & b & wait", "nginx -p 8080& php-fpm", "./a 1& ./b 2& wait", "sleep 1 &")
+        not_forks = ("a && b", "cmd 2>&1", "cmd &>/dev/null", "exec 3<&0", "cmd >&2", "echo done")
+        for text in forks:
+            self.assertTrue(tables.SHELL_FORK_RE.search(text), text)
+        for text in not_forks:
+            self.assertFalse(tables.SHELL_FORK_RE.search(text), text)
+
+    def test_stateful_volume_names_match_how_the_database_charts_spell_them(self):
+        stateful = ("data", "pgdata", "datadir", "database", "mysqldata", "state", "pg-wal", "wal", "db", "journal", "queue", "store", "persist", "wal-e-bin")
+        scratch = ("nginx-cache", "cache", "tmp", "dbus", "walrus", "config", "logs", "bin")
+        for name in stateful:
+            self.assertTrue(tables.STATEFUL_VOLUME_NAME_RE.search(name), name)
+        for name in scratch:
+            self.assertFalse(tables.STATEFUL_VOLUME_NAME_RE.search(name), name)
 
     def test_parse_and_format_minor(self):
         self.assertEqual(tables.parse_minor("1.35.1-gke.1000"), (1, 35))

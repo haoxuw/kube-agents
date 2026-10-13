@@ -346,10 +346,11 @@ NODE_FIELD_SEPARATOR = "\t"
 NODE_FIELD_COUNT = 7
 NODE_KIND = readiness_rules.KIND_NODE
 # The credential proxy caps each stream a brokered command returns; past the cap it writes
-# the cut stdout, prints this marker on stderr and returns the command's own exit code, so
-# a cut list reads as rc 0 with output that may or may not parse. The marker, not the parse
-# failure, names the cause, and the kinds the read carried are recorded as cut.
-PROXY_TRUNCATION_MARKER = "credential proxy output truncated"
+# the cut stdout, prints a marker on stderr (readiness_rules.PROXY_TRUNCATION_MARKER, which
+# the audit-log reader checks too) and returns the command's own exit code, so a cut list
+# reads as rc 0 with output that may or may not parse. The marker, not the parse failure,
+# names the cause, and the kinds the read carried are recorded as cut.
+PROXY_TRUNCATION_MARKER = readiness_rules.PROXY_TRUNCATION_MARKER
 KUBECTL_OUTPUT_CUT = "{cmd} output was cut at the credential proxy's output cap, so the list did not fit in one read"
 NOTE_PDB_READ_FAILED = "cluster read failed; PDBs not graded"
 NOTE_LATER_READS_SKIPPED = "the reads after it were skipped; the per-entry rules that need them say so"
@@ -399,7 +400,10 @@ READINESS_NOT_EVALUATED_CELL = "not evaluated"
 READINESS_NO_OPENING_CELL = f"none within {readiness.DAYS_PER_WEEK} days"
 
 # Exit codes. A failed gcloud call is reported per project and per location and does
-# not abort the run; the exit code only says whether every requested read succeeded.
+# not abort the run. The exit code says whether every read that grades the version table
+# or the PDB rule succeeded: the gcloud reads, `get-credentials`, the PDB read, and an
+# audit-log read a rule performed. The reads after the PDB read (LATER_READS) are recorded
+# per kind in the member's note and JSON and leave it untouched.
 EXIT_OK = 0
 EXIT_PARTIAL = 1
 NARROWED_RUN_NOTE = "Narrowed by --cluster: the rollout record was neither read nor written."
@@ -1230,11 +1234,12 @@ def _skew_cell(r: dict) -> str:
 
 
 def _rule_cell(r: dict, key: str) -> str:
-    """The per-entry rules' blockers or risks, each as its rule described it; `read failed`
-    when nothing was read and no rule found anything from the cluster record alone."""
+    """The per-entry rules' blockers or risks, each as `<rule id>: <text>` so the table names
+    the rule the way the note column does; `read failed` when nothing was read and no rule
+    found anything from the cluster record alone."""
     findings = r[key]
     if findings:
-        return NOTE_SEPARATOR.join(f[readiness.TEXT_KEY] for f in findings)
+        return NOTE_SEPARATOR.join(readiness.RULE_PREFIX_FORMAT.format(rule=f[readiness.RULE_KEY], text=f[readiness.TEXT_KEY]) for f in findings)
     if r["pdbs"] is None:
         return READINESS_READ_FAILED_CELL
     return READINESS_NONE_CELL

@@ -445,6 +445,51 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertEqual([u["rule"] for u in folded["unknown"]], ["bad-describe"])
         self.assertEqual(folded["rules"]["empty"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 0, "notes": 0})
 
+    def test_a_result_of_the_wrong_shape_is_one_unknown_not_a_crash_or_a_letter_each(self):
+        # A string where a list was owed is the likeliest slip; read letter by letter it
+        # would print one note per character. A dict, a list for the whole result, a finding
+        # that is not a dict, a finding whose text is not a string and a note that is not a
+        # string are the same defect: one unknown naming it, the other rules untouched.
+        cases = {
+            "string-unknown": (lambda *a: {"unknown": "no target to grade against"}, "unknown is str, not a list"),
+            "dict-notes": (lambda *a: {**shared.new_result(), "notes": {"a": 1}}, "notes is dict, not a list"),
+            "list-result": (lambda *a: [], "evaluate returned list, not a dict"),
+            "string-finding": (lambda *a: {**shared.new_result(), "risks": ["context"]}, "a risks finding is str, not a dict"),
+            "list-finding": (lambda *a: {**shared.new_result(), "blocking": [["text", 1]]}, "a blocking finding is list, not a dict"),
+            "none-text": (lambda *a: {**shared.new_result(), "risks": [{"what": "x", "text": None}]}, "a risks finding's text is NoneType, not a string"),
+            "int-note": (lambda *a: {**shared.new_result(), "notes": [3]}, "a note is int, not a string"),
+        }
+        fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
+        for name, (evaluate, reason) in cases.items():
+            broken = rule_module(name, evaluate=evaluate)
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
+            self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [(name, f"rule raised TypeError({reason!r}); not evaluated")], name)
+            self.assertEqual(folded["rules"][name], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0}, name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
+            self.assertEqual(folded["notes"], [], name)
+
+    def test_findings_are_stamped_inside_the_guard(self):
+        # Stamping and rendering happen before the fold returns, so every blocker and risk
+        # the fold emits is a dict with a string text, its rule and its entry.
+        rule = rule_module("stamped", entry=19, evaluate=returning(blocking=[{"what": "pv"}], risks=[{"what": "pv2", "text": "own"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])
+        for finding in folded["blocking"] + folded["risks"]:
+            self.assertEqual((finding["rule"], finding["entry"]), ("stamped", 19))
+            self.assertIsInstance(finding["text"], str)
+
+    def test_a_second_module_with_a_registered_id_is_not_evaluated(self):
+        first = rule_module("twice", entry=4, evaluate=returning(risks=[{"what": "a"}]))
+        second = rule_module("twice", entry=12, evaluate=returning(blocking=[{"what": "b"}], risks=[{"what": "c"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[first, second])
+        self.assertEqual(folded["blocking"], [])
+        self.assertEqual([f["what"] for f in folded["risks"]], ["a"])
+        self.assertEqual([(u["rule"], u["entry"], u["can_block"], u["reason"]) for u in folded["unknown"]], [("twice", 4, True, "a second module registers RULE_ID twice; the duplicate was not evaluated")])
+        self.assertEqual(folded["rules"], {"twice": {"entry": 4, "can_block": True, "blocking": 0, "risks": 1, "unknown": 1, "notes": 0}})
+        # The invariant the JSON readers rely on: per-rule counts describe the flat lists.
+        for key in ("blocking", "risks", "unknown", "notes"):
+            self.assertEqual(folded["rules"]["twice"][key], sum(1 for item in folded[key] if (item["rule"] if isinstance(item, dict) else None) == "twice" or (key == "notes" and item.startswith("twice: "))))
+        self.assertEqual(r.readiness_status({"blocking": []}, {"blocking_exclusions": [], "undecided_exclusions": []}, {"blocking": [], "unknown": []}, True, folded), r.READINESS_UNKNOWN)
+
     def test_a_blocker_from_a_rule_that_cannot_block_is_demoted_to_a_risk_with_a_note(self):
         rule = rule_module("cannot", entry=11, can_block=False, evaluate=returning(blocking=[{"what": "oops"}], risks=[{"what": "fine"}]))
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])

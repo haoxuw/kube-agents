@@ -55,9 +55,13 @@ NODEPOOL_LABEL = "cloud.google.com/gke-nodepool"
 
 # ------------------------------------------------------------------ entry 4: data on the node
 
-# A cache is the acceptable use the catalogue names, so it is not here; the words are
-# anchored so `nginx-cache` and `wal-e-bin` do not match on a syllable.
-STATEFUL_VOLUME_NAME_RE = re.compile(r"(?<![a-z])(?:data|state|db|queue|store|journal|wal|persist)(?![a-z])", re.I)
+# A cache is the acceptable use the catalogue names, so it is not here. The long words
+# match inside a name, which is how the database charts spell the volume (`pgdata`,
+# `datadir`, `database`, `mysqldata`); the two short ones need a non-letter on each side,
+# so `dbus` and `walrus` do not match while `pg-wal` and `db` do. `nginx-cache` matches
+# nothing; `wal-e-bin` matches on `wal`, the name of a WAL directory more often than of
+# WAL-E's binaries.
+STATEFUL_VOLUME_NAME_RE = re.compile(r"data|state|queue|store|journal|persist|(?<![a-z])(?:db|wal)(?![a-z])", re.I)
 # Where a node exposes Local SSD: Compute Engine formats and mounts Local SSD under
 # /mnt/disks (cloud.google.com/compute/docs/disks/add-local-ssd#formatandmount); GKE's
 # ephemeral Local SSD lives under /mnt/stateful_partition on Container-Optimized OS
@@ -384,8 +388,9 @@ SINGLE_PROCESS_OOM_KILL_FIELD = "singleProcessOomKill"
 # Entry 15 is a heuristic on the command and the image: the process count is not readable
 # from the API. Programs whose job is to run several services in one container
 # (supervisord, s6-overlay's s6-svscan, runit's runsvdir), a shell script that forks a
-# background job (`a & b & wait`; `&&`, `2>&1`, `&>` and an `&` inside a quoted string are
-# not forks; the script is the word after any short flag group carrying `c`, `-c`, `-ec`,
+# background job (`a & b & wait`, `nginx -p 8080& php-fpm`; `&&`, `2>&1`, `&>`, `3<&0` and
+# an `&` inside a quoted string are not forks; the script is the word after any short flag
+# group carrying `c`, `-c`, `-ec`,
 # `-lc`), and images whose documented entrypoint is such a supervisor: phusion/baseimage and
 # phusion/passenger run services under runit (github.com/phusion/baseimage-docker),
 # webdevops/php-nginx and richarvey/nginx-php-fpm run nginx and PHP-FPM under supervisord
@@ -394,7 +399,7 @@ SUPERVISOR_PROGRAMS = ("supervisord", "s6-svscan", "runsvdir")
 SHELL_PROGRAMS = ("sh", "bash", "ash", "dash", "zsh")
 SHELL_COMMAND_FLAG_RE = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
 SHELL_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-SHELL_FORK_RE = re.compile(r"(?<![&>\d])&(?![&>])")
+SHELL_FORK_RE = re.compile(r"(?<![&><])&(?![&>])")
 MULTI_PROCESS_IMAGE_REPOS = ("phusion/baseimage", "phusion/passenger", "webdevops/php-nginx", "richarvey/nginx-php-fpm")
 
 # ------------------------------------------------------------------ entry 17: node networking agents
@@ -531,6 +536,10 @@ PLURAL_Y_TO_IES = ("y", "ies")
 API_SEPARATOR = " "
 GROUP_VERSION_SEPARATOR = "/"
 CORE_GROUP = "core"
+# An audit entry with no resourceName names its API from the methodName, which spells a
+# `*.k8s.io` group without the suffix (`io.k8s.networking.v1beta1` is `networking.k8s.io`),
+# and the `apps`-style groups the same way, so a lookup tries both spellings.
+K8S_IO_GROUP_SUFFIX = ".k8s.io"
 
 # `MAJOR.MINOR` at the start of a version string, with or without a `v`, a patch or a
 # `-gke.BUILD` suffix: the minor is what every table here is keyed by.
@@ -579,6 +588,10 @@ def replacement_for(api: str) -> str | None:
     spellings = {group_version}
     if group == CORE_GROUP:
         spellings.add(version)
+    elif group.endswith(K8S_IO_GROUP_SUFFIX):
+        spellings.add(group[: -len(K8S_IO_GROUP_SUFFIX)] + GROUP_VERSION_SEPARATOR + version)
+    elif group:
+        spellings.add(group + K8S_IO_GROUP_SUFFIX + GROUP_VERSION_SEPARATOR + version)
     for entry in _removed_apis():
         if entry.get(REMOVED_API_VERSION_KEY) in spellings and _kind_matches_resource(entry.get(REMOVED_KIND_KEY, ""), resource):
             return entry.get(REMOVED_REPLACEMENT_KEY)

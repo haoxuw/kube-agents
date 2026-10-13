@@ -1624,7 +1624,8 @@ class ReadinessTest(unittest.TestCase):
         a_row = next(l for l in lines if l.startswith("| p1 | seeded-a |") and "| ready |" in l)
         cells = [c.strip() for c in a_row.strip("|").split(" | ")]
         self.assertEqual(cells[7], "none")
-        self.assertIn("control plane is zonal (us-central1-a)", cells[8])
+        # The cell names the rule, so a reader of the table alone can quote its id.
+        self.assertIn("zonal-control-plane: control plane is zonal (us-central1-a)", cells[8])
         self.assertIn("retry with backoff", cells[8])
         host_row = next(l for l in lines if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
         self.assertNotIn("control plane is zonal", host_row)
@@ -1662,7 +1663,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual([f["rule"] for f in a["risks"]], ["zonal-control-plane"])
         self.assertEqual(list(a["rules"]), ["test-blocker", "zonal-control-plane"])
         row = next(l for l in text.splitlines() if l.startswith("| p1 | seeded-a |") and "| blocked |" in l)
-        self.assertIn("| pool p removes a node first | control plane is zonal", row)
+        self.assertIn("| test-blocker: pool p removes a node first | zonal-control-plane: control plane is zonal", row)
         self.assertEqual(data["readiness"]["summary"], {"blocked": 3, "ready": 0, "unknown": 0})
 
     def test_a_failed_read_after_the_pdb_read_costs_the_rules_that_need_it_and_no_exit_code(self):
@@ -1873,7 +1874,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn('resource.type="k8s_cluster"', a_read[3])
         self.assertIn('resource.labels.location="us-central1-a"', a_read[3])
         self.assertIn('timestamp>="2026-09-07T15:00:00Z" AND timestamp<="2026-09-14T15:00:00Z"', a_read[3])
-        self.assertEqual(a_read[4:], ["--project=p1", "--limit=1000", "--format=json"])
+        self.assertEqual(a_read[4:], ["--project=p1", "--limit=1000", audit_log.JSON_FORMAT_FLAG])
         by_name = {m["cluster"]: m["readiness"] for m in data["members"]}
         a = by_name["seeded-a"]
         self.assertEqual(set(a["audit_log"]), {"removed"})
