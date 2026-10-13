@@ -169,10 +169,13 @@ The findings are the evidence behind the verdict; the verdict is the deliverable
 Closest thing on `main`: `fleet-upgrade-verification --readiness` already emits
 `blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions, skew and
 the per-entry rules registered in its `readiness_rules/` package, each a blocker or a risk that the
+`blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, maintenance exclusions, skew and
+the per-entry rules registered in its `readiness_rules/` package, each a blocker or a risk that the
 Scope table credits as it lands. Two things are missing — the verdict is per cluster, not per
 family, and it reads a subset of the checks here, not every one. It is on the schedule for the
 clusters that are behind: the upgrade audit's `upgrade-blocked` check runs it weekly and files the
-join.
+join, and the daily `upgrade-readiness-watch` cron job runs it when a cluster is below a version
+its channel offers.
 
 ## Version posture
 

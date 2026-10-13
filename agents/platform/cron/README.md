@@ -183,13 +183,17 @@ because the report script's own fallback is every project the credential can
 list. Within those projects the report script
 enumerates every cluster, so a cluster `spec.scope.exclude.clusters` keeps a
 Cluster Agent from is still read here. That read is `gcloud` cluster metadata
-for the version table and, on a report day, one `get-credentials` and two
-`kubectl get` per cluster for the readiness grade, one of
-`pdb,deploy,statefulset -A` and one of
-`validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpointslices,namespaces -A`;
-the budget names those objects, and a fail-closed webhook with no reachable
-backend names its configuration and its Service, in the saved report, which is
-tenant-written text, so the entry declares `risk: high` as `stall-watch` does. A project
+for the version table and, on a report day, the readiness report's read set,
+the same as a run on request: one `get-credentials` and six `kubectl get`s
+per cluster (budgets, Deployments and StatefulSets; webhook configurations
+with their Services, EndpointSlices and Namespaces; DaemonSets, CronJobs,
+claims, NetworkPolicies and Namespaces; every pod; the nodes through a
+jsonpath projection; StorageClasses and PersistentVolumes), plus
+`gcloud logging read` over the Admin Activity log when a registered rule reads
+it; the saved report names those objects, pods and nodes among them, and a
+fail-closed webhook with no reachable backend names its configuration and its
+Service, which is tenant-written text, so the entry declares `risk: high` as
+`stall-watch` does. A project
 spelled by its number is keyed by the id `gcloud projects describe` resolves,
 learned on its first table run. A number the credential cannot resolve is
 never a key, so its clusters earn no report until it resolves: when nothing

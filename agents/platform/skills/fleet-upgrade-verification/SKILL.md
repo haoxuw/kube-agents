@@ -299,7 +299,8 @@ fails on its own: a refused or unparsable read, or one the credential proxy cut 
 cap (recorded as that kind's error naming the cap, never as unparsable JSON), costs only the
 rules that need its kinds, each of which says so as `unknown` and grades what it has, and it
 sets no exit code; the note names the kinds not read and the JSON records the error per kind
-under `read_errors`. A rule that needs more reads
+under `read_errors` (every kind carries the reason when `get-credentials` or the PDB read failed,
+so nothing after it ran). A rule that needs more reads
 it through the script's own runner, under the same per-call cap. The audit-log reader beside the
 rules (`readiness_rules/audit_log.py`) is that kind of read: two paged `gcloud logging read`s per
 member over the seven days ending at `--at`, cached so every rule that asks reads once, and

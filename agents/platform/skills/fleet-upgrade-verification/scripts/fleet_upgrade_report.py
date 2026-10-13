@@ -343,6 +343,7 @@ KUBECTL_READS_PER_MEMBER = 1 + len(LATER_READS)
 KUBECTL_NODE_JSONPATH = '{range .items[*]}{.metadata.name}{"\\t"}{.metadata.labels}{"\\t"}{.spec.taints}{"\\t"}{.spec.unschedulable}{"\\t"}{.status.nodeInfo}{"\\t"}{.status.allocatable}{"\\t"}{.status.conditions}{"\\n"}{end}'
 JSONPATH_OUTPUT_FORMAT = "jsonpath={template}"
 NODE_FIELD_SEPARATOR = "\t"
+NODE_LINE_SEPARATOR = "\n"  # what the jsonpath template ends each node with; a NEL (U+0085) inside a field is not a line break
 NODE_FIELD_COUNT = 7
 NODE_KIND = readiness_rules.KIND_NODE
 # The credential proxy caps each stream a brokered command returns; past the cap it writes
@@ -353,7 +354,6 @@ NODE_KIND = readiness_rules.KIND_NODE
 PROXY_TRUNCATION_MARKER = readiness_rules.PROXY_TRUNCATION_MARKER
 KUBECTL_OUTPUT_CUT = "{cmd} output was cut at the credential proxy's output cap, so the list did not fit in one read"
 NOTE_PDB_READ_FAILED = "cluster read failed; PDBs not graded"
-NOTE_LATER_READS_SKIPPED = "the reads after it were skipped; the per-entry rules that need them say so"
 NOTE_READ_FAILED = "{kinds} not read ({error}); the per-entry rules that need them say so"
 # A read's error in the note column: collapsed to one line and cut to this, the length the
 # fold gives a rule's unknown reason; the JSON carries it whole.
@@ -820,7 +820,7 @@ def _kubectl_get(resources: str, env: dict, namespaced: bool) -> tuple[list | No
 def parse_node_lines(stdout: str) -> tuple[list[dict] | None, str | None]:
     """(nodes, error): the projected Node objects from the jsonpath read's lines."""
     nodes = []
-    for line in stdout.splitlines():
+    for line in stdout.split(NODE_LINE_SEPARATOR):
         if not line.strip():
             continue
         fields = line.split(NODE_FIELD_SEPARATOR)
@@ -857,7 +857,9 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
     """The objects of one member, read through kubectl, as the `read` dict the per-entry rules
     take: `kubeconfig`; `items`, every object every read returned; `error`, the credentials or
     PDB-read failure; and `read_errors`, keyed by kind for the reads after the PDB read, each
-    None or that read's error.
+    None when the kind was read, else the error of the read that carried it, or, when
+    `get-credentials` or the PDB read failed and nothing after it ran, the reason nothing was
+    read, so a member whose first read failed never reads as nine successful reads.
 
     `get-credentials` writes the member's kubeconfig, then one `kubectl get` reads every
     PodDisruptionBudget, Deployment and StatefulSet. A failed credentials fetch or PDB read
@@ -873,16 +875,16 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
         os.makedirs(kubeconfig_dir, exist_ok=True)
     except OSError as e:
         read["error"] = f"cannot create kubeconfig directory {kubeconfig_dir}: {e}"
-        return read
+        return _nothing_read(read)
     env = {**os.environ, KUBECONFIG_ENV: path}
     cmd = get_credentials_cmd(cluster, project)
     rc, _, stderr = run_cmd(cmd, GCLOUD_TIMEOUT_SECONDS, env)
     if rc != 0:
         read["error"] = f"{' '.join(cmd)} failed ({rc}): {stderr.strip()}"
-        return read
+        return _nothing_read(read)
     read["items"], read["error"] = _kubectl_get(KUBECTL_RESOURCES, env, True)
     if read["error"] is not None:
-        return read
+        return _nothing_read(read)
     for kinds, resources, mode in LATER_READS:
         objects, error = _later_read(resources, mode, env)
         if error is not None:
@@ -904,6 +906,14 @@ def _pool_records(cluster: dict, member: dict) -> list[dict]:
 
 def _error_excerpt(error: str) -> str:
     return readiness_rules.one_line(error, NOTE_ERROR_CHARS) if error else ""
+
+
+def _nothing_read(read: dict) -> dict:
+    """`read` with every later kind marked as not read, because `get-credentials` or the PDB
+    read failed first: `read_errors` then says so per kind, the note names the kinds, and
+    the JSON cannot be mistaken for nine successful reads."""
+    read["read_errors"] = {kind: readiness_rules.NOTHING_READ_REASON for kind in readiness_rules.READ_KINDS}
+    return read
 
 
 def _read_error_notes(read_errors: dict) -> list[str]:
@@ -956,7 +966,6 @@ def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime, flee
     notes = []
     if read_error:
         notes.append(NOTE_PDB_READ_FAILED)
-        notes.append(NOTE_LATER_READS_SKIPPED)
     notes.extend(_read_error_notes(read["read_errors"]))
     if target is None:
         notes.append("no target; exclusion scope and skew not graded")

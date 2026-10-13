@@ -169,6 +169,13 @@ MILLIS_PER_CORE = 1000
 BYTES_PER_MI = 1024**2
 CPU_FORMAT = "{millis}m"
 MEMORY_FORMAT = "{mebibytes}Mi"
+CPU_KEY = "cpu"
+MEMORY_KEY = "memory"
+# A restartable init container (a native sidecar) runs alongside the app containers and
+# every init container started after it; `overhead` is what the RuntimeClass reserves on top.
+RESTART_POLICY_FIELD = "restartPolicy"
+RESTART_POLICY_ALWAYS = "Always"
+OVERHEAD_FIELD = "overhead"
 # Node affinity, as the PodSpec spells it. Only required terms are read: a preferred term
 # never keeps a pod off a node. The operators are the NodeSelectorRequirement's; `In` and
 # `Exists` select nodes carrying the label, the others select nodes without it or by value.
@@ -232,6 +239,8 @@ SHELL_OPEN_BRACE = "{"
 SHELL_CLOSE_BRACE = "}"
 SHELL_ARITHMETIC_CLOSE = "))"  # what closes arithmetic; `((` closed by a lone `)` is two parentheses, as bash reads it
 SHELL_ANSI_QUOTE = "$'"  # bash's ANSI-C quoting, a span to the first `'` not escaped
+SHELL_CASE_WORD = "case"  # a `case … esac` inside a substitution: its patterns' `)` close nothing
+SHELL_ESAC_WORD = "esac"
 PATH_SEPARATOR = "/"
 
 
@@ -378,26 +387,39 @@ def is_daemonset_pod(pod: dict) -> bool:
 
 def _container_requests(container: dict) -> tuple[int | None, int | None]:
     requests = ((container.get("resources") or {}).get("requests")) or {}
-    return cpu_millis(requests.get("cpu", 0)), memory_bytes(requests.get("memory", 0))
+    return _quantities(requests)
+
+
+def _quantities(requests: dict) -> tuple[int | None, int | None]:
+    return cpu_millis(requests.get(CPU_KEY, 0)), memory_bytes(requests.get(MEMORY_KEY, 0))
+
+
+def _slots_add(a: tuple, b: tuple) -> tuple:
+    return tuple(None if x is None or y is None else x + y for x, y in zip(a, b))
+
+
+def _slots_max(a: tuple, b: tuple) -> tuple:
+    return tuple(None if x is None or y is None else max(x, y) for x, y in zip(a, b))
 
 
 def pod_requests(spec: dict) -> tuple[int | None, int | None]:
-    """(cpu millicores, memory bytes) a pod spec asks for: the containers' sum, or an
-    init container's request where that is larger, as the scheduler counts it. None in
-    a slot whose quantities do not all parse."""
-    cpu_total, memory_total = 0, 0
-    cpu_init, memory_init = 0, 0
+    """(cpu millicores, memory bytes) a pod spec asks for, as the scheduler counts it: the
+    containers' sum plus the restartable init containers (native sidecars, `restartPolicy:
+    Always`, which keep running), or, where larger, an init container's request plus the
+    sidecars started before it (init containers run one at a time, in order), plus the pod's
+    `overhead`. None in a slot whose quantities do not all parse."""
+    app = (0, 0)
     for container in spec.get("containers") or []:
-        cpu, memory = _container_requests(container)
-        cpu_total = None if cpu is None or cpu_total is None else cpu_total + cpu
-        memory_total = None if memory is None or memory_total is None else memory_total + memory
+        app = _slots_add(app, _container_requests(container))
+    sidecars, init_peak = (0, 0), (0, 0)
     for container in spec.get("initContainers") or []:
-        cpu, memory = _container_requests(container)
-        cpu_init = None if cpu is None or cpu_init is None else max(cpu_init, cpu)
-        memory_init = None if memory is None or memory_init is None else max(memory_init, memory)
-    cpu = None if cpu_total is None or cpu_init is None else max(cpu_total, cpu_init)
-    memory = None if memory_total is None or memory_init is None else max(memory_total, memory_init)
-    return cpu, memory
+        requests = _container_requests(container)
+        if container.get(RESTART_POLICY_FIELD) == RESTART_POLICY_ALWAYS:
+            sidecars = _slots_add(sidecars, requests)
+        else:
+            init_peak = _slots_max(init_peak, _slots_add(requests, sidecars))
+    overhead = _quantities(spec.get(OVERHEAD_FIELD) or {})
+    return _slots_add(_slots_max(_slots_add(app, sidecars), init_peak), overhead)
 
 
 def containers(spec: dict) -> list[dict]:
@@ -617,6 +639,7 @@ def shell_forks(script) -> bool | None:
     string. `sh` on a Debian image is dash, which reads `((x & 1))` as two subshells with a
     fork inside and `cmd &>f` as `cmd &` then `>f`, two forks the scanner does not report;
     a rule that grades an `sh -c` script with those two spellings grades it as bash would.
+    A `case … esac` inside a substitution is read as one, its patterns' `)` closing nothing.
 
     None when the script cannot be read this way: an unterminated quote, heredoc, command
     substitution or expansion, or a trailing backslash, which a rule reports as unknown,
@@ -650,6 +673,7 @@ def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str 
     None when a quote, expansion or heredoc is unterminated or a backslash ends the script."""
     n = len(script)
     depth = 0  # subshell parentheses open in this command list
+    case_depth = 0  # `case` statements open: a pattern's `)` then closes no substitution
     while i < n:
         c = script[i]
         if closer == SHELL_BACKTICK and c == SHELL_BACKTICK:
@@ -728,20 +752,36 @@ def _shell_scan(script: str, i: int, out: list[str], pending: list, closer: str 
                 if not quoted and _shell_heredoc_body(script[i:body_end], out) is None:
                     return None
                 i = resume
+        elif _shell_word_at(script, i, SHELL_CASE_WORD, out):
+            case_depth += 1
+            out.extend(SHELL_CASE_WORD)
+            i += len(SHELL_CASE_WORD)
+        elif _shell_word_at(script, i, SHELL_ESAC_WORD, out):
+            case_depth = max(case_depth - 1, 0)
+            out.extend(SHELL_ESAC_WORD)
+            i += len(SHELL_ESAC_WORD)
         elif c == SHELL_OPEN_PAREN:
             depth += 1
             out.append(c)
             i += 1
         elif c == SHELL_CLOSE_PAREN:
-            if closer == SHELL_CLOSE_PAREN and depth == 0:
+            if closer == SHELL_CLOSE_PAREN and depth == 0 and case_depth == 0:
                 return i + 1
-            depth = max(depth - 1, 0)  # a `case` pattern's `)` closes nothing
+            if depth:  # a `case` pattern's `)` closes nothing
+                depth -= 1
             out.append(c)
             i += 1
         else:
             out.append(c)
             i += 1
     return None if closer is not None else n
+
+
+def _shell_word_at(script: str, i: int, word: str, out: list[str]) -> bool:
+    """Whether `word` stands on its own at `i`: a word break (or the start) before it in
+    what was scanned, and one (or the end) after it."""
+    end = i + len(word)
+    return script.startswith(word, i) and (not out or out[-1] in SHELL_WORD_BREAKS) and (end >= len(script) or script[end] in SHELL_WORD_BREAKS)
 
 
 def _shell_ansi_quoted(script: str, i: int) -> int | None:

@@ -544,6 +544,35 @@ class ExtraRulesTest(unittest.TestCase):
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[fine])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["fine"]))
         self.assertEqual((audit_log.summaries(ctx), audit_log.summaries({}), audit_log.summaries({shared.CONTEXT_CACHE: None}), audit_log.cache_defect({})), ({}, {}, {}, None))
+        self.assertIsNotNone(audit_log.cache_defect({shared.CONTEXT_CACHE: None}))
+        # A rule's damage is put back before the next rule runs: the next rule's read works
+        # and is kept, and each later offender is charged on its own, not masked by the first.
+        def reading_with_risk(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            out = shared.new_result()
+            out["risks"].append({"what": "r"})
+            return out
+
+        def spoiling_entry(which, value):
+            def evaluate(cluster, member, read, target, ctx):
+                ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY][which] = value
+                return shared.new_result()
+
+            return evaluate
+
+        def nulling(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE] = None
+            return shared.new_result()
+
+        ctx = context()
+        rules = [rule_module("list", evaluate=writing([1])), rule_module("reader", evaluate=reading_with_risk), rule_module("nuller", evaluate=spoiling_entry("removed", None)), rule_module("stranger", evaluate=spoiling_entry("deprecated", 3)), fine]
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=rules)
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["list", "nuller", "stranger"])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "fine"])
+        self.assertEqual(list(audit_log.summaries(ctx)), ["removed"])
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("nulling", evaluate=nulling), rule_module("reader", evaluate=reading_with_risk)])
+        self.assertEqual(([u["rule"] for u in folded["unknown"]], [f["rule"] for f in folded["risks"]], list(audit_log.summaries(ctx))), (["nulling"], ["reader"], ["removed"]))
 
     def test_findings_are_copied_before_they_are_stamped(self):
         shared_finding = {"what": "pool p"}

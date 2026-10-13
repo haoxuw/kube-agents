@@ -1586,10 +1586,14 @@ class ReadinessTest(unittest.TestCase):
         # Every read for each of the two members whose credentials came; none for seeded-b.
         self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 2 * report.KUBECTL_READS_PER_MEMBER)
         self.assertEqual(report.KUBECTL_READS_PER_MEMBER, len(MEMBER_READS))
-        self.assertIn("cluster read failed; PDBs not graded; the reads after it were skipped; the per-entry rules that need them say so", b["note"])
+        # The skipped reads are recorded per kind, so the JSON cannot be read as nine
+        # successful reads, and the note names them from that record.
+        self.assertIn("cluster read failed; PDBs not graded", b["note"])
+        self.assertIn(readiness_rules.NOTHING_READ_REASON, b["note"])
+        self.assertNotIn("the reads after it were skipped", b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
         self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
-        self.assertEqual({kind: None for kind in readiness_rules.READ_KINDS}, b["read_errors"])
+        self.assertEqual({kind: readiness_rules.NOTHING_READ_REASON for kind in readiness_rules.READ_KINDS}, b["read_errors"])
 
     def test_zonal_risk_fills_the_risks_column_and_the_json_shape(self):
         fake = FakeReadinessCommands(self.clusters, {}, self.objects)
@@ -1800,6 +1804,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("node line unparsable", error)
         nodes, error = report.parse_node_lines("n1\tonly two\n")
         self.assertIn("field(s), not 7", error)
+        # Only the template's newline ends a node: a NEL (U+0085) inside a free-text field,
+        # which Go's JSON encoder leaves raw, is part of the line.
+        nodes, error = report.parse_node_lines('n1\t{"note":"a\u0085b"}\t\t\t{}\t{}\t[]\n')
+        self.assertIsNone(error)
+        self.assertEqual(nodes[0]["metadata"]["labels"], {"note": "a\u0085b"})
         self.assertEqual(report.KUBECTL_NODE_JSONPATH.count('{"\\t"}'), report.NODE_FIELD_COUNT - 1)
         self.assertIn("{.spec.unschedulable}", report.KUBECTL_NODE_JSONPATH)
         # The fake renders a node the way the template does, and the report reads it back whole;

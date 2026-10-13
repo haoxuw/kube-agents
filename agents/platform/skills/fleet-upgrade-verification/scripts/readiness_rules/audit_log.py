@@ -46,6 +46,7 @@ proxy still cut at its output cap is the read's error, naming the cap, with the 
 it kept.
 """
 
+import copy
 import json
 import re
 import time
@@ -421,9 +422,15 @@ def read(context: dict, which: str) -> dict:
     only once the read is complete, so a rule that raises mid-read never leaves a clean
     half-built result for the next rule to find.
     """
-    cache = context.setdefault(CONTEXT_CACHE, {}).setdefault(CACHE_KEY, {})
-    if which in cache:
-        return cache[which]
+    cache = context.setdefault(CONTEXT_CACHE, {})
+    if not isinstance(cache, dict):  # a context built by hand; the fold puts a rule's damage back before the next rule
+        cache = context[CONTEXT_CACHE] = {}
+    logs = cache.get(CACHE_KEY)
+    if not isinstance(logs, dict):
+        logs = cache[CACHE_KEY] = {}
+    cached = logs.get(which)
+    if isinstance(cached, dict) and cached.get(READ_KEY) == which:
+        return cached
     result = {
         "read": which,
         "commands": [],
@@ -443,7 +450,7 @@ def read(context: dict, which: str) -> dict:
         result["error"] = READ_RAISED_REASON.format(read=which, error=repr(e))
         result["callers"] = []
     finally:
-        cache[which] = result
+        logs[which] = result
     return result
 
 
@@ -522,11 +529,12 @@ def cache_defect(context) -> str | None:
     """Why the audit-log cache cannot be read as the reads left it, or None. The context's
     cache must be a dict, its `audit_log` entry a dict keyed by read name, and each value a
     read result: a dict whose `read` is that name, carrying every summary key, JSON values
-    with no NaN or infinity. A rule writes the cache; the fold calls this before and after a
-    rule runs and makes a defect the rule's `unknown`."""
-    cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
-    if cache is None:
+    with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
+    a rule runs, and a defect the rule left (`cache_changed`) is the rule's `unknown`, with
+    the cache put back (`cache_restore`) so no later rule or reader meets it."""
+    if not isinstance(context, dict) or CONTEXT_CACHE not in context:
         return None
+    cache = context[CONTEXT_CACHE]
     if not isinstance(cache, dict):
         return CACHE_NOT_A_DICT.format(type=type(cache).__name__)
     logs = cache.get(CACHE_KEY)
@@ -556,6 +564,41 @@ def _read_result_defect(which, log) -> str | None:
     except (TypeError, ValueError) as e:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=str(e))
     return None
+
+
+def cache_snapshot(context) -> tuple:
+    """The audit-log cache as it stands, for `cache_changed` and `cache_restore` around a
+    rule: the context's cache object (None when the context has none) and a deep copy of
+    its `audit_log` entry (None when absent)."""
+    cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
+    logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
+    return cache, copy.deepcopy(logs)
+
+
+def cache_changed(context, snapshot) -> bool:
+    """Whether the audit-log cache differs from `snapshot`: another cache object under the
+    context key, or another `audit_log` entry by value."""
+    cache, logs = snapshot
+    now_cache, now_logs = cache_snapshot(context)
+    return now_cache is not cache or now_logs != logs
+
+
+def cache_restore(context, snapshot) -> None:
+    """Puts the audit-log cache back as `snapshot` saw it: the same cache object under the
+    context key (or none), carrying the copied `audit_log` entry (or none), so a rule's
+    damage reaches no later rule and no reader."""
+    cache, logs = snapshot
+    if not isinstance(context, dict):
+        return
+    if cache is None:
+        context.pop(CONTEXT_CACHE, None)
+    else:
+        context[CONTEXT_CACHE] = cache
+    if isinstance(cache, dict):
+        if logs is None:
+            cache.pop(CACHE_KEY, None)
+        else:
+            cache[CACHE_KEY] = logs
 
 
 def summaries(context) -> dict[str, dict]:

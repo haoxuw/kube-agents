@@ -1456,7 +1456,8 @@ class Loader(unittest.TestCase):
     def test_the_loader_registers_the_readiness_module_and_calls_main_in_a_private_directory(self) -> None:
         source = watch.loader_source(["--project", "p1"])
         compile(source, "loader", "exec")
-        self.assertIn('sys.modules["upgrade_readiness"]', source)
+        self.assertIn("sys.meta_path.insert(0, Shipped())", source)
+        self.assertIn('importlib.import_module("fleet_upgrade_report")', source)
         self.assertIn("report.main(ARGV + ", source)
         self.assertIn("tempfile.mkdtemp(", source)
         self.assertIn("shutil.rmtree(private", source)
@@ -1469,6 +1470,34 @@ class Loader(unittest.TestCase):
             ["--project", "p1", "--project", "p2", "--readiness", "--kubeconfig-dir", watch.SANDBOX_KUBECONFIG_DIR],
         )
         self.assertEqual(watch.report_argv(["p1"], readiness=False), ["--project", "p1"])
+
+    def test_the_shipped_set_is_every_skill_module_but_the_tests(self) -> None:
+        shipped = watch.shipped_modules()
+        for name in (watch.REPORT_MODULE, watch.READINESS_MODULE, "readiness_rules", "readiness_rules.audit_log", "readiness_rules.zonal_control_plane", "readiness_rules.finding", "upgrade_shape_tables"):
+            self.assertIn(name, shipped)
+        self.assertEqual([name for name in shipped if name.rsplit(".", 1)[-1].startswith(watch.SKILL_TEST_PREFIX)], [])
+        self.assertTrue(shipped["readiness_rules"][2])
+        self.assertFalse(shipped[watch.REPORT_MODULE][2])
+        self.assertTrue(all(Path(entry[1]).is_file() for entry in shipped.values()))
+
+    def test_the_report_imports_from_the_shipped_set_alone(self) -> None:
+        """The finder alone, in an empty directory under ``-I``: every import the report
+        makes resolves from the shipped modules (or the shared scripts directory the report
+        appends itself), so a module a later change imports without shipping fails here,
+        not in the daily job."""
+        program = watch.loader_preamble() + "\n".join(
+            [
+                f"report = importlib.import_module({json.dumps(watch.REPORT_MODULE)})",
+                "print(json.dumps(sorted(name for name in sys.modules if name in SOURCES)))",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as scratch:
+            env = {"PATH": os.environ.get("PATH", ""), "HOME": scratch, "TMPDIR": scratch}
+            completed = subprocess.run([sys.executable, "-I", "-"], input=program, capture_output=True, text=True, cwd=scratch, env=env, timeout=120)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        loaded = json.loads(completed.stdout.strip().splitlines()[-1])
+        for name in (watch.REPORT_MODULE, watch.READINESS_MODULE, "readiness_rules", "readiness_rules.audit_log", "readiness_rules.zonal_control_plane", "upgrade_shape_tables"):
+            self.assertIn(name, loaded)
 
     def test_the_loader_runs_the_checkout_copy_of_the_report_script(self) -> None:
         """End to end against the real scripts, with gcloud answering no

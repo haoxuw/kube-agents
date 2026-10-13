@@ -173,6 +173,17 @@ class SharedHelpersTest(unittest.TestCase):
         self.assertEqual(shared.pod_requests(spec), (500, 64 * 1024**2))
         self.assertEqual(shared.pod_requests({"containers": [{"resources": {"requests": {"cpu": "bad"}}}]}), (None, 0))
         self.assertEqual(shared.pod_requests({"containers": [{}]}), (0, 0))
+        # A native sidecar (an init container with restartPolicy Always) runs alongside the
+        # app containers and alongside every init container started after it, not before it;
+        # `overhead` is reserved on top of whichever is larger.
+        app = {"resources": {"requests": {"cpu": "500m", "memory": "64Mi"}}}
+        sidecar = {"name": "istio-proxy", "restartPolicy": "Always", "resources": {"requests": {"cpu": "100m", "memory": "32Mi"}}}
+        init = {"resources": {"requests": {"cpu": "700m", "memory": "16Mi"}}}
+        self.assertEqual(shared.pod_requests({"containers": [app], "initContainers": [sidecar]}), (600, 96 * 1024**2))
+        self.assertEqual(shared.pod_requests({"containers": [app], "initContainers": [sidecar, init]}), (800, 96 * 1024**2))
+        self.assertEqual(shared.pod_requests({"containers": [app], "initContainers": [init, sidecar]}), (700, 96 * 1024**2))
+        self.assertEqual(shared.pod_requests({"containers": [app], "overhead": {"cpu": "250m", "memory": "64Mi"}}), (750, 128 * 1024**2))
+        self.assertEqual(shared.pod_requests({"containers": [app], "overhead": {"cpu": "lots"}}), (None, 64 * 1024**2))
 
     def test_pod_owner_names_the_deployment_behind_a_replicaset(self):
         self.assertEqual(shared.pod_owner(deployment_pod("ns", "web", "n1")), {"kind": "Deployment", "namespace": "ns", "name": "web"})
@@ -405,6 +416,10 @@ class ShapeTablesTest(unittest.TestCase):
             "echo $'it\\'s up'; sleep 1 &",
             'echo "${X:-"$(sleep 1 &)"}"',
             "$( ((a) &) )",
+            # A `case` inside a substitution: a pattern's `)` closes no substitution.
+            'echo "$(case $MODE in dev) sleep 9 & ;; esac)"',
+            "exec ${X:-$(case $m in a) sleep 1 & ;; esac)} app",
+            "cat <<EOF\n$(case $m in a) sleep 1 & ;; esac)\nEOF\n",
         )
         not_forks = (
             "a && b",
@@ -446,6 +461,10 @@ class ShapeTablesTest(unittest.TestCase):
             "cat <<EOF\n\\$(start-agent &)\nEOF\n",
             "echo $(( (1 + 2) * 3 ))",
             "echo ${a:-$(nproc)} && exec app",
+            'x="$(case $1 in a) echo "a & b";; esac)"',
+            'echo "$(case $x in a|b) echo ok;; *) echo no;; esac)"',
+            "x=$(case $1 in (a) echo a;; esac); echo $x",
+            'echo "$(case $x in a) (b);; esac)"',
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
@@ -453,7 +472,7 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertIs(shared.shell_forks(text), False, text)
         # What cannot be read this way is unread, never clean: an unterminated quote or
         # heredoc, a trailing backslash, no script at all.
-        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", None, 3):
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", 'echo "$(case $x in a) echo', None, 3):
             self.assertIsNone(shared.shell_forks(text), text)
         self.assertFalse(hasattr(tables, "SHELL_FORK_RE") or hasattr(tables, "SHELL_QUOTED_SPAN_RE"))
 

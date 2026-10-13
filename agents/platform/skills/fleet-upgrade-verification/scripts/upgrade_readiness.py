@@ -195,7 +195,8 @@ NOTE_NOT_TEXT = "a note is {type}, not a string"
 RESULT_NOT_JSON = "the result is not JSON-serialisable: {error}"
 # The audit-log cache is the one thing the report reads that a rule wrote; a rule that
 # leaves it in a shape `audit_log.summaries` cannot read is held to it here, inside the
-# guard, so the report never meets it.
+# guard, and the cache is put back as it stood before the rule, so neither the report nor
+# a later rule meets the damage and each offender is charged on its own.
 CACHE_DEFECT_REASON = "the rule left the audit-log cache unreadable: {defect}"
 # A second module with a registered rule's id is not run: its findings would be stamped
 # with the other module's id and the per-rule counts would describe one of the two. The
@@ -693,11 +694,12 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     that a rule may write, as `audit_log.read` leaves it. Raises on a shape the contract
     forbids, and whatever the rule raises; the caller turns either into the rule's
     `unknown`."""
-    cache_before = audit_log.cache_defect(context)
+    snapshot = audit_log.cache_snapshot(context)
     result = rule.evaluate(cluster, member, read, target, context)
-    cache_after = audit_log.cache_defect(context)
-    if cache_after is not None and cache_after != cache_before:
-        raise TypeError(CACHE_DEFECT_REASON.format(defect=cache_after))
+    defect = audit_log.cache_defect(context)
+    if defect is not None and audit_log.cache_changed(context, snapshot):
+        audit_log.cache_restore(context, snapshot)
+        raise TypeError(CACHE_DEFECT_REASON.format(defect=defect))
     if result is None:
         result = {}
     if not isinstance(result, dict):
