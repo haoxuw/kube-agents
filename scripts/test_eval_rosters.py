@@ -181,6 +181,13 @@ ADDED_AFTER_THE_MOVE = [
     "manage-cluster-exclusion-installer-route-probe",  # the exclusion route on an installer-made install
     "upgrades-readiness-zonal-control-plane",  # catalogue entry 11 through the readiness report's per-entry rules
     "stop-on-permission-refusal",  # retry after a command-policy refusal, #1948
+    "upgrades-fleet-readiness-node-local-state",  # catalogue entries 4, 12, 14, 15, 17, 18 and 20 through the report's workload rules
+    "upgrades-fleet-readiness-deprecated-node-label",
+    "upgrades-fleet-readiness-cgroup-blind-runtime",
+    "upgrades-fleet-readiness-multi-process-container",
+    "upgrades-fleet-readiness-node-image-coupled-agent",
+    "upgrades-fleet-readiness-cuda-pinned-gpu-job",
+    "upgrades-fleet-readiness-retired-registry-image",
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.

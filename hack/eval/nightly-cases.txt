@@ -371,6 +371,15 @@
 # lists on 2026-10-15, after the rebase onto `02f251ff`: seventy-nine cases
 # (237 units) here, of a ninety-three-case, 279-unit matrix, the paragraphs
 # above included.
+#
+# 2026-10-14 adds the seven upgrades-fleet-readiness-* cases for catalogue
+# entries 4, 12, 14, 15, 17, 18 and 20: seven cases, twenty-one units at the
+# 200s default (each a read-only chat turn that runs the readiness report
+# once, the same shape as the zonal case). They are the last entries below,
+# after stop-on-permission-refusal. Counted over every entry below on
+# 2026-10-15, after the rebase onto `02f251ff`: eighty-six cases (258 units)
+# here, of a hundred-case, 300-unit matrix with the presubmit file's fourteen.
+# No stack, so the infra lock is untouched.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -985,3 +994,17 @@
 # and no delegated worker retries the change another way after it (the
 # order-aware worker_commands check, #2173). deployer: noop, transcript-only.
 ./tasks/stop-on-permission-refusal/task.yaml
+
+# Upgrade-failure catalogue entries 4, 12, 14, 15, 17, 18 and 20 through the
+# readiness report's workload rules, one case per entry, each graded on the
+# planted object's declared line: its verdict (no: every planted shape is a
+# risk or a note at the channel default) and the cell the report printed for
+# it, wording only the rule produces. Read-only; the fixtures are the
+# seeded-shapes roles on slot a. Nightly from their first merge.
+./tasks/upgrades-fleet-readiness-node-local-state/task.yaml
+./tasks/upgrades-fleet-readiness-deprecated-node-label/task.yaml
+./tasks/upgrades-fleet-readiness-cgroup-blind-runtime/task.yaml
+./tasks/upgrades-fleet-readiness-multi-process-container/task.yaml
+./tasks/upgrades-fleet-readiness-node-image-coupled-agent/task.yaml
+./tasks/upgrades-fleet-readiness-cuda-pinned-gpu-job/task.yaml
+./tasks/upgrades-fleet-readiness-retired-registry-image/task.yaml
