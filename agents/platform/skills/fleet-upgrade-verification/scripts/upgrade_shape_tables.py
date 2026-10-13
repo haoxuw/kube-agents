@@ -387,19 +387,17 @@ GROUP_OOM_KILL_KUBELET_MINOR = 28
 SINGLE_PROCESS_OOM_KILL_FIELD = "singleProcessOomKill"
 # Entry 15 is a heuristic on the command and the image: the process count is not readable
 # from the API. Programs whose job is to run several services in one container
-# (supervisord, s6-overlay's s6-svscan, runit's runsvdir), a shell script that forks a
-# background job (`a & b & wait`, `nginx -p 8080& php-fpm`; `&&`, `2>&1`, `&>`, `3<&0` and
-# an `&` inside a quoted string are not forks; the script is the word after any short flag
-# group carrying `c`, `-c`, `-ec`,
-# `-lc`), and images whose documented entrypoint is such a supervisor: phusion/baseimage and
+# (supervisord, s6-overlay's s6-svscan, runit's runsvdir), a shell script that puts a
+# command in the background (`a & b & wait`, `nginx -p 8080& php-fpm`; the script is the
+# word after any short flag group carrying `c`, `-c`, `-ec`, `-lc`, and
+# `readiness_rules.shell_forks` reads it, quotes, comments and heredocs included), and
+# images whose documented entrypoint is such a supervisor: phusion/baseimage and
 # phusion/passenger run services under runit (github.com/phusion/baseimage-docker),
 # webdevops/php-nginx and richarvey/nginx-php-fpm run nginx and PHP-FPM under supervisord
 # (their READMEs).
 SUPERVISOR_PROGRAMS = ("supervisord", "s6-svscan", "runsvdir")
 SHELL_PROGRAMS = ("sh", "bash", "ash", "dash", "zsh")
 SHELL_COMMAND_FLAG_RE = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
-SHELL_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
-SHELL_FORK_RE = re.compile(r"(?<![&><])&(?![&>])")
 MULTI_PROCESS_IMAGE_REPOS = ("phusion/baseimage", "phusion/passenger", "webdevops/php-nginx", "richarvey/nginx-php-fpm")
 
 # ------------------------------------------------------------------ entry 17: node networking agents

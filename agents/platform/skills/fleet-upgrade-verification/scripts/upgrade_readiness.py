@@ -159,10 +159,22 @@ CAN_BLOCK_KEY = "can_block"
 RULE_ID_ATTRIBUTE = "RULE_ID"
 ENTRY_ATTRIBUTE = "ENTRY"
 CAN_BLOCK_ATTRIBUTE = "CAN_BLOCK"
-# What names a rule that has no RULE_ID: its module name, for the unknown entry it earns.
+# What names a rule that has no RULE_ID, or one that fails the check below: its module
+# name, for the unknown entry it earns.
 MODULE_NAME_ATTRIBUTE = "__name__"
 RULE_PREFIX_FORMAT = "{rule}: {text}"
 RULE_FAILED_REASON = "rule raised {error}; not evaluated"
+# The module's own attributes are checked before anything is derived from them, inside the
+# fold's guard like the result: a `RULE_ID` that is not a string cannot key `rules` (a list
+# is unhashable, and the fold would have died on it after every member was read); an
+# `ENTRY` JSON cannot carry would fail the writer from the per-rule record and the unknown
+# entries, which a probe of the result alone does not see; `bool("False")` is True, so
+# `CAN_BLOCK` must be a bool. A module that fails one is not evaluated: one `unknown` under
+# its module name, with no entry and the conservative `can_block`.
+RULE_ATTRIBUTE_REASON = "{attribute} is {type}, not {expected}; not evaluated"
+EXPECTED_STRING = "a string"
+EXPECTED_BOOL = "a bool"
+EXPECTED_JSON = "a JSON value"
 # A rule that declares it cannot block and files a blocker anyway: the finding is kept as
 # a risk, and the note says so, so the invariant holds and the defect is visible.
 DEMOTED_BLOCKER_NOTE = "filed a blocker but declares CAN_BLOCK False; reported as a risk"
@@ -664,13 +676,15 @@ def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
     return out
 
 
-def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, target, context: dict) -> dict:
-    """One rule's result checked against the contract: every key a list, every blocker and
-    risk a dict copied before it is stamped (so a rule's own objects are never changed or
-    re-attributed) carrying a one-line string `text` (the rule's `describe`, unless the rule
-    set it), its `rule` and `entry`, every note a string, and the whole result a JSON value.
-    Raises on a shape the contract forbids, and whatever the rule raises; the caller turns
-    either into the rule's `unknown`."""
+def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, member: dict, read, target, context: dict) -> dict:
+    """One rule's result checked against the contract and in the form the fold emits: every
+    key a list, every blocker and risk a dict copied before it is stamped (so a rule's own
+    objects are never changed or re-attributed) carrying a one-line string `text` (the
+    rule's `describe`, unless the rule set it), its `rule` and `entry`, every note a string
+    prefixed with the rule's id, a blocker from a rule that cannot block kept as a risk with
+    a note, every `unknown` entry in the dict form `_unknown_entry` gives, and the whole, as
+    it will be written, a JSON value. Raises on a shape the contract forbids, and whatever
+    the rule raises; the caller turns either into the rule's `unknown`."""
     result = rule.evaluate(cluster, member, read, target, context)
     if result is None:
         result = {}
@@ -702,6 +716,12 @@ def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, t
     for note in out["notes"]:
         if not isinstance(note, str):
             raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
+    if not can_block and out["blocking"]:
+        out["risks"] = out["blocking"] + out["risks"]
+        out["blocking"] = []
+        out["notes"].append(DEMOTED_BLOCKER_NOTE)
+    out["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in out["unknown"]]
+    out["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=readiness_rules.one_line(note)) for note in out["notes"]]
     try:
         json.dumps(out)
     except (TypeError, ValueError) as e:
@@ -709,10 +729,40 @@ def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, t
     return out
 
 
-def _failed_result(reason: str) -> dict:
+def _failed_result(reason: str, rule_id: str, entry, can_block: bool) -> dict:
+    """The result of a rule that was not evaluated: one `unknown` entry carrying `reason`,
+    built from the checked attributes and a string, so it needs no probe."""
     result = {key: [] for key in RULE_RESULT_KEYS}
-    result["unknown"] = [reason]
+    result["unknown"] = [_unknown_entry(reason, rule_id, entry, can_block)]
     return result
+
+
+def _rule_attributes(rule) -> tuple[str, object, bool, str | None]:
+    """The module's `RULE_ID`, `ENTRY` and `CAN_BLOCK`, read and checked before anything is
+    derived from them: the id a string, the entry a JSON value, `CAN_BLOCK` a bool. The
+    fourth value is None, or the reason the module is not evaluated; then the id is the
+    module's name, the entry None and `can_block` True, the conservative reading."""
+    name = str(getattr(rule, MODULE_NAME_ATTRIBUTE, rule))
+    rule_id = getattr(rule, RULE_ID_ATTRIBUTE, name)
+    entry = getattr(rule, ENTRY_ATTRIBUTE, None)
+    can_block = getattr(rule, CAN_BLOCK_ATTRIBUTE, True)
+    checks = (
+        (RULE_ID_ATTRIBUTE, rule_id, EXPECTED_STRING, isinstance(rule_id, str)),
+        (CAN_BLOCK_ATTRIBUTE, can_block, EXPECTED_BOOL, isinstance(can_block, bool)),
+        (ENTRY_ATTRIBUTE, entry, EXPECTED_JSON, _is_json(entry)),
+    )
+    for attribute, value, expected, holds in checks:
+        if not holds:
+            return name, None, True, RULE_ATTRIBUTE_REASON.format(attribute=attribute, type=type(value).__name__, expected=expected)
+    return rule_id, entry, can_block, None
+
+
+def _is_json(value) -> bool:
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dict, rules: list | None = None) -> dict:
@@ -725,33 +775,34 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     list, so the findings are serialised once and `rules[id]` counts what the lists carry
     under that id. A rule that raises, returns a shape the contract forbids, or returns a
     value JSON cannot carry is one `unknown` entry naming the error, never a crash: one
-    rule's defect must not hide the others' findings. A blocker from a rule whose
-    `CAN_BLOCK` is False is kept as a risk, with a note. A second module carrying a
-    registered id is not evaluated; it is one `unknown` counted under that id with the
-    registered module's `can_block`.
+    rule's defect must not hide the others' findings. So is a module whose `RULE_ID` is not
+    a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a bool, under
+    its module name: the three are checked before anything is derived from them, so the
+    fold emits nothing it has not probed or built from checked values. A blocker from a
+    rule whose `CAN_BLOCK` is False is kept as a risk, with a note. A second module
+    carrying a registered id is not evaluated; it is one `unknown` counted under that id
+    with the registered module's `can_block`.
     """
     folded = {key: [] for key in RULE_RESULT_KEYS}
     folded["rules"] = {}
     for rule in EXTRA_RULES if rules is None else rules:
-        rule_id = getattr(rule, RULE_ID_ATTRIBUTE, getattr(rule, MODULE_NAME_ATTRIBUTE, str(rule)))
-        entry = getattr(rule, ENTRY_ATTRIBUTE, None)
-        can_block = bool(getattr(rule, CAN_BLOCK_ATTRIBUTE, True))
+        rule_id, entry, can_block, defect = _rule_attributes(rule)
         if rule_id in folded["rules"]:
             registered = folded["rules"][rule_id]
             duplicate = _unknown_entry(DUPLICATE_RULE_REASON.format(rule=rule_id), rule_id, registered[ENTRY_KEY], registered[CAN_BLOCK_KEY])
             folded["unknown"].append(duplicate)
             folded["rules"][rule_id]["unknown"] += 1
             continue
-        try:
-            result = _rule_result(rule, rule_id, entry, cluster, member, read, target, context)
-        except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
-            result = _failed_result(RULE_FAILED_REASON.format(error=repr(e)))
-        if not can_block and result["blocking"]:
-            result["risks"] = result["blocking"] + result["risks"]
-            result["blocking"] = []
-            result["notes"].append(DEMOTED_BLOCKER_NOTE)
-        result["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in result["unknown"]]
-        result["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=readiness_rules.one_line(note)) for note in result["notes"]]
+        if defect is None:
+            try:
+                result = _rule_result(rule, rule_id, entry, can_block, cluster, member, read, target, context)
+            except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
+                defect = RULE_FAILED_REASON.format(error=repr(e))
+        if defect is not None:
+            result = _failed_result(defect, rule_id, entry, can_block)
+        # The record is the checked attributes and counts; the lists are what `_rule_result`
+        # probed or `_failed_result` built from checked values: nothing the fold emits
+        # reaches the writer unprobed.
         folded["rules"][rule_id] = {ENTRY_KEY: entry, CAN_BLOCK_KEY: can_block, **{key: len(result[key]) for key in RULE_RESULT_KEYS}}
         for key in RULE_RESULT_KEYS:
             folded[key].extend(result[key])

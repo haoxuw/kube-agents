@@ -156,6 +156,12 @@ class SharedHelpersTest(unittest.TestCase):
         self.assertEqual(shared.memory_bytes("2868948Ki"), 2868948 * 1024)
         self.assertIsNone(shared.cpu_millis("lots"))
         self.assertIsNone(shared.cpu_millis(True))
+        for too_wide in ("1e400", "1" + "0" * 400, "1e300E"):  # float() overflows to inf without raising
+            self.assertIsNone(shared.parse_quantity(too_wide), too_wide)
+            self.assertIsNone(shared.cpu_millis(too_wide), too_wide)
+            self.assertIsNone(shared.memory_bytes(too_wide), too_wide)
+        self.assertIsNone(shared.memory_bytes(10**400))  # float() of an int this wide raises instead
+        self.assertIsNone(shared.cpu_millis(float("inf")))
         self.assertEqual(shared.format_cpu(250), "250m")
         self.assertEqual(shared.format_memory(256 * 1024**2), "256Mi")
 
@@ -368,13 +374,40 @@ class ShapeTablesTest(unittest.TestCase):
         self.assertIsNotNone(tables.replacement_for("apps/v1beta1 deployments"))
         self.assertIsNone(tables.replacement_for("/v1 pods"))
 
-    def test_shell_fork_regex_reads_a_background_job_and_nothing_else(self):
-        forks = ("a & b & wait", "nginx -p 8080& php-fpm", "./a 1& ./b 2& wait", "sleep 1 &")
-        not_forks = ("a && b", "cmd 2>&1", "cmd &>/dev/null", "exec 3<&0", "cmd >&2", "echo done")
+    def test_shell_forks_reads_a_background_job_and_nothing_else(self):
+        # The round-1 strings keep their verdicts; what a regex guessed at (`|&`, a heredoc
+        # body, a comment, an escaped quote, a quoted or escaped `&`, `;&`) is not a fork,
+        # and a forked subshell (`)&`) or a fork after a redirection is.
+        forks = ("a & b & wait", "nginx -p 8080& php-fpm", "./a 1& ./b 2& wait", "sleep 1 &", "cmd & wait", "(cd /srv && ./run)&", "cmd 2>&1 &", "cat <<EOF | grep x &\na & b\nEOF\n", "echo a#b&c")
+        not_forks = (
+            "a && b",
+            "cmd 2>&1",
+            "cmd &>/dev/null",
+            "exec 3<&0",
+            "cmd >&2",
+            "echo done",
+            "cmd 2>&1 |& tee /var/log/app.log",
+            "cat <<EOF\nuser=a&b\nEOF\necho done",
+            "cat <<-'EOF'\n\ta & b\n\tEOF\n",
+            "cat << \"EOF\" <<X\na & b\nEOF\nc & d\nX\n",
+            "echo start # a & b in a comment\necho end",
+            'echo "a \\"&\\" b"',
+            "echo '&'",
+            'echo "&"',
+            "echo \\&",
+            "cmd <<<'a & b'",
+            "case $1 in a) x;& b) y;; esac",
+            "cmd &>>log",
+        )
         for text in forks:
-            self.assertTrue(tables.SHELL_FORK_RE.search(text), text)
+            self.assertIs(shared.shell_forks(text), True, text)
         for text in not_forks:
-            self.assertFalse(tables.SHELL_FORK_RE.search(text), text)
+            self.assertIs(shared.shell_forks(text), False, text)
+        # What cannot be read this way is unread, never clean: an unterminated quote or
+        # heredoc, a trailing backslash, no script at all.
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", None, 3):
+            self.assertIsNone(shared.shell_forks(text), text)
+        self.assertFalse(hasattr(tables, "SHELL_FORK_RE") or hasattr(tables, "SHELL_QUOTED_SPAN_RE"))
 
     def test_stateful_volume_names_match_how_the_database_charts_spell_them(self):
         stateful = ("data", "pgdata", "datadir", "database", "mysqldata", "state", "pg-wal", "wal", "db", "journal", "queue", "store", "persist", "wal-e-bin")

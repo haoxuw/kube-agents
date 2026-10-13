@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -391,6 +392,16 @@ def rule_module(rule_id, entry=0, can_block=True, evaluate=None, describe=None):
     return Rule
 
 
+def bare_module(name, evaluate=None, **attributes):
+    """A module object, as EXTRA_RULES carries, with the attributes given and nothing else."""
+    module = types.ModuleType(name)
+    module.evaluate = evaluate or (lambda cluster, member, read, target, context: shared.new_result())
+    module.describe = lambda finding: "described " + str(finding.get("what"))
+    for key, value in attributes.items():
+        setattr(module, key, value)
+    return module
+
+
 def returning(**lists):
     def evaluate(cluster, member, read, target, context):
         out = shared.new_result()
@@ -512,6 +523,34 @@ class ExtraRulesTest(unittest.TestCase):
         for finding in folded["blocking"] + folded["risks"]:
             self.assertEqual((finding["rule"], finding["entry"]), ("stamped", 19))
             self.assertIsInstance(finding["text"], str)
+
+    def test_module_attributes_are_checked_before_anything_is_derived_from_them(self):
+        # RULE_ID keys `rules`, so a list raised `unhashable type` outside the guard and
+        # killed the run after every member was read; ENTRY is stamped on the per-rule
+        # record and the unknown entries, which a probe of the result alone never saw, so a
+        # set reached the writer whenever the rule filed no blocker or risk; bool("False")
+        # is True. Each is one unknown under the module's name, unevaluated, the other rules
+        # untouched, and the fold is JSON.
+        fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
+        cases = {
+            "surge_capacity": (dict(RULE_ID=["surge", "capacity"], ENTRY=2, CAN_BLOCK=True), None, "RULE_ID is list, not a string; not evaluated"),
+            "quiet_entry": (dict(RULE_ID="quiet", ENTRY={11}, CAN_BLOCK=True), None, "ENTRY is set, not a JSON value; not evaluated"),
+            "loud_entry": (dict(RULE_ID="loud", ENTRY={11}, CAN_BLOCK=True), returning(blocking=[{"what": "b"}]), "ENTRY is set, not a JSON value; not evaluated"),
+            "stringly": (dict(RULE_ID="stringly", ENTRY=5, CAN_BLOCK="False"), None, "CAN_BLOCK is str, not a bool; not evaluated"),
+        }
+        for name, (attributes, evaluate, reason) in cases.items():
+            broken = bare_module(name, evaluate=evaluate, **attributes)
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
+            self.assertEqual([(u["rule"], u["entry"], u["can_block"], u["reason"], u["text"]) for u in folded["unknown"]], [(name, None, True, reason, f"{name}: {reason}")], name)
+            self.assertEqual(folded["rules"][name], {"entry": None, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0}, name)
+            self.assertEqual(folded["rules"]["fine"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 1, "unknown": 0, "notes": 0}, name)
+            self.assertEqual((folded["blocking"], [f["rule"] for f in folded["risks"]], folded["notes"]), ([], ["fine"], []), name)
+            json.dumps(folded)  # what the writer does with it
+        # A module with no RULE_ID at all is keyed by its module name and evaluated as usual.
+        nameless = bare_module("nameless", evaluate=returning(risks=[{"what": "n"}]), ENTRY=3, CAN_BLOCK=False)
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[nameless])
+        self.assertEqual(folded["rules"], {"nameless": {"entry": 3, "can_block": False, "blocking": 0, "risks": 1, "unknown": 0, "notes": 0}})
+        self.assertEqual(folded["risks"][0]["rule"], "nameless")
 
     def test_a_second_module_with_a_registered_id_is_not_evaluated(self):
         first = rule_module("twice", entry=4, evaluate=returning(risks=[{"what": "a"}]))

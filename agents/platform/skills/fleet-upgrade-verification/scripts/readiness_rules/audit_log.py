@@ -22,7 +22,11 @@ accounts, and Kubernetes service accounts outside the system namespaces), the pr
 unplaced, which a rule names and never blocks on.
 
 The log is the Admin Activity audit log, which carries writes only: a caller that only
-reads an API is not in it, and GKE Deprecation Insights are the cross-check. A read that
+reads an API is not in it, and GKE Deprecation Insights are the cross-check. The filter names
+that log (`logName:"cloudaudit.googleapis.com%2Factivity"`), because GKE's opt-in Data Access
+audit log shares `resource.type="k8s_cluster"` and the `k8s.io/deprecated` labels and carries
+every read: without the clause, a project with Data Access logging on fills the pages with
+`kubectl get`s and names read-only clients as writers. A read that
 fails or times out is an error the rules report as `unknown`, never as a blocker; a read
 that still fills its last page is graded from what it saw and says so (`sampled`).
 
@@ -64,6 +68,7 @@ from readiness_rules import (
 GCLOUD = "gcloud"
 LOGGING_READ = ("logging", "read")
 RESOURCE_TYPE = "k8s_cluster"
+ACTIVITY_LOG_ID = "cloudaudit.googleapis.com%2Factivity"  # the Admin Activity log; Data Access shares the resource type
 LABEL_DEPRECATED = "k8s.io/deprecated"
 LABEL_REMOVED_RELEASE = "k8s.io/removed-release"
 DEPRECATED_TRUE = "true"
@@ -90,7 +95,7 @@ JSON_FORMAT_FLAG = "--format=json(" + ",".join(PROJECTED_FIELDS) + ")"
 READ_REMOVED = "removed"
 READ_DEPRECATED = "deprecated"
 READS = (READ_REMOVED, READ_DEPRECATED)
-SCOPE_CLAUSE = 'resource.type="{resource_type}" AND resource.labels.cluster_name="{cluster}" AND resource.labels.location="{location}"'
+SCOPE_CLAUSE = 'resource.type="{resource_type}" AND logName:"{activity_log}" AND resource.labels.cluster_name="{cluster}" AND resource.labels.location="{location}"'
 REMOVED_CLAUSE = 'labels."{removed}":*'
 DEPRECATED_CLAUSE = '((labels."{deprecated}"="{deprecated_true}" AND NOT labels."{removed}":*) OR {user_agent_field}:"{kubectl}")'
 WINDOW_CLAUSE = 'timestamp>="{start}" AND timestamp<="{end}"'
@@ -233,7 +238,7 @@ def build_filter(which: str, cluster: str, location: str, start: str, end: str) 
         )
     return CLAUSE_SEPARATOR.join(
         (
-            SCOPE_CLAUSE.format(resource_type=RESOURCE_TYPE, cluster=_escape(cluster), location=_escape(location)),
+            SCOPE_CLAUSE.format(resource_type=RESOURCE_TYPE, activity_log=ACTIVITY_LOG_ID, cluster=_escape(cluster), location=_escape(location)),
             population,
             WINDOW_CLAUSE.format(start=start, end=end),
             provider_exclusion_clause(),

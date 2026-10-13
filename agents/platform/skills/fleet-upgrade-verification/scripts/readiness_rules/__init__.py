@@ -46,17 +46,22 @@ turns each `unknown` entry (a string, or a dict carrying `reason` or `detail`) i
 with `reason`, `can_block` and the `text` the note column prints, the reason collapsed to one
 line of at most NOTE_EXCERPT_CHARS. A finding is written to the JSON as it is, so it holds
 JSON values only; a rule that raises, returns a shape the contract forbids, or returns a
-value JSON cannot carry becomes one `unknown` finding, never a crash. A second module that
-carries a registered `RULE_ID` is not evaluated: it is one `unknown` under that id with that
+value JSON cannot carry becomes one `unknown` finding, never a crash, and a module whose
+`RULE_ID` is not a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a
+bool is not evaluated: one `unknown` under its module name. A second module that carries a
+registered `RULE_ID` is not evaluated either: it is one `unknown` under that id with that
 rule's `CAN_BLOCK`, so the per-rule record and its entries never disagree. A rule reads; it
 runs no command of its own except through `context["run_cmd"]`.
 
 This file holds what the modules share: the result shape, the read kinds and context keys,
 the quantity parser, a pod's owner and requests, node helpers, pod templates with their
-selectors and node-pool pins, image tags and the cgroup transition. `finding.py` holds the
-tiered-finding helpers, `audit_log.py` the Cloud Logging reads.
+selectors and node-pool pins, image tags, the cgroup transition, and `shell_forks(script)`,
+whether a `sh -c` script puts a command in the background (True or False; None when the
+script cannot be read: an unterminated quote or heredoc, which a rule reports as unknown).
+`finding.py` holds the tiered-finding helpers, `audit_log.py` the Cloud Logging reads.
 """
 
+import math
 import re
 
 import upgrade_shape_tables as tables
@@ -187,6 +192,29 @@ CGROUP_REASON_NO_TARGET = "no target to decide whether the pool moves to cgroup 
 CGROUP_REASON_UNREAD = "the pool record carries no effectiveCgroupMode"
 IMAGE_DIGEST_SEPARATOR = "@"
 IMAGE_TAG_SEPARATOR = ":"
+# A `sh -c` script's background jobs, for the rules that grade a container's process count.
+# The quoting pass is a character scan rather than shlex: shlex in POSIX mode strips the
+# quotes, so a quoted `'&'` comes back as the same token as the operator. A run of operator
+# characters is split by longest match, so `)&` is a subshell then a fork and `2>&1` is
+# `>&`, never `>` then a fork.
+SHELL_OPERATOR_CHARS = "&|;()<>"
+SHELL_WORD_BREAKS = SHELL_OPERATOR_CHARS + " \t\n"
+SHELL_OPERATORS = ("<<<", "&>>", ";;&", "<<-", "&&", "||", ";;", ";&", "|&", ">&", "<&", "&>", ">>", "<<", ">|", "<>", "&", "|", ";", "(", ")", "<", ">")
+SHELL_FORK_OPERATOR = "&"
+SHELL_HEREDOC_OPERATOR = "<<"
+SHELL_HERESTRING_OPERATOR = "<<<"
+SHELL_HEREDOC_STRIP_TABS = "-"
+SHELL_SINGLE_QUOTE = "'"
+SHELL_DOUBLE_QUOTE = '"'
+SHELL_QUOTES = SHELL_SINGLE_QUOTE + SHELL_DOUBLE_QUOTE
+SHELL_ESCAPE = "\\"
+SHELL_ESCAPED_PAIR = 2  # a backslash and the character it escapes
+SHELL_COMMENT = "#"
+SHELL_NEWLINE = "\n"
+SHELL_TAB = "\t"
+SHELL_BLANKS = " \t"
+SHELL_NEUTRAL = "_"  # what a quoted or escaped character becomes: a word character, so words keep their shape
+SHELL_OPERATOR_RUN_RE = re.compile("[" + re.escape(SHELL_OPERATOR_CHARS) + "]+")
 PATH_SEPARATOR = "/"
 
 
@@ -248,26 +276,32 @@ def items_of_kind(items, kind: str) -> list[dict]:
 
 
 def parse_quantity(text) -> float | None:
-    """`"250m"` -> 0.25, `"256Mi"` -> 268435456.0, `2` -> 2.0; None when it does not parse."""
+    """`"250m"` -> 0.25, `"256Mi"` -> 268435456.0, `2` -> 2.0; None when it does not parse or
+    is wider than a float (`"1e400"`, `"1e300E"`), which `float()` turns into `inf` rather than raising."""
     if isinstance(text, bool):
         return None
     if isinstance(text, (int, float)):
-        return float(text)
-    if not isinstance(text, str):
-        return None
-    m = QUANTITY_RE.match(text.strip())
-    if not m:
-        return None
-    number, suffix = m.groups()
-    if suffix == "":
-        scale = 1.0
-    elif suffix in BINARY_SUFFIXES:
-        scale = BINARY_SUFFIXES[suffix]
-    elif suffix in DECIMAL_SUFFIXES:
-        scale = DECIMAL_SUFFIXES[suffix]
+        number, scale = text, 1.0
+    elif isinstance(text, str):
+        m = QUANTITY_RE.match(text.strip())
+        if not m:
+            return None
+        number, suffix = m.groups()
+        if suffix == "":
+            scale = 1.0
+        elif suffix in BINARY_SUFFIXES:
+            scale = BINARY_SUFFIXES[suffix]
+        elif suffix in DECIMAL_SUFFIXES:
+            scale = DECIMAL_SUFFIXES[suffix]
+        else:
+            return None
     else:
         return None
-    return float(number) * scale
+    try:
+        value = float(number) * scale
+    except OverflowError:  # an int wider than a float, as `json.loads` returns for a 400-digit number
+        return None
+    return value if math.isfinite(value) else None
 
 
 def cpu_millis(text) -> int | None:
@@ -544,3 +578,124 @@ def image_repository_and_tag(image: str) -> tuple[str, str]:
     if not sep or PATH_SEPARATOR in tag:
         path, tag = name, ""
     return path.rsplit(PATH_SEPARATOR, 1)[-1], tag
+
+
+# ------------------------------------------------------------------------ shell scripts
+
+
+def shell_forks(script) -> bool | None:
+    """Whether a `sh -c` script puts a command in the background: a lone `&` among its
+    operators once the quoted spans, escaped characters, `#` comments and heredoc bodies
+    are gone, so `&&`, `|&`, `>&`, `<&`, `&>`, `;&`, a subshell's `)&` and `2>&1` read as
+    what they are and `'&'` is a word. None when the script cannot be read this way: an
+    unterminated quote or heredoc, or a trailing backslash, which a rule reports as unknown,
+    never as clean."""
+    if not isinstance(script, str):
+        return None
+    cleaned = _shell_without_quotes_comments_and_heredocs(script)
+    if cleaned is None:
+        return None
+    return any(SHELL_FORK_OPERATOR in _shell_operators(run) for run in SHELL_OPERATOR_RUN_RE.findall(cleaned))
+
+
+def _shell_operators(run: str) -> list[str]:
+    """A run of operator characters as the shell's operators, longest match first:
+    `")&"` -> `[")", "&"]`, `">&"` -> `[">&"]`, `"|&"` -> `["|&"]`."""
+    out = []
+    while run:
+        operator = next(candidate for candidate in SHELL_OPERATORS if run.startswith(candidate))
+        out.append(operator)
+        run = run[len(operator) :]
+    return out
+
+
+def _shell_without_quotes_comments_and_heredocs(script: str) -> str | None:
+    """`script` with every quoted or escaped character a word character and every comment
+    and heredoc body removed; None for an unterminated quote or heredoc, or a trailing
+    backslash."""
+    out: list[str] = []
+    pending: list[tuple[str, bool]] = []  # heredoc delimiters whose bodies start at the next newline
+    i, n = 0, len(script)
+    while i < n:
+        c = script[i]
+        if c == SHELL_ESCAPE:
+            if i + 1 >= n:
+                return None
+            if script[i + 1] != SHELL_NEWLINE:  # a line continuation is nothing; an escaped character is a word character
+                out.append(SHELL_NEUTRAL)
+            i += SHELL_ESCAPED_PAIR
+        elif c == SHELL_SINGLE_QUOTE:
+            end = script.find(SHELL_SINGLE_QUOTE, i + 1)
+            if end < 0:
+                return None
+            out.append(SHELL_NEUTRAL)
+            i = end + 1
+        elif c == SHELL_DOUBLE_QUOTE:
+            i += 1
+            while i < n and script[i] != SHELL_DOUBLE_QUOTE:
+                i += SHELL_ESCAPED_PAIR if script[i] == SHELL_ESCAPE else 1
+            if i >= n:
+                return None
+            out.append(SHELL_NEUTRAL)
+            i += 1
+        elif c == SHELL_COMMENT and (not out or out[-1] in SHELL_WORD_BREAKS):
+            end = script.find(SHELL_NEWLINE, i)
+            i = n if end < 0 else end
+        elif script.startswith(SHELL_HERESTRING_OPERATOR, i):  # a here-string's word is an ordinary word
+            out.extend(SHELL_HERESTRING_OPERATOR)
+            i += len(SHELL_HERESTRING_OPERATOR)
+        elif script.startswith(SHELL_HEREDOC_OPERATOR, i):
+            out.extend(SHELL_HEREDOC_OPERATOR)
+            i += len(SHELL_HEREDOC_OPERATOR)
+            strip_tabs = script.startswith(SHELL_HEREDOC_STRIP_TABS, i)
+            if strip_tabs:
+                i += 1
+            while i < n and script[i] in SHELL_BLANKS:
+                i += 1
+            word, i = _shell_heredoc_word(script, i)
+            if word is None:
+                return None
+            out.append(SHELL_NEUTRAL)
+            pending.append((word, strip_tabs))
+        elif c == SHELL_NEWLINE:
+            out.append(c)
+            i += 1
+            while pending:
+                word, strip_tabs = pending.pop(0)
+                i = _shell_heredoc_end(script, i, word, strip_tabs)
+                if i is None:
+                    return None
+        else:
+            out.append(c)
+            i += 1
+    return None if pending else "".join(out)
+
+
+def _shell_heredoc_word(script: str, i: int) -> tuple[str | None, int]:
+    """The heredoc delimiter at `i` (bare, quoted, or backslash-quoted) and where it ends;
+    None for an empty or unterminated one."""
+    n = len(script)
+    if i < n and script[i] in SHELL_QUOTES:
+        end = script.find(script[i], i + 1)
+        if end < 0 or SHELL_NEWLINE in script[i + 1 : end]:
+            return None, i
+        return script[i + 1 : end] or None, end + 1
+    if script.startswith(SHELL_ESCAPE, i):
+        i += 1
+    start = i
+    while i < n and script[i] not in SHELL_WORD_BREAKS and script[i] not in SHELL_QUOTES:
+        i += 1
+    return script[start:i] or None, i
+
+
+def _shell_heredoc_end(script: str, i: int, word: str, strip_tabs: bool) -> int | None:
+    """The index after the line that closes the heredoc body starting at `i`; None when no
+    line does."""
+    while True:
+        end = script.find(SHELL_NEWLINE, i)
+        line = script[i:] if end < 0 else script[i:end]
+        if (line.lstrip(SHELL_TAB) if strip_tabs else line) == word:
+            return len(script) if end < 0 else end + 1
+        if end < 0:
+            return None
+        i = end + 1

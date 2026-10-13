@@ -116,7 +116,10 @@ class AuditLogReadTest(unittest.TestCase):
         removed = audit_log.build_filter(audit_log.READ_REMOVED, "seeded-a", "us-central1-a", "2026-09-22T16:00:00Z", "2026-09-29T16:00:00Z")
         deprecated = audit_log.build_filter(audit_log.READ_DEPRECATED, "seeded-a", "us-central1-a", "2026-09-22T16:00:00Z", "2026-09-29T16:00:00Z")
         for text in (removed, deprecated):
-            self.assertIn('resource.type="k8s_cluster" AND resource.labels.cluster_name="seeded-a" AND resource.labels.location="us-central1-a"', text)
+            # The activity log by name: GKE's opt-in Data Access log shares the resource type
+            # and carries every read, which the docstring's "writes only" would otherwise not hold against.
+            self.assertIn('resource.type="k8s_cluster" AND logName:"cloudaudit.googleapis.com%2Factivity" AND resource.labels.cluster_name="seeded-a" AND resource.labels.location="us-central1-a"', text)
+            self.assertNotIn("data_access", text)
             self.assertIn('timestamp>="2026-09-22T16:00:00Z" AND timestamp<="2026-09-29T16:00:00Z"', text)
             self.assertIn('(protoPayload.authenticationInfo.principalEmail!~"^system:" OR protoPayload.authenticationInfo.principalEmail=~"^system:serviceaccount:")', text)
             # The namespaces come from the one table every rule reads, so the clause and
