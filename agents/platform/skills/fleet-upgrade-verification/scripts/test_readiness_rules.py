@@ -117,7 +117,8 @@ class ContractTest(unittest.TestCase):
 
     def test_entries_are_catalogue_numbers_and_read_kinds_are_named_once(self):
         self.assertEqual([m.ENTRY for m in r.EXTRA_RULES], sorted(m.ENTRY for m in r.EXTRA_RULES))
-        self.assertEqual(shared.READ_KINDS, ("daemonset", "cronjob", "pods", "pvc", "networkpolicy", "namespace", "node", "storageclass", "pv"))
+        self.assertEqual(shared.READ_KINDS, ("daemonset", "cronjob", "pvc", "networkpolicy", "namespace", "pods", "node", "storageclass", "pv"))
+        self.assertEqual(len(shared.READ_KINDS), len(set(shared.READ_KINDS)))
         self.assertEqual(len(shared.CONTEXT_KEYS), len(set(shared.CONTEXT_KEYS)))
 
 

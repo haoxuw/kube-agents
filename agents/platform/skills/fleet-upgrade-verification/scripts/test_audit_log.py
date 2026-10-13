@@ -242,6 +242,24 @@ class AuditLogReadTest(unittest.TestCase):
         budget = audit_log.read_removed(context_with(FakeRunner(pages={audit_log.READ_REMOVED: [full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT)]}), clock=lambda: next(ticks)))
         self.assertEqual((budget["entries"], budget["pages"], budget["sampled"]), (1000, 1, True))
 
+    def test_paging_bound_and_seen_times_compare_parsed_timestamps(self):
+        # Cloud Logging emits 0, 3, 6 or 9 fractional digits; as text "...19.112Z" sorts before
+        # "...19Z" although it is later, so the bound and the seen times are chosen by parsed time.
+        removed, _ = split_sample()
+        page = full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT)
+        page[0]["timestamp"] = "2026-09-29T12:00:19.112Z"
+        page[1]["timestamp"] = "2026-09-29T12:00:19Z"
+        for entry in page[2:]:
+            entry["timestamp"] = "2026-09-29T12:00:20.500000Z"
+        runner = FakeRunner(pages={audit_log.READ_REMOVED: [page, []]})
+        result = audit_log.read_removed(context_with(runner))
+        self.assertEqual((result["pages"], result["entries"], result["error"]), (2, 1000, None))
+        self.assertIn(' AND timestamp<"2026-09-29T12:00:19Z"', runner.calls[1][3])
+        self.assertNotIn("19.112Z", runner.calls[1][3])
+        caller = result["callers"][0]
+        self.assertEqual((caller["first_seen"], caller["last_seen"]), ("2026-09-29T12:00:19Z", "2026-09-29T12:00:20.500000Z"))
+        self.assertEqual(audit_log.caller_records([{"timestamp": "junk", "protoPayload": {}}])[0]["first_seen"], None)
+
     def test_a_failed_later_page_keeps_the_pages_before_it(self):
         removed, _ = split_sample()
         runner = FakeRunner(pages={audit_log.READ_REMOVED: [full_page(removed[0], tables.AUDIT_LOG_PAGE_LIMIT), FAIL]})

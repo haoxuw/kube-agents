@@ -1228,23 +1228,27 @@ class FakeReadinessCommands(FakeGcloud):
     recording the KUBECONFIG each kubectl ran with.
 
     `objects_by_cluster` answers the PDB read, `namespaced_objects_by_cluster` the namespaced
-    read, `cluster_objects_by_cluster` the StorageClass and PersistentVolume read and
-    `nodes_by_cluster` (Node dicts) the projected node read, rendered the way kubectl's
-    jsonpath renders it; `node_output_by_cluster` replaces that rendering verbatim.
-    `failing_reads` maps a cluster to the resource arguments whose reads fail;
-    `audit_by_cluster` holds one page of audit entries per cluster and `failing_logging` the
-    clusters whose `logging read` times out.
+    read, `pods_by_cluster` the pod read, `cluster_objects_by_cluster` the StorageClass and
+    PersistentVolume read and `nodes_by_cluster` (Node dicts) the projected node read,
+    rendered the way kubectl's jsonpath renders it; `node_output_by_cluster` replaces that
+    rendering verbatim. `failing_reads` maps a cluster to the resource arguments whose reads
+    fail; `cut_reads` to those the credential proxy cuts at its output cap (rc 0, the output
+    cut after the first line, the proxy's marker on stderr); `audit_by_cluster` holds one
+    page of audit entries per cluster and `failing_logging` the clusters whose `logging
+    read` times out.
     """
 
-    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), namespaced_objects_by_cluster=None, cluster_objects_by_cluster=None, nodes_by_cluster=None, node_output_by_cluster=None, failing_reads=None, audit_by_cluster=None, failing_logging=()):
+    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), namespaced_objects_by_cluster=None, pods_by_cluster=None, cluster_objects_by_cluster=None, nodes_by_cluster=None, node_output_by_cluster=None, failing_reads=None, cut_reads=None, audit_by_cluster=None, failing_logging=()):
         super().__init__(clusters_by_project, config_by_location)
         self.objects_by_cluster = objects_by_cluster
         self.namespaced_objects_by_cluster = namespaced_objects_by_cluster or {}
+        self.pods_by_cluster = pods_by_cluster or {}
         self.cluster_objects_by_cluster = cluster_objects_by_cluster or {}
         self.nodes_by_cluster = nodes_by_cluster or {}
         self.node_output_by_cluster = node_output_by_cluster or {}
         self.failing_kubectl = set(failing_kubectl)
         self.failing_reads = failing_reads or {}
+        self.cut_reads = cut_reads or {}
         self.failing_credentials = set(failing_credentials)
         self.audit_by_cluster = audit_by_cluster or {}
         self.failing_logging = set(failing_logging)
@@ -1285,28 +1289,37 @@ class FakeReadinessCommands(FakeGcloud):
             if resource in self.failing_reads.get(self.current_cluster, ()):
                 return 1, "", f'Error from server (Forbidden): {resource} is forbidden: User "agent" cannot list resource "{resource}"'
             if resource == report.KUBECTL_NAMESPACED_RESOURCES:
-                return 0, json.dumps({"kind": "List", "items": self.namespaced_objects_by_cluster.get(self.current_cluster, [])}), ""
-            if resource == report.KUBECTL_CLUSTER_RESOURCES:
-                return 0, json.dumps({"kind": "List", "items": self.cluster_objects_by_cluster.get(self.current_cluster, [])}), ""
-            if resource == report.KUBECTL_NODE_RESOURCE:
-                if self.current_cluster in self.node_output_by_cluster:
-                    return 0, self.node_output_by_cluster[self.current_cluster], ""
-                return 0, "".join(node_line(n) for n in self.nodes_by_cluster.get(self.current_cluster, [])), ""
+                stdout = json.dumps({"kind": "List", "items": self.namespaced_objects_by_cluster.get(self.current_cluster, [])})
+            elif resource == report.KUBECTL_POD_RESOURCE:
+                stdout = json.dumps({"kind": "List", "items": self.pods_by_cluster.get(self.current_cluster, [])}, indent=1)
+            elif resource == report.KUBECTL_CLUSTER_RESOURCES:
+                stdout = json.dumps({"kind": "List", "items": self.cluster_objects_by_cluster.get(self.current_cluster, [])})
+            elif resource == report.KUBECTL_NODE_RESOURCE:
+                stdout = self.node_output_by_cluster.get(self.current_cluster)
+                if stdout is None:
+                    stdout = "".join(node_line(n) for n in self.nodes_by_cluster.get(self.current_cluster, []))
+            else:
+                raise AssertionError(f"unexpected kubectl resource {resource}")
+            if resource in self.cut_reads.get(self.current_cluster, ()):
+                return 0, stdout.split("\n", 1)[0] + "\n", "credential proxy output truncated\n"
+            return 0, stdout, ""
         return super().__call__(cmd)
 
 
 def node_line(node):
-    """One node as kubectl's jsonpath renders the report's template: tab-separated fields, maps and lists as JSON, an absent field empty."""
+    """One node as kubectl's jsonpath renders the report's template: tab-separated fields, maps, lists and booleans as JSON, an absent field empty."""
     meta, spec, status = node.get("metadata") or {}, node.get("spec") or {}, node.get("status") or {}
-    fields = [meta.get("name", ""), meta.get("labels"), spec.get("taints"), status.get("nodeInfo"), status.get("allocatable"), status.get("conditions")]
+    fields = [meta.get("name", ""), meta.get("labels"), spec.get("taints"), spec.get("unschedulable"), status.get("nodeInfo"), status.get("allocatable"), status.get("conditions")]
     return "\t".join([fields[0]] + [json.dumps(f) if f is not None else "" for f in fields[1:]]) + "\n"
 
 
 PDB_READ_CMD = ["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]
-NAMESPACED_READ_CMD = ["kubectl", "get", "daemonset,cronjob,pods,pvc,networkpolicy,namespace", "-A", "-o", "json"]
+NAMESPACED_READ_CMD = ["kubectl", "get", "daemonset,cronjob,pvc,networkpolicy,namespace", "-A", "-o", "json"]
+POD_READ_CMD = ["kubectl", "get", "pods", "-A", "-o", "json"]
 NODE_READ_CMD = ["kubectl", "get", "node", "-o", f"jsonpath={report.KUBECTL_NODE_JSONPATH}"]
 CLUSTER_READ_CMD = ["kubectl", "get", "storageclass,pv", "-o", "json"]
-MEMBER_READS = [PDB_READ_CMD, NAMESPACED_READ_CMD, NODE_READ_CMD, CLUSTER_READ_CMD]
+MEMBER_READS = [PDB_READ_CMD, NAMESPACED_READ_CMD, POD_READ_CMD, NODE_READ_CMD, CLUSTER_READ_CMD]
+CUT_AT_CAP = "output was cut at the credential proxy's output cap"
 
 
 def fake_rule(rule_id, entry=0, can_block=True, evaluate=None, describe=None):
@@ -1323,7 +1336,7 @@ def fake_rule(rule_id, entry=0, can_block=True, evaluate=None, describe=None):
 
 
 # The reads' kind names against the `kind` the objects carry, for the fake rules below.
-OBJECT_KIND = {"pods": "Pod", "node": "Node", "pv": "PersistentVolume"}
+OBJECT_KIND = {"pods": "Pod", "node": "Node", "pv": "PersistentVolume", "networkpolicy": "NetworkPolicy"}
 
 
 def kind_rule(rule_id, kind, can_block=True):
@@ -1570,8 +1583,9 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(b["status"], "blocked")
         self.assertIsNone(b["pdbs"])
         self.assertIn("forbidden", b["read_error"])
-        # Four reads for each of the two members whose credentials came; none for seeded-b.
-        self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 8)
+        # Every read for each of the two members whose credentials came; none for seeded-b.
+        self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 2 * report.KUBECTL_READS_PER_MEMBER)
+        self.assertEqual(report.KUBECTL_READS_PER_MEMBER, len(MEMBER_READS))
         self.assertIn("cluster read failed; PDBs not graded; the reads after it were skipped; the per-entry rules that need them say so", b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
         self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
@@ -1653,24 +1667,27 @@ class ReadinessTest(unittest.TestCase):
 
     def test_a_failed_read_after_the_pdb_read_costs_the_rules_that_need_it_and_no_exit_code(self):
         needs_pods = kind_rule("needs-pods", "pods")
+        needs_netpol = kind_rule("needs-netpol", "networkpolicy")
         needs_nodes = kind_rule("needs-nodes", "node")
         needs_pv = kind_rule("needs-pv", "pv", can_block=False)
         member_only = {"p1": [self.clusters["p1"][1]]}
         objects = {"seeded-a": self.objects["seeded-a"]}
         pods = [{"kind": "Pod", "metadata": {"namespace": "shop", "name": "web-1"}, "spec": {}, "status": {"phase": "Running"}}]
+        policies = [{"kind": "NetworkPolicy", "metadata": {"namespace": "shop", "name": "deny"}, "spec": {}}]
         nodes = [{"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "status": {"allocatable": {"cpu": "940m"}}}]
-        with patch.object(readiness, "EXTRA_RULES", [needs_pods, needs_nodes, needs_pv]):
-            # Every read answers: three notes, nothing unknown.
-            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes})
+        with patch.object(readiness, "EXTRA_RULES", [needs_pods, needs_netpol, needs_nodes, needs_pv]):
+            # Every read answers: four notes, nothing unknown.
+            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": policies}, pods_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes})
             rc, text, data = self._run(fake)
             self.assertEqual(rc, report.EXIT_OK)
             a = data["members"][0]["readiness"]
             self.assertEqual(a["status"], "ready")
-            self.assertEqual(a["notes"], ["needs-pods: saw 1 pods(s)", "needs-nodes: saw 1 node(s)", "needs-pv: saw 0 pv(s)"])
+            self.assertEqual(a["notes"], ["needs-pods: saw 1 pods(s)", "needs-netpol: saw 1 networkpolicy(s)", "needs-nodes: saw 1 node(s)", "needs-pv: saw 0 pv(s)"])
             self.assertEqual(a["read_errors"], {kind: None for kind in readiness_rules.READ_KINDS})
-            # The namespaced read refused: the six kinds it carried are unread, the pods rule is
-            # unknown and moves the verdict, the node and pv rules are untouched, exit 0.
-            fake = FakeReadinessCommands(member_only, {}, objects, nodes_by_cluster={"seeded-a": nodes}, failing_reads={"seeded-a": {report.KUBECTL_NAMESPACED_RESOURCES}})
+            # The namespaced read refused: the five kinds it carried are unread, the policy rule
+            # is unknown and moves the verdict; the pods rule, read on its own, and the node and
+            # pv rules are untouched; exit 0.
+            fake = FakeReadinessCommands(member_only, {}, objects, pods_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes}, failing_reads={"seeded-a": {report.KUBECTL_NAMESPACED_RESOURCES}})
             rc, text, data = self._run(fake)
             self.assertEqual(rc, report.EXIT_OK)
             a = data["members"][0]["readiness"]
@@ -1678,20 +1695,29 @@ class ReadinessTest(unittest.TestCase):
             self.assertEqual(a["pdbs"]["blocking"], [])
             self.assertIsNone(a["read_error"])
             for kind in readiness_rules.NAMESPACED_READ_KINDS:
-                self.assertIn("daemonset,cronjob,pods,pvc,networkpolicy,namespace is forbidden", a["read_errors"][kind])
+                self.assertIn("daemonset,cronjob,pvc,networkpolicy,namespace is forbidden", a["read_errors"][kind])
+            self.assertIsNone(a["read_errors"]["pods"])
             self.assertIsNone(a["read_errors"]["node"])
             self.assertIsNone(a["read_errors"]["pv"])
-            self.assertEqual([(u["rule"], u["can_block"]) for u in a["unknown"]], [("needs-pods", True)])
-            self.assertIn("the pods read failed (kubectl get daemonset,cronjob,pods,pvc,networkpolicy,namespace -A -o json failed (1)", a["unknown"][0]["reason"])
-            self.assertEqual(a["rules"]["needs-pods"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
-            self.assertEqual(a["rules"]["needs-nodes"]["notes"], 1)
-            self.assertIn("daemonset, cronjob, pods, pvc, networkpolicy, namespace not read (kubectl get daemonset,cronjob,pods,pvc,networkpolicy,namespace -A -o json failed (1)", a["note"])
+            self.assertEqual([(u["rule"], u["can_block"]) for u in a["unknown"]], [("needs-netpol", True)])
+            self.assertIn("the networkpolicy read failed (kubectl get daemonset,cronjob,pvc,networkpolicy,namespace -A -o json failed (1)", a["unknown"][0]["reason"])
+            self.assertEqual(a["rules"]["needs-netpol"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
+            self.assertEqual(a["rules"]["needs-pods"]["notes"], 1)
+            self.assertIn("daemonset, cronjob, pvc, networkpolicy, namespace not read (kubectl get daemonset,cronjob,pvc,networkpolicy,namespace -A -o json failed (1)", a["note"])
             self.assertIn("; the per-entry rules that need them say so", a["note"])
             self.assertEqual(data["errors"], [])
             self.assertNotIn("read failed for", text)
+            # The pod read refused: only the pods rule is unknown.
+            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": policies}, nodes_by_cluster={"seeded-a": nodes}, failing_reads={"seeded-a": {report.KUBECTL_POD_RESOURCE}})
+            rc, _, data = self._run(fake)
+            self.assertEqual(rc, report.EXIT_OK)
+            a = data["members"][0]["readiness"]
+            self.assertEqual([u["rule"] for u in a["unknown"]], ["needs-pods"])
+            self.assertIn("kubectl get pods -A -o json failed (1)", a["read_errors"]["pods"])
+            self.assertIsNone(a["read_errors"]["networkpolicy"])
             # The node and cluster-scoped reads refused: the pv rule cannot block, so its unknown
             # is reported and the node rule's is what makes the member unknown.
-            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": pods}, failing_reads={"seeded-a": {report.KUBECTL_NODE_RESOURCE, report.KUBECTL_CLUSTER_RESOURCES}})
+            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": policies}, pods_by_cluster={"seeded-a": pods}, failing_reads={"seeded-a": {report.KUBECTL_NODE_RESOURCE, report.KUBECTL_CLUSTER_RESOURCES}})
             rc, _, data = self._run(fake)
             self.assertEqual(rc, report.EXIT_OK)
             a = data["members"][0]["readiness"]
@@ -1702,26 +1728,67 @@ class ReadinessTest(unittest.TestCase):
             self.assertEqual(a["read_errors"]["storageclass"], a["read_errors"]["pv"])
             self.assertIsNone(a["read_errors"]["pods"])
             # Only the cluster-scoped read refused: the one rule that cannot block leaves the verdict ready.
-            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes}, failing_reads={"seeded-a": {report.KUBECTL_CLUSTER_RESOURCES}})
+            fake = FakeReadinessCommands(member_only, {}, objects, namespaced_objects_by_cluster={"seeded-a": policies}, pods_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes}, failing_reads={"seeded-a": {report.KUBECTL_CLUSTER_RESOURCES}})
             rc, _, data = self._run(fake)
             a = data["members"][0]["readiness"]
             self.assertEqual(a["status"], "ready")
             self.assertEqual([u["rule"] for u in a["unknown"]], ["needs-pv"])
             self.assertIn("needs-pv: the pv read failed", a["note"])
 
+    def test_a_read_the_proxy_cut_at_its_cap_is_that_kinds_error_naming_the_cap(self):
+        needs_pods = kind_rule("needs-pods", "pods")
+        needs_netpol = kind_rule("needs-netpol", "networkpolicy")
+        needs_nodes = kind_rule("needs-nodes", "node")
+        member_only = {"p1": [self.clusters["p1"][1]]}
+        objects = {"seeded-a": self.objects["seeded-a"]}
+        pods = [{"kind": "Pod", "metadata": {"namespace": "shop", "name": f"web-{i}"}, "spec": {}, "status": {"phase": "Running"}} for i in range(3)]
+        nodes = [{"kind": "Node", "metadata": {"name": f"n{i}", "labels": {}}, "status": {}} for i in range(3)]
+        with patch.object(readiness, "EXTRA_RULES", [needs_pods, needs_netpol, needs_nodes]):
+            # The pod list cut: rc 0, unparsable stdout, the marker on stderr. Pods alone are
+            # unread, named for the cap rather than as unparsable JSON; the five small kinds
+            # and the nodes reach their rules; no exit code.
+            fake = FakeReadinessCommands(member_only, {}, objects, pods_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes}, cut_reads={"seeded-a": {report.KUBECTL_POD_RESOURCE}})
+            rc, text, data = self._run(fake)
+            self.assertEqual(rc, report.EXIT_OK)
+            a = data["members"][0]["readiness"]
+            self.assertEqual(a["read_errors"]["pods"], f"kubectl get pods -A -o json {CUT_AT_CAP}, so the list did not fit in one read")
+            self.assertNotIn("unparsable", a["read_errors"]["pods"])
+            self.assertEqual({k: v for k, v in a["read_errors"].items() if k != "pods"}, {kind: None for kind in readiness_rules.READ_KINDS if kind != "pods"})
+            self.assertEqual([u["rule"] for u in a["unknown"]], ["needs-pods"])
+            self.assertEqual(a["notes"], ["needs-netpol: saw 0 networkpolicy(s)", "needs-nodes: saw 3 node(s)"])
+            self.assertIn(f"pods not read (kubectl get pods -A -o json {CUT_AT_CAP}", a["note"])
+            self.assertEqual(data["errors"], [])
+            # The node read cut on a line boundary: the lines before the cut parse, and the read is
+            # still recorded as cut rather than as a short list.
+            fake = FakeReadinessCommands(member_only, {}, objects, pods_by_cluster={"seeded-a": pods}, nodes_by_cluster={"seeded-a": nodes}, cut_reads={"seeded-a": {report.KUBECTL_NODE_RESOURCE}})
+            rc, _, data = self._run(fake)
+            self.assertEqual(rc, report.EXIT_OK)
+            a = data["members"][0]["readiness"]
+            self.assertEqual(a["read_errors"]["node"], f"kubectl get node {CUT_AT_CAP}, so the list did not fit in one read")
+            self.assertEqual([u["rule"] for u in a["unknown"]], ["needs-nodes"])
+            self.assertEqual(a["notes"], ["needs-pods: saw 3 pods(s)", "needs-netpol: saw 0 networkpolicy(s)"])
+
     def test_projected_nodes_are_parsed_and_a_malformed_line_fails_the_node_read_only(self):
-        nodes, error = report.parse_node_lines('n1\t{"cloud.google.com/gke-nodepool":"default-pool"}\t\t{"kubeletVersion":"v1.33.4-gke.1000"}\t{"cpu":"940m"}\t[{"type":"Ready","status":"True"}]\n\n')
+        nodes, error = report.parse_node_lines('n1\t{"cloud.google.com/gke-nodepool":"default-pool"}\t\t\t{"kubeletVersion":"v1.33.4-gke.1000"}\t{"cpu":"940m"}\t[{"type":"Ready","status":"True"}]\n\n')
         self.assertIsNone(error)
-        self.assertEqual(nodes, [{"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": []}, "status": {"nodeInfo": {"kubeletVersion": "v1.33.4-gke.1000"}, "allocatable": {"cpu": "940m"}, "conditions": [{"type": "Ready", "status": "True"}]}}])
+        self.assertEqual(nodes, [{"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": [], "unschedulable": False}, "status": {"nodeInfo": {"kubeletVersion": "v1.33.4-gke.1000"}, "allocatable": {"cpu": "940m"}, "conditions": [{"type": "Ready", "status": "True"}]}}])
         self.assertEqual(report.parse_node_lines(""), ([], None))
-        nodes, error = report.parse_node_lines("n1\tnot-json\t\t\t\t\n")
+        nodes, error = report.parse_node_lines("n1\tnot-json\t\t\t\t\t\n")
         self.assertIsNone(nodes)
         self.assertIn("node line unparsable", error)
         nodes, error = report.parse_node_lines("n1\tonly two\n")
-        self.assertIn("field(s), not 6", error)
-        # The fake renders a node the way the template does, and the report reads it back whole.
-        node = {"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": [{"key": "k", "effect": "NoSchedule"}]}, "status": {"nodeInfo": {"containerRuntimeVersion": "containerd://2.0.10"}, "allocatable": {"cpu": "940m", "memory": "2Gi"}, "conditions": [{"type": "Ready", "status": "True"}]}}
+        self.assertIn("field(s), not 7", error)
+        self.assertEqual(report.KUBECTL_NODE_JSONPATH.count('{"\\t"}'), report.NODE_FIELD_COUNT - 1)
+        self.assertIn("{.spec.unschedulable}", report.KUBECTL_NODE_JSONPATH)
+        # The fake renders a node the way the template does, and the report reads it back whole;
+        # a cordoned node's `spec.unschedulable` survives the projection, so the helper that
+        # reads it answers from the report's own data.
+        node = {"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": [{"key": "k", "effect": "NoSchedule"}], "unschedulable": False}, "status": {"nodeInfo": {"containerRuntimeVersion": "containerd://2.0.10"}, "allocatable": {"cpu": "940m", "memory": "2Gi"}, "conditions": [{"type": "Ready", "status": "True"}]}}
         self.assertEqual(report.parse_node_lines(node_line(node)), ([node], None))
+        self.assertTrue(readiness_rules.node_schedulable(report.parse_node_lines(node_line(node))[0][0]))
+        cordoned = {**node, "spec": {"taints": [{"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"}], "unschedulable": True}}
+        self.assertEqual(report.parse_node_lines(node_line(cordoned)), ([cordoned], None))
+        self.assertFalse(readiness_rules.node_schedulable(report.parse_node_lines(node_line(cordoned))[0][0]))
         # A malformed node line is the node read's failure alone: the other kinds reach the rules.
         needs_nodes = kind_rule("needs-nodes", "node")
         needs_pods = kind_rule("needs-pods", "pods")
@@ -1730,7 +1797,7 @@ class ReadinessTest(unittest.TestCase):
             rc, _, data = self._run(fake)
         self.assertEqual(rc, report.EXIT_OK)
         a = data["members"][0]["readiness"]
-        self.assertIn("field(s), not 6", a["read_errors"]["node"])
+        self.assertIn("field(s), not 7", a["read_errors"]["node"])
         self.assertIsNone(a["read_errors"]["pods"])
         self.assertEqual([u["rule"] for u in a["unknown"]], ["needs-nodes"])
         self.assertEqual(a["notes"], ["needs-pods: saw 0 pods(s)"])

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-audit_log.py — the two Cloud Logging reads the audit-log rules share.
+audit_log.py — the two Cloud Logging reads the per-entry rules for catalogue entries 6, 9
+and 10 share.
 
-Not a rule. `read(context, which)` runs `gcloud logging read` for one member over the seven
-days ending at the evaluation instant, pages it by timestamp bound, groups the entries by
-caller (principal and user agent) and API, and caches the result in the context, so the
-removed-API rule (catalogue entry 6), the deprecated-API rule (entry 9) and the client-skew
-rule (entry 10) read the log twice between them rather than once each:
+Not a rule: the shared read those rules import, shipped with the registry before them.
+`read(context, which)` runs `gcloud logging read` for one member over the seven days ending
+at the evaluation instant, pages it by timestamp bound, groups the entries by caller
+(principal and user agent) and API, and caches the result in the context, so the rules that
+read it read the log twice between them rather than once each:
 
 - the removed-release read: entries the API server stamped `k8s.io/removed-release`;
 - the deprecated-or-kubectl read: entries stamped `k8s.io/deprecated` with no removal
@@ -260,10 +261,12 @@ def caller_records(entries: list) -> list[dict]:
     Each record carries the deprecation labels seen on the group: `removed_release` is the
     release the API server stamped (the same on every entry of one API), `deprecated` is
     whether any entry carried `k8s.io/deprecated=true`, `kubectl` whether the user agent is
-    kubectl's, `caller_class` who the principal is. Timestamps are the RFC 3339 strings
-    Cloud Logging wrote, compared as text, which orders correctly within one logger's format.
+    kubectl's, `caller_class` who the principal is. `first_seen` and `last_seen` are the RFC
+    3339 strings Cloud Logging wrote, chosen by parsed time: the logger emits 0, 3, 6 or 9
+    fractional digits, so text order is not time order.
     """
     grouped: dict[tuple, dict] = {}
+    seen: dict[tuple, tuple[datetime, datetime]] = {}
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
@@ -295,11 +298,14 @@ def caller_records(entries: list) -> list[dict]:
         if str(labels.get(LABEL_DEPRECATED, "")).lower() == DEPRECATED_TRUE:
             record["deprecated"] = True
         stamp = entry.get(TIMESTAMP)
-        if isinstance(stamp, str) and stamp:
-            if record["first_seen"] is None or stamp < record["first_seen"]:
-                record["first_seen"] = stamp
-            if record["last_seen"] is None or stamp > record["last_seen"]:
-                record["last_seen"] = stamp
+        parsed = parse_timestamp(stamp)
+        if parsed is not None:
+            first, last = seen.get(key, (parsed, parsed))
+            if parsed <= first:
+                first, record["first_seen"] = parsed, stamp
+            if parsed >= last:
+                last, record["last_seen"] = parsed, stamp
+            seen[key] = (first, last)
     return sorted(grouped.values(), key=lambda r: (r["principal"], r["user_agent"], r["api"]))
 
 
@@ -319,8 +325,10 @@ def _parse_page(stdout) -> list | None:
 
 
 def _oldest_timestamp(page: list) -> str | None:
-    stamps = [e.get(TIMESTAMP) for e in page if isinstance(e, dict) and isinstance(e.get(TIMESTAMP), str) and e.get(TIMESTAMP)]
-    return min(stamps) if stamps else None
+    """The text of the page's oldest timestamp by parsed time, the next page's `timestamp<`
+    bound; None when no entry carries one that parses."""
+    stamped = [(parsed, e[TIMESTAMP]) for e in page if isinstance(e, dict) and (parsed := parse_timestamp(e.get(TIMESTAMP))) is not None]
+    return min(stamped)[1] if stamped else None
 
 
 def read(context: dict, which: str) -> dict:

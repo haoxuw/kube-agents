@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-finding.py — the tiered-finding helpers the audit-log, client-skew and changed-defaults rules
-share, on top of the result shape the package docstring fixes.
+finding.py — the tiered-finding helpers the per-entry rules for catalogue entries 6, 8, 9
+and 10 import, on top of the result shape the package docstring fixes; shipped with the
+registry before those rules.
 
 Not a rule. A rule's `evaluate` returns `empty_result()` filled in: three lists of findings,
 one per tier, plus `notes`, the strings the report appends to the member's note column for
-what the rule read but did not file (the provider's callers, namespaces pinned to a version,
+what the rule read but did not file (a provider's caller, a namespace pinned to a version,
 a sampled read). Every finding carries `rule` and `tier`; an `unknown` finding carries
 `reason`. `pod_spec` is the package's one pod-template walk, so a kind added for one rule is
 read by every rule.

@@ -24,9 +24,10 @@ exclusion in effect whose scope covers the upgrade, the maintenance window's sta
 `--at`, and node-pool version skew against the target control plane; then the per-entry
 rules registered in `upgrade_readiness.EXTRA_RULES` (`readiness_rules/`, one module per
 entry of the upgrade-failure catalogue), which read the same cluster record, the objects of
-three more `kubectl get`s per member (namespaced kinds; Nodes through a jsonpath template;
-StorageClasses and PersistentVolumes), each failing on its own, and, through the per-member
-context, whatever a rule reads itself (the audit-log rules' paged `gcloud logging read`s).
+the `kubectl get`s after the PDB read, one per group in LATER_READS (the namespaced kinds;
+the Pods on their own; the Nodes through a jsonpath template; StorageClasses and
+PersistentVolumes), each failing on its own, and, through the per-member context, whatever
+a rule reads itself (a rule that reads the audit log runs paged `gcloud logging read`s).
 A rule's blockers join the verdict and its risks get a column of their own. The rules live
 in `upgrade_readiness.py` and `readiness_rules/`; this file reads and renders.
 
@@ -254,7 +255,7 @@ PROGRESS_COLUMNS = (
 VERSION_PAIR_SEPARATOR = " / "
 
 # Readiness (`--readiness`). The PDB check needs one kubectl read per member, and the
-# per-entry rules three more (below), which need credentials for that member:
+# per-entry rules the reads after it (LATER_READS, below), which need credentials for that member:
 # `get-credentials` writes a per-target kubeconfig, passed to
 # every command as KUBECONFIG in the subprocess environment rather than through a flag,
 # because the gcloud and kubectl in the agent pod are credential-proxy shims that forward
@@ -308,27 +309,48 @@ NOTE_WEBHOOK_READ_SKIPPED = f"webhook read {WEBHOOK_READ_SKIPPED}; webhooks not 
 # configurations first, then each referenced Service and its slices, and the two namespaces by
 # name) is the change that removes the cluster-size bound, and is not made here.
 KUBECTL_RESOURCES = "pdb,deploy,statefulset"
-# The reads after the PDB read, which stays as it is above: the namespaced kinds the
-# per-entry rules read, then the cluster-scoped ones, the Nodes through a jsonpath template
-# that keeps the fields the rules use and drops the rest (`status.images`, the annotations),
-# which is what keeps a few hundred nodes under the credential proxy's output cap (one line
-# per node, tab-separated, each field JSON as kubectl's jsonpath renders maps and lists, an
-# absent field empty), and StorageClasses and PersistentVolumes as JSON. Each read fails on
-# its own: a refused or unparsable read is recorded per kind in `read_errors`, costs only
-# the rules that need those kinds (each files `unknown` for itself), never the PDB rule, and
-# sets no exit code. The kinds are readiness_rules.READ_KINDS, named once for the rules and
-# the report; a failed command marks every kind it carried, including a partial listing.
+# The reads after the PDB read, which stays as it is above, one per group in LATER_READS:
+# the namespaced kinds the per-entry rules read; the Pods on their own, since the pod list
+# is the one most likely to exceed the credential proxy's output cap and a cut read must
+# cost only the rules that need pods; the Nodes through a jsonpath template that keeps the
+# fields the rules use (name, labels, taints, whether the node is cordoned, nodeInfo,
+# allocatable, conditions) and drops the rest (`status.images`, the annotations), which is
+# what keeps a few hundred nodes under that cap (one line per node, tab-separated, each
+# field JSON as kubectl's jsonpath renders maps, lists and booleans, an absent field empty);
+# and StorageClasses and PersistentVolumes as JSON. Each read fails on its own: a refused,
+# unparsable or cut read is recorded per kind in `read_errors`, costs only the rules that
+# need those kinds (each files `unknown` for itself), never the PDB rule, and sets no exit
+# code. The kinds are readiness_rules.READ_KINDS, named once for the rules and the report; a
+# failed command marks every kind it carried, including a partial listing.
+# KUBECTL_READS_PER_MEMBER, derived from the table, is the count the help cites.
 ALL_NAMESPACES_FLAG = "-A"
 OUTPUT_FLAG = "-o"
 JSON_OUTPUT_ARGS = (OUTPUT_FLAG, "json")
+READ_MODE_NAMESPACED_JSON = "namespaced-json"
+READ_MODE_CLUSTER_JSON = "cluster-json"
+READ_MODE_NODE_JSONPATH = "node-jsonpath"
 KUBECTL_NAMESPACED_RESOURCES = ",".join(readiness_rules.NAMESPACED_READ_KINDS)
+KUBECTL_POD_RESOURCE = readiness_rules.POD_READ_KIND
 KUBECTL_NODE_RESOURCE = readiness_rules.NODE_READ_KIND
 KUBECTL_CLUSTER_RESOURCES = ",".join(readiness_rules.CLUSTER_READ_KINDS)
-KUBECTL_NODE_JSONPATH = '{range .items[*]}{.metadata.name}{"\\t"}{.metadata.labels}{"\\t"}{.spec.taints}{"\\t"}{.status.nodeInfo}{"\\t"}{.status.allocatable}{"\\t"}{.status.conditions}{"\\n"}{end}'
+LATER_READS = (
+    (readiness_rules.NAMESPACED_READ_KINDS, KUBECTL_NAMESPACED_RESOURCES, READ_MODE_NAMESPACED_JSON),
+    ((readiness_rules.POD_READ_KIND,), KUBECTL_POD_RESOURCE, READ_MODE_NAMESPACED_JSON),
+    ((readiness_rules.NODE_READ_KIND,), KUBECTL_NODE_RESOURCE, READ_MODE_NODE_JSONPATH),
+    (readiness_rules.CLUSTER_READ_KINDS, KUBECTL_CLUSTER_RESOURCES, READ_MODE_CLUSTER_JSON),
+)
+KUBECTL_READS_PER_MEMBER = 1 + len(LATER_READS)
+KUBECTL_NODE_JSONPATH = '{range .items[*]}{.metadata.name}{"\\t"}{.metadata.labels}{"\\t"}{.spec.taints}{"\\t"}{.spec.unschedulable}{"\\t"}{.status.nodeInfo}{"\\t"}{.status.allocatable}{"\\t"}{.status.conditions}{"\\n"}{end}'
 JSONPATH_OUTPUT_FORMAT = "jsonpath={template}"
 NODE_FIELD_SEPARATOR = "\t"
-NODE_FIELD_COUNT = 6
+NODE_FIELD_COUNT = 7
 NODE_KIND = readiness_rules.KIND_NODE
+# The credential proxy caps each stream a brokered command returns; past the cap it writes
+# the cut stdout, prints this marker on stderr and returns the command's own exit code, so
+# a cut list reads as rc 0 with output that may or may not parse. The marker, not the parse
+# failure, names the cause, and the kinds the read carried are recorded as cut.
+PROXY_TRUNCATION_MARKER = "credential proxy output truncated"
+KUBECTL_OUTPUT_CUT = "{cmd} output was cut at the credential proxy's output cap, so the list did not fit in one read"
 NOTE_PDB_READ_FAILED = "cluster read failed; PDBs not graded"
 NOTE_LATER_READS_SKIPPED = "the reads after it were skipped; the per-entry rules that need them say so"
 NOTE_READ_FAILED = "{kinds} not read ({error}); the per-entry rules that need them say so"
@@ -772,11 +794,14 @@ def get_credentials_cmd(cluster: dict, project: str) -> list[str]:
 
 
 def _kubectl_get(resources: str, env: dict, namespaced: bool) -> tuple[list | None, str | None]:
-    """(items, error) of one `kubectl get <resources> [-A] -o json`."""
+    """(items, error) of one `kubectl get <resources> [-A] -o json`; a list the credential
+    proxy cut at its output cap is an error naming the cap."""
     cmd = [KUBECTL, "get", resources, *([ALL_NAMESPACES_FLAG] if namespaced else []), *JSON_OUTPUT_ARGS]
     rc, stdout, stderr = run_cmd(cmd, KUBECTL_TIMEOUT_SECONDS, env)
     if rc != 0:
         return None, f"{' '.join(cmd)} failed ({rc}): {stderr.strip()}"
+    if PROXY_TRUNCATION_MARKER in stderr:
+        return None, KUBECTL_OUTPUT_CUT.format(cmd=" ".join(cmd))
     try:
         data = json.loads(stdout) if stdout.strip() else {}
     except ValueError as e:
@@ -797,20 +822,30 @@ def parse_node_lines(stdout: str) -> tuple[list[dict] | None, str | None]:
         if len(fields) != NODE_FIELD_COUNT:
             return None, f"node line has {len(fields)} field(s), not {NODE_FIELD_COUNT}: {line[:NOTE_ERROR_CHARS]!r}"
         try:
-            labels, taints, info, allocatable, conditions = (json.loads(f) if f.strip() else None for f in fields[1:])
+            labels, taints, unschedulable, info, allocatable, conditions = (json.loads(f) if f.strip() else None for f in fields[1:])
         except ValueError as e:
             return None, f"node line unparsable: {e}"
-        nodes.append({"kind": NODE_KIND, "metadata": {"name": fields[0], "labels": labels or {}}, "spec": {"taints": taints or []}, "status": {"nodeInfo": info or {}, "allocatable": allocatable or {}, "conditions": conditions or []}})
+        nodes.append({"kind": NODE_KIND, "metadata": {"name": fields[0], "labels": labels or {}}, "spec": {"taints": taints or [], "unschedulable": bool(unschedulable)}, "status": {"nodeInfo": info or {}, "allocatable": allocatable or {}, "conditions": conditions or []}})
     return nodes, None
 
 
 def _kubectl_nodes(env: dict) -> tuple[list[dict] | None, str | None]:
-    """(nodes, error) of the projected node read."""
+    """(nodes, error) of the projected node read; a cut read is an error naming the cap even
+    when the cut fell on a line boundary and the lines before it parse."""
     cmd = [KUBECTL, "get", KUBECTL_NODE_RESOURCE, OUTPUT_FLAG, JSONPATH_OUTPUT_FORMAT.format(template=KUBECTL_NODE_JSONPATH)]
     rc, stdout, stderr = run_cmd(cmd, KUBECTL_TIMEOUT_SECONDS, env)
     if rc != 0:
         return None, f"{' '.join(cmd[:3])} failed ({rc}): {stderr.strip()}"
+    if PROXY_TRUNCATION_MARKER in stderr:
+        return None, KUBECTL_OUTPUT_CUT.format(cmd=" ".join(cmd[:3]))
     return parse_node_lines(stdout)
+
+
+def _later_read(resources: str, mode: str, env: dict) -> tuple[list | None, str | None]:
+    """One read of LATER_READS, by its mode."""
+    if mode == READ_MODE_NODE_JSONPATH:
+        return _kubectl_nodes(env)
+    return _kubectl_get(resources, env, mode == READ_MODE_NAMESPACED_JSON)
 
 
 def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> dict:
@@ -823,10 +858,9 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
     PodDisruptionBudget, Deployment and StatefulSet. A failed credentials fetch or PDB read
     leaves `items` None, skips the reads after it (the API server did not answer the first),
     grades the member `unknown` on the PDB rule and on every per-entry rule that needs an
-    object, and exits 1. The reads after it (the namespaced kinds; the projected Nodes;
-    StorageClasses and PersistentVolumes) each fail on their own: the kinds that answered
-    reach the rules, the failed read is recorded per kind for the rules that need it, and
-    the exit code is untouched.
+    object, and exits 1. The reads after it, one per group in LATER_READS, each fail on
+    their own: the kinds that answered reach the rules, the failed or cut read is recorded
+    per kind for the rules that need it, and the exit code is untouched.
     """
     path = kubeconfig_path(kubeconfig_dir, project, cluster.get("name", ""), cluster.get("location", ""))
     read = {"kubeconfig": path, "items": None, "error": None, "read_errors": {kind: None for kind in readiness_rules.READ_KINDS}}
@@ -844,13 +878,8 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
     read["items"], read["error"] = _kubectl_get(KUBECTL_RESOURCES, env, True)
     if read["error"] is not None:
         return read
-    later_reads = (
-        (readiness_rules.NAMESPACED_READ_KINDS, lambda: _kubectl_get(KUBECTL_NAMESPACED_RESOURCES, env, True)),
-        ((readiness_rules.NODE_READ_KIND,), lambda: _kubectl_nodes(env)),
-        (readiness_rules.CLUSTER_READ_KINDS, lambda: _kubectl_get(KUBECTL_CLUSTER_RESOURCES, env, False)),
-    )
-    for kinds, reader in later_reads:
-        objects, error = reader()
+    for kinds, resources, mode in LATER_READS:
+        objects, error = _later_read(resources, mode, env)
         if error is not None:
             for kind in kinds:
                 read["read_errors"][kind] = error
@@ -1485,7 +1514,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", help="Path to write the report as JSON.")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR, help=f"Directory holding one record per target from the previous run (default: {DEFAULT_STATE_DIR}).")
     parser.add_argument("--rollout-in-progress", action="store_true", help="Assert a rollout is under way, so an unchanged, behind member is flagged stalled even when no other member moved.")
-    parser.add_argument("--readiness", action="store_true", help="Also grade each member's readiness for the upgrade: drain-blocking PDBs, maintenance exclusions and window, node-pool skew, then the per-entry rules of the upgrade-failure catalogue (readiness_rules/; three more kubectl reads per member, each failing on its own), whose blockers join the verdict and whose risks get a column of their own.")
+    parser.add_argument("--readiness", action="store_true", help=f"Also grade each member's readiness for the upgrade: drain-blocking PDBs, maintenance exclusions and window, node-pool skew, then the per-entry rules of the upgrade-failure catalogue (readiness_rules/; {KUBECTL_READS_PER_MEMBER} kubectl reads per member in all, each after the first failing on its own), whose blockers join the verdict and whose risks get a column of their own.")
     parser.add_argument("--at", help="RFC 3339 instant to evaluate maintenance exclusions and the window at (default: now). Only with --readiness.")
     parser.add_argument("--kubeconfig-dir", help="Directory for the per-member kubeconfig files --readiness writes (default: $HERMES_HOME/.kubeconfigs).")
     args = parser.parse_args(argv)

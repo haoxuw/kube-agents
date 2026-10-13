@@ -22,10 +22,12 @@ One module per entry of docs/designs/upgrade-failure-catalogue.md. Each module e
 object the reads returned, None when `get-credentials` or the PDB read failed, in which case
 nothing was read and `error` says why. `read_errors` is keyed by kind as the reads after the
 PDB read name them (READ_KINDS), each None or the error of the read that carried the kind:
-the namespaced kinds (NAMESPACED_READ_KINDS) come in one read, the Nodes in one through a
-jsonpath template, the StorageClasses and PersistentVolumes in one. A rule that needs a kind
-asks `read_error(read, kind)` and files one `unknown` naming the reason when the kind was not
-read, grading what it has; a refused read never costs a rule that does not need it.
+the namespaced kinds (NAMESPACED_READ_KINDS) come in one read, the Pods in one of their own,
+the Nodes in one through a jsonpath template, the StorageClasses and PersistentVolumes in
+one. A read the credential proxy cut at its output cap is that kind's read error, naming the
+cap. A rule that needs a kind asks `read_error(read, kind)` and files one `unknown` naming the
+reason when the kind was not read, grading what it has; a refused or cut read never costs a
+rule that does not need it.
 
 `context` carries `project`, `location` and `cluster_name` (for a log filter), `run_cmd`
 (the report's runner) with `timeout_seconds` (the per-call cap a rule passes to it), `at`
@@ -60,13 +62,16 @@ GRADE_UNKNOWN = "unknown"
 LIST_SEPARATOR = ", "
 
 # The kinds `fleet_upgrade_report` reads per member, as `kubectl get` names them. The PDB
-# read is the one on main; the three after it fail on their own, and `read_errors` is keyed
-# by the kinds below.
+# read is the one on main; the reads after it fail on their own, and `read_errors` is keyed
+# by the kinds below. Pods are a read of their own: the pod list is the one most likely to
+# exceed the credential proxy's output cap, and a cut read must cost only the rules that
+# need pods, never the five smaller kinds.
 PDB_READ_KINDS = ("pdb", "deploy", "statefulset")
-NAMESPACED_READ_KINDS = ("daemonset", "cronjob", "pods", "pvc", "networkpolicy", "namespace")
+NAMESPACED_READ_KINDS = ("daemonset", "cronjob", "pvc", "networkpolicy", "namespace")
+POD_READ_KIND = "pods"
 NODE_READ_KIND = "node"
 CLUSTER_READ_KINDS = ("storageclass", "pv")
-READ_KINDS = NAMESPACED_READ_KINDS + (NODE_READ_KIND,) + CLUSTER_READ_KINDS
+READ_KINDS = NAMESPACED_READ_KINDS + (POD_READ_KIND, NODE_READ_KIND) + CLUSTER_READ_KINDS
 NOTHING_READ_REASON = "the cluster read failed, so nothing was read"
 
 # The per-member context keys (the module docstring says what each holds).

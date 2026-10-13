@@ -14,7 +14,8 @@ rather than guessing (docs/designs/upgrade-readiness-checks.md, "What a run prod
 Nothing here is computed from a cluster and nothing here runs a command.
 
 Each section names the catalogue entries it serves, as docs/designs/upgrade-failure-catalogue.md
-numbers them.
+numbers them. The tables ship with the rules registry before the per-entry rules that import
+them, so a section with no reader in the tree yet is expected rather than stale.
 """
 
 import json
@@ -439,8 +440,10 @@ AUTOPILOT_GPU_DRIVER_LABEL = "cloud.google.com/gke-gpu-driver-version"
 AUTOPILOT_GPU_DRIVER_LATEST = "latest"
 # The NVIDIA driver branch GKE installs per minor, (default, latest), from the GPU how-to
 # (docs.cloud.google.com/kubernetes-engine/docs/how-to/gpus, "Install drivers
-# automatically", read 2026-10-09). The page covers 1.26 to 1.33 for Container-Optimized
-# OS and names the Ubuntu default from 1.31; a target outside a table is `unknown`.
+# automatically", read 2026-10-09). The rows entered are 1.26 to 1.33 for
+# Container-Optimized OS and 1.31 to 1.33 for Ubuntu; the page also lists Ubuntu rows below
+# 1.31, not entered here, so an Ubuntu target there is `unknown` until a reader copies them
+# from the page. A target outside a table is `unknown`.
 GKE_COS_GPU_DRIVERS = {
     (1, 26): (470, 550),
     (1, 27): (470, 550),
