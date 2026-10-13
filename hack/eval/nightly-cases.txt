@@ -371,6 +371,16 @@
 # lists on 2026-10-15, after the rebase onto `02f251ff`: seventy-nine cases
 # (237 units) here, of a ninety-three-case, 279-unit matrix, the paragraphs
 # above included.
+#
+# 2026-10-14 adds the readiness-rule cases for catalogue entries 2, 13, 16 and
+# 19 (upgrades-readiness-surge-capacity, -containerd-socket, -legacy-dataplane
+# and -intree-volume): four cases, three units each at the 200s default
+# (read-only chat turns that run the readiness report, as the zonal case does).
+# They are the last four entries below, after stop-on-permission-refusal's,
+# which merged first. Counted over every entry below on 2026-10-15, after the
+# rebase onto `02f251ff`: eighty-three cases (249 units) here, of a
+# ninety-seven-case, 291-unit matrix with the presubmit file's fourteen.
+# No stack, so the infra lock is untouched.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -985,3 +995,30 @@
 # and no delegated worker retries the change another way after it (the
 # order-aware worker_commands check, #2173). deployer: noop, transcript-only.
 ./tasks/stop-on-permission-refusal/task.yaml
+
+# Upgrade-failure catalogue entry 2 through the readiness report's surge-capacity
+# rule: no-surge-pool on slot b removes its only node before a replacement exists
+# and pinned-batch-runner can run nowhere else. Read-only chat prompt over the
+# seeded fleet's readiness-surge-blocked and readiness-pinned-workload roles,
+# graded on declared lines. Nightly from its first merge.
+./tasks/upgrades-readiness-surge-capacity/task.yaml
+
+# Catalogue entry 13 through the readiness report's container-runtime rule:
+# node-runtime-probe on slot a mounts the containerd socket (role
+# containerd-socket-agent) and no pool's containerd major changes at the
+# channel default, so the report names it in a note, never as a blocker.
+# Read-only chat prompt graded on declared lines. Nightly from its first merge.
+./tasks/upgrades-readiness-containerd-socket/task.yaml
+
+# Catalogue entry 16 through the readiness report's network-dataplane rule: the
+# seeded clusters' legacy dataplane with the network policy add-on off and
+# default-deny policies that apply nowhere until enforcement turns on. Read-only;
+# the fleet's own shape, no planted fixture. Nightly from its first merge.
+./tasks/upgrades-readiness-legacy-dataplane/task.yaml
+
+# Catalogue entry 19 through the readiness report's in-tree-volumes rule:
+# intree-pd on slot a is an in-tree gcePersistentDisk volume (role
+# intree-pd-volume) on a cluster whose PD CSI driver add-on is on, so the report
+# grades it a risk, never a blocker. Read-only chat prompt graded on declared
+# lines. Nightly from its first merge.
+./tasks/upgrades-readiness-intree-volume/task.yaml

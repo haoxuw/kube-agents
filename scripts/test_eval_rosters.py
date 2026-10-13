@@ -181,6 +181,10 @@ ADDED_AFTER_THE_MOVE = [
     "manage-cluster-exclusion-installer-route-probe",  # the exclusion route on an installer-made install
     "upgrades-readiness-zonal-control-plane",  # catalogue entry 11 through the readiness report's per-entry rules
     "stop-on-permission-refusal",  # retry after a command-policy refusal, #1948
+    "upgrades-readiness-surge-capacity",  # catalogue entries 2, 13, 16 and 19 through the readiness report's per-entry rules
+    "upgrades-readiness-containerd-socket",
+    "upgrades-readiness-legacy-dataplane",
+    "upgrades-readiness-intree-volume",
 ]
 # Taken back out of the nightly file after registering there, each with a
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py that says why.
