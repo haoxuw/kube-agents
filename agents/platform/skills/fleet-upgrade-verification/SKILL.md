@@ -88,8 +88,11 @@ per-entry rules read), plus whatever a registered rule reads itself through the 
 runner under the same cap (a rule that reads the audit log runs paged `gcloud logging read`s).
 It changes nothing in GCP or in any cluster; the only things it writes are its own record under
 `/opt/data/state/fleet-upgrade-verification/`, the per-member kubeconfig files `--readiness`
-needs, and the `--output` file. A failed or timed-out read is listed under the table and sets
-exit code 1; the other projects, locations and members are still reported. A project whose own Kubernetes
+needs, and the `--output` file. A failed or timed-out gcloud read, `get-credentials`, PDB read
+or audit-log read is listed under the table and sets exit code 1; the other projects, locations
+and members are still reported. The `kubectl get`s after the PDB read are recorded per kind in
+the member's note and JSON and set no exit code (see "Check upgrade readiness"), so exit 0 says
+the version table and the PDB rule were read on every member, not that every later read was. A project whose own Kubernetes
 Engine API is off holds no cluster and is not a failed read; a refusal naming another project,
 such as a quota project, is one. The weekly upgrade audit's collector also runs the script, with
 `--readiness --cluster <location>/<name>`, once per behind cluster: that run writes
@@ -307,8 +310,8 @@ counts, whether it was sampled, its error and the window bounds, and a failed on
 the table as a read failure and sets exit code 1. Each rule returns blockers,
 risks, reasons it could not decide, and notes, and declares whether it can block at all; a
 blocker joins the verdict, a risk never does, and the table prints them under `other blockers`
-and `risks`, each as its rule describes it. The rules registered today, with the catalogue entry
-each reads:
+and `risks`, each as `<rule id>: <the rule's description>`, so the cell names the rule the way the
+note column does. The rules registered today, with the catalogue entry each reads:
 
 - **Zonal control plane** (`zonal-control-plane`, entry 11). A cluster whose `location` is a zone
   is a risk on every report, never a blocker: the API is unavailable for minutes while GKE
