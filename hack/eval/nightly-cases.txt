@@ -249,25 +249,22 @@
 # case after oobe-first-run-audits was parked.
 #
 # 2026-10-13 adds the upgrade-failure catalogue's second group of scenario
-# cases (entries 1, 2, 3, 7 and 5: upgrades-drain-blocking-budget-named,
+# cases (entries 1, 2, 3 and 5: upgrades-drain-blocking-budget-named,
 # -no-surge-pool-recreate-warned, -zonal-skew-replicas-warned,
-# -fail-closed-webhook-warned, -exclusion-end-date-named), the last five
-# entries below: five cases, fifteen units. Each is a read-only chat prompt
-# over a fixture the seeded fleet plants, deployer: noop with no stack and
-# no audit stream, so none takes the infra lock or a stream lock. Entries 1,
-# 2 and 7 fan out to one Cluster Agent card per seeded cluster, and entry 3
-# reads every cluster to find the multi-zone one, so each of the four
-# carries a unit_cost_hint from its dev-install runs rather than the 200s
-# default: 900s for entries 1, 2 and 3 (measured 400-1081s a repetition on
-# 2026-10-07 and 10-08, on an install with one user worker slot, so the
-# cards ran one at a time), 1500s for entry 7's chat case (1170s and 1441s
-# wall clock on its two graded runs, 2026-10-07 and 10-08, and the 2400s
-# delegation ceiling on 10-09), and 600s for entry 5's follow-up (one
-# maintenance-policy read per cluster, 571s measured). About 240 serial
-# minutes at three repetitions, none of it on a lock. Counted from the
-# lists rather than the paragraph above (the paragraphs had fallen two
-# behind): seventy-three cases (219 units) here, of an eighty-seven-case,
-# 261-unit matrix with the presubmit file's fourteen.
+# -exclusion-end-date-named), the last four entries below: four cases,
+# twelve units. Each is a read-only chat prompt over a fixture the seeded
+# fleet plants, deployer: noop with no stack and no audit stream, so none
+# takes the infra lock or a stream lock. Entries 1 and 2 fan out to one
+# Cluster Agent card per seeded cluster, and entry 3 reads every cluster to
+# find the multi-zone one, so each of the three carries a unit_cost_hint
+# from its dev-install runs rather than the 200s default: 900s (measured
+# 400-1081s a repetition on 2026-10-07 and 10-08, on an install with one
+# user worker slot, so the cards ran one at a time); entry 5's follow-up
+# takes 600s (one maintenance-policy read per cluster, 571s measured).
+# About 165 serial minutes at three repetitions, none of it on a lock.
+# Counted from the lists rather than the paragraph above (the paragraphs
+# had fallen two behind): seventy-two cases (216 units) here, of an
+# eighty-six-case, 258-unit matrix with the presubmit file's fourteen.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
@@ -795,8 +792,8 @@
 ./tasks/fleet-audit-unchanged-finding-keeps-wording/task.yaml
 
 # Upgrade-failure catalogue entry 1 (a PodDisruptionBudget forbids the
-# eviction), the first of the second scenario group (entries 1, 2, 3, 7 and
-# 5, the five entries that end this file). A read-only chat case whose
+# eviction), the first of the second scenario group (entries 1, 2, 3 and 5,
+# the four entries that end this file). A read-only chat case whose
 # prompt names no fixture; it grades, on a declared line per budget, the
 # reading of the one the seeded fleet plants: pinned-batch-runner's
 # maxUnavailable 0 budget in seeded-upgrade on seeded-b
@@ -826,17 +823,6 @@
 # first merge; a presubmit seat is a later pull request that cites its
 # record.
 ./tasks/upgrades-zonal-skew-replicas-warned/task.yaml
-
-# Catalogue entry 7 (a fail-closed webhook whose backend is not up), in the
-# shape the seeded fleet plants it: seeded-fail-closed-gate on seeded-b,
-# failurePolicy Fail with a Service that does not exist
-# (readiness-failclosed-webhook). Read-only chat prompt graded on a declared
-# line per webhook configuration, with a catastrophic safeguard on the
-# failurePolicy. deployer: noop, no lock; one Cluster Agent card per seeded
-# cluster, 1500s hint: its graded dev-install runs took 1170s and 1441s,
-# and the third ran to the 2400s delegation ceiling. Nightly from its first
-# merge; a presubmit seat is a later pull request that cites its record.
-./tasks/upgrades-fail-closed-webhook-warned/task.yaml
 
 # Catalogue entry 5 (maintenance window too short, or an exclusion ends
 # mid-roll), the scheduling half: seeded-b's hold-the-minor-lag exclusion

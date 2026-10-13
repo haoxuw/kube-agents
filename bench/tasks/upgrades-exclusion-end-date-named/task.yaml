@@ -18,7 +18,7 @@
 # the fleet's scheduled reconcile re-stamps it on every apply and owns its
 # integrity, and the prompt forbids the change.
 # The end objective grades the form of the date (a day, with an optional
-# time), not its value: the fleet re-stamps the exclusion's window at every
+# time, offset and parenthetical), not its value: the fleet re-stamps the exclusion's window at every
 # apply, so no fixed pattern can hold the day, and whether the day the agent
 # names is the real end is the judge's to check against the policy.
 id: upgrades-exclusion-end-date-named
@@ -62,7 +62,10 @@ fixtures:
 
 verification_spec:
   # The declared lines are what the deterministic objectives read; each
-  # pattern matches a whole line that starts with seeded-b.
+  # pattern matches a whole line that starts with seeded-b. A label the
+  # template writes without a colon may carry one; a value then starts at
+  # its first non-blank character, so a negated slot cannot be sidestepped
+  # by the colon.
   - name: seeded-b-has-a-declared-line-naming-the-exclusion
     role: objective
     # assert, not converge: the transcript is immutable once the run ends.
@@ -73,7 +76,7 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?[^ :;\n][^;\n]*; ends:? ?[^ :;\n][^;\n]*; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-states-the-scope
     role: objective
@@ -81,14 +84,14 @@ verification_spec:
     check:
       type: report_contains
       fold_decoration: true
-      # The fold rewrites an underscore between letters or digits as a hyphen
-      # and `_normalize` deletes the rest, so NO_MINOR_UPGRADES arrives as
-      # "nominorupgrades" and no_minor_upgrades as "no-minor-upgrades"; the
-      # optional separators cover both and a spaced spelling.
+      # Under the fold an underscore between two word characters becomes a
+      # hyphen before `_normalize` runs, so NO_MINOR_UPGRADES and
+      # no_minor_upgrades both arrive as "no-minor-upgrades"; the optional
+      # separator also admits a spaced spelling.
       any_of_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope no[-_ ]?minor[-_ ]?upgrades; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?no[-_ ]?minor[-_ ]?upgrades; ends:? ?[^ :;\n][^;\n]*; holds the automatic minor upgrade: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope (?!no[-_ ]?minor[-_ ]?upgrades;)[^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?(?!no[-_ ]?minor[-_ ]?upgrades;)[^ :;\n][^;\n]*; ends:? ?[^ :;\n][^;\n]*; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-states-the-end-date
     role: objective
@@ -99,9 +102,9 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends 20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?[^ :;\n][^;\n]*; ends:? ?20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc|[+-]\d\d:?\d\d)?)?(?: \([^)\n;]*\))?; holds the automatic minor upgrade: (?:yes|no)$'
       forbidden_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends (?!20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc)?)?;)[^;\n]+; holds the automatic minor upgrade: (?:yes|no)$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?[^ :;\n][^;\n]*; ends:? ?(?!20\d\d-\d\d-\d\d(?:[t ]\d\d:\d\d(?::\d\d)?(?:z| ?utc|[+-]\d\d:?\d\d)?)?(?: \([^)\n;]*\))?;)[^ :;\n][^;\n]*; holds the automatic minor upgrade: (?:yes|no)$'
 
   - name: the-declared-line-says-it-holds-the-automatic-upgrade
     role: objective
@@ -112,9 +115,9 @@ verification_spec:
       fixture_roles:
         - version-laggard
       any_of_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: yes$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?[^ :;\n][^;\n]*; ends:? ?[^ :;\n][^;\n]*; holds the automatic minor upgrade: yes$'
       forbidden_patterns:
-        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion hold-the-minor-lag; scope [^;\n]+; ends [^;\n]+; holds the automatic minor upgrade: (?!yes$)[^\n]+$'
+        - '(?m)^{cluster:b}(?:\s*\([^)\n]*\))?: exclusion:? ?hold-the-minor-lag; scope:? ?[^ :;\n][^;\n]*; ends:? ?[^ :;\n][^;\n]*; holds the automatic minor upgrade: (?!yes$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective

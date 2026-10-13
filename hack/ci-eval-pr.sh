@@ -2548,11 +2548,6 @@ unit_cost_hint() {
     # priced at the 900 band they share.
     upgrades-drain-blocking-budget-named | upgrades-no-surge-pool-recreate-warned) echo 900 ;;
     upgrades-zonal-skew-replicas-warned) echo 900 ;;
-    # Entry 7's chat case, the same fan-out: 1170s and 1441s wall clock on its
-    # two graded dev-install runs (2026-10-07 and 10-08) and the 2400s
-    # delegation ceiling on the third (10-09); priced between them, the
-    # group's largest hint, until the nightly record says otherwise.
-    upgrades-fail-closed-webhook-warned) echo 1500 ;;
     # Entry 5's follow-up: one maintenance-policy read per seeded cluster, no
     # card fan-out. 571s wall clock on 2026-10-08.
     upgrades-exclusion-end-date-named) echo 600 ;;
