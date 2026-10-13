@@ -82,10 +82,10 @@ The script runs `gcloud container clusters list`, `gcloud container get-server-c
 `--project` nor a declared scope is passed, `gcloud config get-value project` and `gcloud projects list` (plus `gcloud projects describe` for a
 project whose `clusters list` was refused as API-disabled or whose configured identifier is a
 project number), each with a 60-second timeout, and
-with `--readiness` one `gcloud container clusters get-credentials` and four `kubectl get` per member
-(one for the PDB rule, three for the per-entry rules), plus whatever a registered rule reads
-itself through the script's own runner under the same cap (a rule that reads the audit log runs
-paged `gcloud logging read`s).
+with `--readiness` one `gcloud container clusters get-credentials` and the `kubectl get`s per
+member that "Check upgrade readiness" lists (the PDB rule's, then one per group of kinds the
+per-entry rules read), plus whatever a registered rule reads itself through the script's own
+runner under the same cap (a rule that reads the audit log runs paged `gcloud logging read`s).
 It changes nothing in GCP or in any cluster; the only things it writes are its own record under
 `/opt/data/state/fleet-upgrade-verification/`, the per-member kubeconfig files `--readiness`
 needs, and the `--output` file. A failed or timed-out read is listed under the table and sets
@@ -196,7 +196,7 @@ says so below:
   target so concurrent reads never share a current-context; `--kubeconfig-dir` moves the
   directory), adding `--dns-endpoint` when the cluster record says its DNS endpoint accepts
   external traffic, then one `kubectl get pdb,deploy,statefulset -A -o json`, the first of the
-  member's reads (the per-entry rules' three follow it, below). A PDB is matched to
+  member's reads (the per-entry rules' reads follow it, below). A PDB is matched to
   the Deployments and StatefulSets in its namespace whose pod-template labels satisfy its
   selector (`matchLabels` and `matchExpressions`), and it blocks every drain when
   `maxUnavailable` is `0` or `0%`, or when `minAvailable` demands every expected pod: an integer
@@ -285,14 +285,18 @@ validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpoints
   (GKE keeps nodes within two minors of the control plane); exactly 2 is at the ceiling and
   goes in the note. Autopilot members read `n/a`.
 
-The per-entry rules run after those three, over the same cluster record and three more reads
-per member: `kubectl get daemonset,cronjob,pods,pvc,networkpolicy,namespace -A -o json`, the
-Nodes through a jsonpath template that keeps each node's name, labels, taints, node info,
-allocatable and conditions and drops the rest (so a few hundred nodes stay under the credential
-proxy's output cap), and `kubectl get storageclass,pv -o json`. Each of the three fails on its
-own: a refused or unparsable read costs only the rules that need its kinds, each of which says
-so as `unknown` and grades what it has, and it sets no exit code; the note names the kinds not
-read and the JSON records the error per kind under `read_errors`. A rule that needs more reads
+The per-entry rules run after those three, over the same cluster record and the reads after
+the PDB read, one per group of kinds: `kubectl get daemonset,cronjob,pvc,networkpolicy,namespace
+-A -o json`; `kubectl get pods -A -o json` on its own, because the pod list is the one most
+likely to exceed the credential proxy's output cap and a cut read must cost only the rules that
+need pods; the Nodes through a jsonpath template that keeps each node's name, labels, taints,
+whether it is cordoned, node info, allocatable and conditions and drops the rest (so a few
+hundred nodes stay under that cap); and `kubectl get storageclass,pv -o json`. Each of them
+fails on its own: a refused or unparsable read, or one the credential proxy cut at its output
+cap (recorded as that kind's error naming the cap, never as unparsable JSON), costs only the
+rules that need its kinds, each of which says so as `unknown` and grades what it has, and it
+sets no exit code; the note names the kinds not read and the JSON records the error per kind
+under `read_errors`. A rule that needs more reads
 it through the script's own runner, under the same per-call cap. The audit-log reader beside the
 rules (`readiness_rules/audit_log.py`) is that kind of read: two paged `gcloud logging read`s per
 member over the seven days ending at `--at`, cached so every rule that asks reads once, and
