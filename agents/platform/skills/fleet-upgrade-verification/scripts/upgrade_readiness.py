@@ -43,7 +43,7 @@ import re
 from datetime import datetime, time, timedelta, timezone
 
 import readiness_rules
-from readiness_rules import audit_log, zonal_control_plane
+from readiness_rules import audit_log, changed_defaults, client_addon_skew, deprecated_api_callers, removed_api_callers, zonal_control_plane
 from readiness_rules import finding as finding_tiers  # the tier vocabulary; `finding` itself names a loop variable below
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
@@ -391,6 +391,10 @@ RULE_NONE = "no rules"
 # this order, which is the order the table and the JSON list their findings in. One list,
 # grouped by entry number, the entry in the comment.
 EXTRA_RULES = [
+    removed_api_callers,  # entry 6
+    changed_defaults,  # entry 8
+    deprecated_api_callers,  # entry 9
+    client_addon_skew,  # entry 10
     zonal_control_plane,  # entry 11
 ]
 RULE_RESULT_KEYS = readiness_rules.RESULT_KEYS
