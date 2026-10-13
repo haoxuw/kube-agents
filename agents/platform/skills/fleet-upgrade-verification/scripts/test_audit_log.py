@@ -150,6 +150,13 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual(audit_log.api_of("apps/v1/namespaces/shop/deployments/web/status", None), "apps/v1 deployments")
         self.assertEqual(audit_log.api_of("core/v1/nodes/n1", None), "core/v1 nodes")
         self.assertEqual(audit_log.api_of("core/v1/namespaces/foo", None), "core/v1 namespaces")
+        # The Namespace's own subresources name the Namespace; a name-less create inside one
+        # names the created kind, as the drift detector's parser reads the same paths.
+        self.assertEqual(audit_log.api_of("core/v1/namespaces/stuck/finalize", None), "core/v1 namespaces")
+        self.assertEqual(audit_log.api_of("core/v1/namespaces/payments/status", None), "core/v1 namespaces")
+        self.assertEqual(audit_log.api_of("core/v1/namespaces/default/pods", None), "core/v1 pods")
+        self.assertEqual(audit_log.api_of("core/v1/namespaces/status/pods", None), "core/v1 pods")
+        self.assertEqual(audit_log.api_of("apps/v1/namespaces/shop/deployments/web/status", None), "apps/v1 deployments")
         self.assertEqual(audit_log.api_of(None, "io.k8s.core.v1.endpoints.patch"), "core/v1 endpoints")
         self.assertEqual(audit_log.api_of(None, "io.k8s.apiserver.flowcontrol.v1beta3.flowschemas.create"), "flowcontrol.apiserver/v1beta3 flowschemas")
         self.assertEqual(audit_log.api_of(None, ""), audit_log.UNKNOWN_API)

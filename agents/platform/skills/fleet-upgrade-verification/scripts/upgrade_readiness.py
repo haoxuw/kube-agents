@@ -27,6 +27,7 @@ under "risks", and its `notes` the note column. A rule that raises is one `unkno
 never a crash.
 """
 
+import json
 import re
 from datetime import datetime, time, timedelta, timezone
 
@@ -174,9 +175,16 @@ RESULT_KEY_NOT_A_LIST = "{key} is {type}, not a list"
 FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
 FINDING_TEXT_NOT_TEXT = "a {kind} finding's text is {type}, not a string"
 NOTE_NOT_TEXT = "a note is {type}, not a string"
+# The findings go to `--output` as they are, so a value JSON cannot carry (a set, a
+# datetime, a tuple-keyed dict) would fail the writer after every member was read; the fold
+# probes each result and makes it the rule's defect instead.
+RESULT_NOT_JSON = "the result is not JSON-serialisable: {error}"
 # A second module with a registered rule's id is not run: its findings would be stamped
 # with the other module's id and the per-rule counts would describe one of the two. The
-# registered module keeps the id; the duplicate is one `unknown` counted under it.
+# registered module keeps the id; the duplicate is one `unknown` counted under it, with the
+# registered module's `can_block`, so `rules[id]` and its entries agree: a duplicate of a
+# rule that cannot block is reported in the note and moves nothing, and the contract test
+# over EXTRA_RULES is what keeps a duplicate registration from merging.
 DUPLICATE_RULE_REASON = "a second module registers RULE_ID {rule}; the duplicate was not evaluated"
 
 
@@ -643,23 +651,26 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
 
 
 def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
-    """One `unknown` entry as the JSON carries it: a dict with `reason`, the rule's id and
-    entry, whether the rule could have blocked, and the `text` the note column prints."""
+    """One `unknown` entry as the JSON carries it: a dict with `reason` (whole), the rule's
+    id and entry, whether the rule could have blocked, and the `text` the note column prints,
+    the reason on one line of at most NOTE_EXCERPT_CHARS."""
     out = dict(item) if isinstance(item, dict) else {}
     reason = out.get(REASON_KEY) or out.get(DETAIL_KEY) or str(item)
     out[REASON_KEY] = reason
     out[RULE_KEY] = rule_id
     out[ENTRY_KEY] = entry
     out[CAN_BLOCK_KEY] = can_block
-    out[TEXT_KEY] = RULE_PREFIX_FORMAT.format(rule=rule_id, text=reason)
+    out[TEXT_KEY] = RULE_PREFIX_FORMAT.format(rule=rule_id, text=readiness_rules.one_line(reason, readiness_rules.NOTE_EXCERPT_CHARS))
     return out
 
 
 def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, target, context: dict) -> dict:
     """One rule's result checked against the contract: every key a list, every blocker and
-    risk a dict carrying a string `text` (the rule's `describe`, unless the rule set it),
-    its `rule` and `entry` stamped, every note a string. Raises on a shape the contract
-    forbids, and whatever the rule raises; the caller turns either into the rule's `unknown`."""
+    risk a dict copied before it is stamped (so a rule's own objects are never changed or
+    re-attributed) carrying a one-line string `text` (the rule's `describe`, unless the rule
+    set it), its `rule` and `entry`, every note a string, and the whole result a JSON value.
+    Raises on a shape the contract forbids, and whatever the rule raises; the caller turns
+    either into the rule's `unknown`."""
     result = rule.evaluate(cluster, member, read, target, context)
     if result is None:
         result = {}
@@ -674,18 +685,27 @@ def _rule_result(rule, rule_id: str, entry, cluster: dict, member: dict, read, t
             raise TypeError(RESULT_KEY_NOT_A_LIST.format(key=key, type=type(value).__name__))
         out[key] = list(value)
     for kind in ("blocking", "risks"):
+        stamped = []
         for finding in out[kind]:
             if not isinstance(finding, dict):
                 raise TypeError(FINDING_NOT_A_DICT.format(kind=kind, type=type(finding).__name__))
+            finding = dict(finding)
             if TEXT_KEY not in finding:
                 finding[TEXT_KEY] = rule.describe(finding)
             if not isinstance(finding[TEXT_KEY], str):
                 raise TypeError(FINDING_TEXT_NOT_TEXT.format(kind=kind, type=type(finding[TEXT_KEY]).__name__))
+            finding[TEXT_KEY] = readiness_rules.one_line(finding[TEXT_KEY])
             finding[RULE_KEY] = rule_id
             finding[ENTRY_KEY] = entry
+            stamped.append(finding)
+        out[kind] = stamped
     for note in out["notes"]:
         if not isinstance(note, str):
             raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
+    try:
+        json.dumps(out)
+    except (TypeError, ValueError) as e:
+        raise TypeError(RESULT_NOT_JSON.format(error=e)) from e
     return out
 
 
@@ -703,11 +723,12 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     `reason`, `can_block` and the `text` the note column prints, each note prefixed with
     its rule's id; and `rules`, per rule id, the rule's `entry`, `can_block` and a count per
     list, so the findings are serialised once and `rules[id]` counts what the lists carry
-    under that id. A rule that raises, or returns a shape the contract forbids, is one
-    `unknown` entry naming the error, never a crash: one rule's defect must not hide the
-    others' findings. A blocker from a rule whose `CAN_BLOCK` is False is kept as a risk,
-    with a note. A second module carrying a registered id is not evaluated; it is one
-    `unknown` counted under that id.
+    under that id. A rule that raises, returns a shape the contract forbids, or returns a
+    value JSON cannot carry is one `unknown` entry naming the error, never a crash: one
+    rule's defect must not hide the others' findings. A blocker from a rule whose
+    `CAN_BLOCK` is False is kept as a risk, with a note. A second module carrying a
+    registered id is not evaluated; it is one `unknown` counted under that id with the
+    registered module's `can_block`.
     """
     folded = {key: [] for key in RULE_RESULT_KEYS}
     folded["rules"] = {}
@@ -716,7 +737,8 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
         entry = getattr(rule, ENTRY_ATTRIBUTE, None)
         can_block = bool(getattr(rule, CAN_BLOCK_ATTRIBUTE, True))
         if rule_id in folded["rules"]:
-            duplicate = _unknown_entry(DUPLICATE_RULE_REASON.format(rule=rule_id), rule_id, folded["rules"][rule_id][ENTRY_KEY], True)
+            registered = folded["rules"][rule_id]
+            duplicate = _unknown_entry(DUPLICATE_RULE_REASON.format(rule=rule_id), rule_id, registered[ENTRY_KEY], registered[CAN_BLOCK_KEY])
             folded["unknown"].append(duplicate)
             folded["rules"][rule_id]["unknown"] += 1
             continue
@@ -729,7 +751,7 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
             result["blocking"] = []
             result["notes"].append(DEMOTED_BLOCKER_NOTE)
         result["unknown"] = [_unknown_entry(item, rule_id, entry, can_block) for item in result["unknown"]]
-        result["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=note) for note in result["notes"]]
+        result["notes"] = [RULE_PREFIX_FORMAT.format(rule=rule_id, text=readiness_rules.one_line(note)) for note in result["notes"]]
         folded["rules"][rule_id] = {ENTRY_KEY: entry, CAN_BLOCK_KEY: can_block, **{key: len(result[key]) for key in RULE_RESULT_KEYS}}
         for key in RULE_RESULT_KEYS:
             folded[key].extend(result[key])

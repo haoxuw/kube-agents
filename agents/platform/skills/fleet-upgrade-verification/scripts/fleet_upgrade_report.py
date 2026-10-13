@@ -355,8 +355,9 @@ KUBECTL_OUTPUT_CUT = "{cmd} output was cut at the credential proxy's output cap,
 NOTE_PDB_READ_FAILED = "cluster read failed; PDBs not graded"
 NOTE_LATER_READS_SKIPPED = "the reads after it were skipped; the per-entry rules that need them say so"
 NOTE_READ_FAILED = "{kinds} not read ({error}); the per-entry rules that need them say so"
-# A read's error in the note column: its first line, cut to this; the JSON carries it whole.
-NOTE_ERROR_CHARS = 160
+# A read's error in the note column: collapsed to one line and cut to this, the length the
+# fold gives a rule's unknown reason; the JSON carries it whole.
+NOTE_ERROR_CHARS = readiness_rules.NOTE_EXCERPT_CHARS
 # What the JSON keeps of each audit-log read a rule performed through the context, beside
 # the rules' findings, and how a failed one is listed under the table: a read failure like
 # a failed kubectl, with the member it belongs to, exit code 1, the rules that read it
@@ -902,7 +903,7 @@ def _pool_records(cluster: dict, member: dict) -> list[dict]:
 
 
 def _error_excerpt(error: str) -> str:
-    return error.splitlines()[0][:NOTE_ERROR_CHARS] if error else ""
+    return readiness_rules.one_line(error, NOTE_ERROR_CHARS) if error else ""
 
 
 def _read_error_notes(read_errors: dict) -> list[str]:
@@ -1125,9 +1126,12 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
 
 
 def _cell(value) -> str:
+    """One Markdown cell: the value on one line (a line break would end the row and strand
+    the columns after it), with its pipes escaped."""
     if value is None or value == "":
         return EMPTY_CELL
-    return str(value).replace("|", "\\|")
+    text = readiness_rules.one_line(value)
+    return text.replace("|", "\\|") if text else EMPTY_CELL
 
 
 def render_table(report: dict) -> str:
@@ -1587,12 +1591,23 @@ def main(argv: list[str] | None = None) -> int:
             write_failed = True
 
     if args.output:
+        # Serialised whole before the file is opened, so a value JSON cannot carry leaves no
+        # half-written file behind for the readers of `--output`.
         try:
-            write_json_atomically(args.output, report, OUTPUT_TMP_PREFIX)
-            print(f"\nWrote {len(report['members'])} member(s) to {args.output}")
-        except OSError as e:
-            sys.stderr.write(f"failed to write {args.output}: {e}\n")
+            rendered = json.dumps(report, indent=JSON_INDENT)
+        except (TypeError, ValueError) as e:
+            sys.stderr.write(f"failed to serialise the report for {args.output}: {e}\n")
+            rendered = None
             write_failed = True
+        if rendered is not None:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(rendered)
+                print(f"\nWrote {len(report['members'])} member(s) to {args.output}")
+            except OSError as e:
+                sys.stderr.write(f"failed to write {args.output}: {e}\n")
+                write_failed = True
 
     return EXIT_PARTIAL if report["errors"] or write_failed else EXIT_OK
 

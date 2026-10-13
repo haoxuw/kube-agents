@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for upgrade_readiness.py: the PDB, webhook, maintenance and skew rules on canned objects."""
 
+import json
 import os
 import sys
 import unittest
@@ -468,6 +469,41 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
             self.assertEqual(folded["notes"], [], name)
 
+    def test_a_finding_json_cannot_carry_is_the_rules_defect_not_the_writers(self):
+        # The findings go to `--output` as they are; a set, a datetime or a tuple-keyed dict
+        # would fail json.dump after every member was read, so the fold refuses it here.
+        for name, value in (("set", {"a", "b"}), ("datetime", AT), ("tuple-keys", {(1, 2): "x"})):
+            broken = rule_module(name, evaluate=returning(risks=[{"what": value}]))
+            fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn("the result is not JSON-serialisable", folded["unknown"][0]["reason"], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
+            json.dumps(folded)
+
+    def test_findings_are_copied_before_they_are_stamped(self):
+        shared_finding = {"what": "pool p"}
+        first = rule_module("first", entry=2, evaluate=lambda *a: {**shared.new_result(), "risks": [shared_finding]}, describe=lambda f: "first's text")
+        second = rule_module("second", entry=12, evaluate=lambda *a: {**shared.new_result(), "risks": [shared_finding, shared_finding]}, describe=lambda f: "second's text")
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[first, second])
+        # The rule's own object is untouched, and each fold copy carries its own rule and text.
+        self.assertEqual(shared_finding, {"what": "pool p"})
+        self.assertEqual([(f["rule"], f["entry"], f["text"]) for f in folded["risks"]], [("first", 2, "first's text"), ("second", 12, "second's text"), ("second", 12, "second's text")])
+        self.assertEqual(len({id(f) for f in folded["risks"]}), 3)
+        self.assertEqual((folded["rules"]["first"]["risks"], folded["rules"]["second"]["risks"]), (1, 2))
+
+    def test_cell_text_is_one_line_and_a_reason_is_cut_while_the_json_keeps_it(self):
+        two_lines = "E1013 memcache.go couldn't get current server API group list\nUnable to connect to the server: dial tcp: i/o timeout\n" + "x" * 300
+        rule = rule_module("multi", evaluate=returning(unknown=[two_lines], risks=[{"what": "x", "text": "line one\nline two"}], notes=["note\nwith a break"]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule])
+        unknown = folded["unknown"][0]
+        self.assertEqual(unknown["reason"], two_lines)
+        self.assertNotIn("\n", unknown["text"])
+        self.assertTrue(unknown["text"].startswith("multi: E1013 memcache.go couldn't get current server API group list Unable to connect"))
+        self.assertEqual(len(unknown["text"]), len("multi: ") + shared.NOTE_EXCERPT_CHARS)
+        self.assertEqual(folded["risks"][0]["text"], "line one line two")
+        self.assertEqual(folded["notes"], ["multi: note with a break"])
+
     def test_findings_are_stamped_inside_the_guard(self):
         # Stamping and rendering happen before the fold returns, so every blocker and risk
         # the fold emits is a dict with a string text, its rule and its entry.
@@ -489,6 +525,15 @@ class ExtraRulesTest(unittest.TestCase):
         for key in ("blocking", "risks", "unknown", "notes"):
             self.assertEqual(folded["rules"]["twice"][key], sum(1 for item in folded[key] if (item["rule"] if isinstance(item, dict) else None) == "twice" or (key == "notes" and item.startswith("twice: "))))
         self.assertEqual(r.readiness_status({"blocking": []}, {"blocking_exclusions": [], "undecided_exclusions": []}, {"blocking": [], "unknown": []}, True, folded), r.READINESS_UNKNOWN)
+        # A duplicate of a rule that cannot block carries that rule's can_block: the per-rule
+        # record and its entries agree, and the member's verdict is untouched.
+        cannot = rule_module("zonal", entry=11, can_block=False, evaluate=returning(risks=[{"what": "z"}]))
+        again = rule_module("zonal", entry=11, can_block=True, evaluate=returning(blocking=[{"what": "b"}]))
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[cannot, again])
+        self.assertEqual([(u["rule"], u["can_block"]) for u in folded["unknown"]], [("zonal", False)])
+        self.assertEqual(folded["rules"]["zonal"]["can_block"], False)
+        self.assertEqual(folded["blocking"], [])
+        self.assertEqual(r.readiness_status({"blocking": []}, {"blocking_exclusions": [], "undecided_exclusions": []}, {"blocking": [], "unknown": []}, True, folded), r.READINESS_READY)
 
     def test_a_blocker_from_a_rule_that_cannot_block_is_demoted_to_a_risk_with_a_note(self):
         rule = rule_module("cannot", entry=11, can_block=False, evaluate=returning(blocking=[{"what": "oops"}], risks=[{"what": "fine"}]))

@@ -38,11 +38,17 @@ reads the same thing once; the audit-log reads live under `audit_log.CACHE_KEY`)
 `autoscaling`), `target_text`, `master` (the parsed control-plane version) and `autopilot`;
 tests may add `clock`, a monotonic clock for a read's time budget.
 
-A finding is a dict the rule shapes. The fold in `upgrade_readiness.evaluate_extra_rules`
-stamps `rule` and `entry` on every finding and `text` (the rule's `describe`) on every
-blocking and risk finding, and turns each `unknown` entry (a string, or a dict carrying
-`reason` or `detail`) into a dict with `reason`, `can_block` and the `text` the note column
-prints. A rule that raises becomes one `unknown` finding, never a crash. A rule reads; it
+A finding is a dict the rule shapes; the fold copies it before it stamps it, so a rule may
+return the same object twice or cache what it returns. The fold in
+`upgrade_readiness.evaluate_extra_rules` stamps `rule` and `entry` on every finding and
+`text` (the rule's `describe`, collapsed to one line) on every blocking and risk finding, and
+turns each `unknown` entry (a string, or a dict carrying `reason` or `detail`) into a dict
+with `reason`, `can_block` and the `text` the note column prints, the reason collapsed to one
+line of at most NOTE_EXCERPT_CHARS. A finding is written to the JSON as it is, so it holds
+JSON values only; a rule that raises, returns a shape the contract forbids, or returns a
+value JSON cannot carry becomes one `unknown` finding, never a crash. A second module that
+carries a registered `RULE_ID` is not evaluated: it is one `unknown` under that id with that
+rule's `CAN_BLOCK`, so the per-rule record and its entries never disagree. A rule reads; it
 runs no command of its own except through `context["run_cmd"]`.
 
 This file holds what the modules share: the result shape, the read kinds and context keys,
@@ -56,6 +62,11 @@ import re
 import upgrade_shape_tables as tables
 
 RESULT_KEYS = ("blocking", "risks", "unknown", "notes")
+# A table cell is one line. Text that reaches a cell (a finding's `text`, an unknown's
+# reason, a note, a read's error) is collapsed to one line here, and a reason or an error is
+# cut to this many characters; the JSON keeps the whole text.
+NOTE_EXCERPT_CHARS = 160
+WHITESPACE_JOIN = " "
 # What the credential proxy prints on stderr when it cut a brokered command's stdout at its
 # output cap, with the command's own exit code; every read through the shims (the report's
 # kubectl reads, the audit-log reader's gcloud reads) checks it before parsing.
@@ -185,6 +196,13 @@ PATH_SEPARATOR = "/"
 def new_result() -> dict:
     """An empty rule result, every key present."""
     return {key: [] for key in RESULT_KEYS}
+
+
+def one_line(text, limit: int | None = None) -> str:
+    """`text` with every run of whitespace, line breaks included, as one space, cut to
+    `limit` characters when one is given: the shape a table cell can carry."""
+    flat = WHITESPACE_JOIN.join(str(text if text is not None else "").split())
+    return flat[:limit] if limit else flat
 
 
 def new_finding(rule: str, entry: int, grade: str, obj: dict, detail: str, **extra) -> dict:

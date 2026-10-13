@@ -1901,6 +1901,31 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("| unknown | none |", stdout.getvalue())
         self.assertIn("no target; exclusion scope and skew not graded", stdout.getvalue())
 
+    def test_a_report_json_cannot_carry_leaves_no_half_written_output(self):
+        # The fold refuses such a finding, so this reaches the writer only through a defect
+        # outside the rules; the writer serialises first and opens the file after.
+        original = report.assess_readiness
+
+        def poisoned(*args, **kwargs):
+            out = original(*args, **kwargs)
+            out["poison"] = {"when": datetime(2026, 9, 14, tzinfo=timezone.utc)}
+            return out
+
+        out_path = os.path.join(tempfile.mkdtemp(), "nested", "report.json")
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(report, "assess_readiness", poisoned), patch.object(report, "run_cmd", fake), redirect_stdout(stdout), patch("sys.stderr", stderr):
+            rc = report.main(self._args("--readiness", "--at", self.AT, "--kubeconfig-dir", self.kubeconfig_dir, "--output", out_path))
+        self.assertEqual(rc, report.EXIT_PARTIAL)
+        self.assertFalse(os.path.exists(out_path))
+        self.assertIn(f"failed to serialise the report for {out_path}", stderr.getvalue())
+        self.assertIn("| " + " | ".join(report.READINESS_COLUMNS) + " |", stdout.getvalue())  # the tables still printed
+
+    def test_a_cell_is_one_line(self):
+        self.assertEqual(report._cell("first line\nsecond  line | pipe"), "first line second line \\| pipe")
+        self.assertEqual(report._cell("\n  \n"), report.EMPTY_CELL)
+        self.assertEqual(report._cell(0), "0")
+
     def test_default_kubeconfig_dir_follows_hermes_home(self):
         with patch.dict(os.environ, {"HERMES_HOME": "/home/hermes"}):
             self.assertEqual(report.default_kubeconfig_dir(), "/home/hermes/.kubeconfigs")

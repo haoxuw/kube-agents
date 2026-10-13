@@ -171,6 +171,13 @@ METHOD_NAME = "methodName"
 VERSION_TOKEN_RE = re.compile(r"^v\d+(?:(?:alpha|beta)\d+)?$")
 NAMESPACES_SEGMENT = "namespaces"
 NAMESPACED_PREFIX_LENGTH = 2
+# `core/v1/namespaces/foo/status` and `core/v1/namespaces/foo/pods` have the same shape: the
+# first is a subresource of the Namespace, the second a create inside it whose name is not
+# assigned yet. The Namespace's own subresources are a closed set, so a third segment in it
+# names the Namespace; the drift detector's parser (k8s-operator/cmd/drift-detector/
+# resourcename.go) draws the same line.
+NAMESPACE_SUBRESOURCES = ("status", "finalize")
+NAMESPACE_SUBRESOURCE_LENGTH = 3
 METHOD_PREFIX = ("io", "k8s")
 CORE_GROUP = "core"
 API_FORMAT = "{group}/{version} {resource}"
@@ -270,7 +277,9 @@ def api_of(resource_name, method_name) -> str:
     parts = [p for p in str(resource_name or "").split("/") if p]
     if len(parts) >= 3 and VERSION_TOKEN_RE.match(parts[1]):
         rest = parts[2:]
-        if rest[0] == NAMESPACES_SEGMENT and len(rest) > NAMESPACED_PREFIX_LENGTH:
+        namespaced = rest[0] == NAMESPACES_SEGMENT and len(rest) > NAMESPACED_PREFIX_LENGTH
+        namespace_subresource = len(rest) == NAMESPACE_SUBRESOURCE_LENGTH and rest[NAMESPACED_PREFIX_LENGTH] in NAMESPACE_SUBRESOURCES
+        if namespaced and not namespace_subresource:
             rest = rest[NAMESPACED_PREFIX_LENGTH:]
         return API_FORMAT.format(group=parts[0], version=parts[1], resource=rest[0])
     tokens = str(method_name or "").split(".")
