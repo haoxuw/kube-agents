@@ -8,11 +8,18 @@
 # an API client that does not retry).
 #
 # What the case grades is that the readiness report says it: per cluster, that
-# the control plane is zonal, and that the finding is a risk rather than a
-# blocker. The prompt asks for one declared line per seeded cluster in a fixed
-# vocabulary; the deterministic objectives read those lines and nothing else,
-# the prose is the judge's. An agent that reads the location any other way and
-# declares the same lines passes.
+# the control plane is zonal, which readiness rule filed that finding and how
+# the report graded it. The prompt asks for one declared line per seeded cluster
+# in a fixed vocabulary; the deterministic objectives read those lines and
+# nothing else, the prose is the judge's. Two slots are the report's own output:
+# the rule id (`zonal-control-plane`), which appears nowhere but the report's
+# `risks` column and its JSON (`readiness.rules`, `risks[].rule`), and the grade
+# the report gave it (`risk`). An agent that reads the location any other way
+# cannot fill them, and a report whose rule is missing or blocks fails the case,
+# so a regression of the rule reds this case rather than passing on the
+# location alone. The grade slot names its subject, the rule's own finding:
+# seeded-b is `blocked` on the same report by its budget and its exclusion, and
+# that verdict is not what this slot asks about.
 #
 # The patterns name the slots through `{cluster:<slot>}`, which the verifier
 # expands to the cluster the runner recorded for the slot, so a fleet applied
@@ -25,7 +32,10 @@
 # No deterministic mutation safeguard, documented: the condition is a setting
 # of the cluster itself (its location), which the fleet's Terraform declares and
 # its reconcile keeps; there is no planted object a check could ground on, as
-# the sibling case's header records for the same shape.
+# the sibling case's header records for the same shape. No `worker_commands`
+# objective either: it reads delegated workers' terminals only and errors on a
+# run the router answered itself, so the report's own output is graded through
+# the declared lines instead.
 id: upgrades-readiness-zonal-control-plane
 name: Upgrade readiness carries a zonal control plane as a risk on every cluster
 
@@ -33,10 +43,15 @@ prompt: >-
   For every cluster in this project, run the upgrade readiness check against
   each cluster's release channel default and include, per cluster, whether its
   control plane is zonal or regional, what that means for the Kubernetes API
-  while the control plane upgrades, and whether that stops the upgrade. Read
-  only; change and upgrade nothing. End your answer with one line per seeded
-  cluster in exactly this form, no other words on the line: "<cluster>: kind
-  Cluster; control plane: <zonal|regional>; blocks the upgrade: <yes|no>".
+  while the control plane upgrades, which readiness rule in the report's
+  `risks` or `other blockers` column files that control-plane finding (its rule
+  id, as the report's JSON names it under readiness.rules), and whether the
+  report grades that finding as a risk or a blocker. A member may be blocked by
+  other rules on the same report; the last slot is about the control-plane
+  finding only. Read only; change and upgrade nothing. End your answer with
+  one line per seeded cluster in exactly this form, no other words on the line:
+  "<cluster>: kind Cluster; control plane: <zonal|regional>; readiness rule:
+  <rule id|none>; graded as: <risk|blocker|none>".
 
 expected_output: >-
   The version table and the readiness table read during this run, with every
@@ -47,9 +62,11 @@ expected_output: >-
   finding does not block the upgrade, recommends scheduling the control-plane
   upgrade in a maintenance window and retries with backoff in API clients, and
   notes that only a regional cluster keeps the API available, which is a
-  recreate. It ends with the declared lines, each reading "kind Cluster; control
-  plane: zonal; blocks the upgrade: no". It cites no CVE identifiers and
-  performs no upgrade.
+  recreate. It names the report's rule for the finding, zonal-control-plane,
+  and says the report grades it a risk, whatever else blocks a member. It ends
+  with the declared lines, each reading "kind Cluster; control plane: zonal;
+  readiness rule: zonal-control-plane; graded as: risk". It cites no CVE
+  identifiers and performs no upgrade.
 
 infrastructure:
   deployer: noop
@@ -90,7 +107,7 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:b}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: [^\n]+$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: [^\n]+$)'
+        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:b}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)'
 
   - name: the-declared-lines-say-the-control-plane-is-zonal
     role: objective
@@ -104,13 +121,14 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: zonal; blocks the upgrade: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: zonal; readiness rule: [^;\n]+; graded as: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: (?!zonal;)[^;\n]+; blocks the upgrade: [^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: (?!zonal;)[^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$'
 
-  # The grade that makes the line useful: a risk, not a blocker. A report that
-  # blocks every cluster on its own location would stop every upgrade.
-  - name: the-declared-lines-say-it-does-not-block
+  # The report's own output: the rule id the risks column and the JSON carry.
+  # An agent that read the location without the report has no id to give, and
+  # a report whose rule has regressed gives none, so the slot reads `none`.
+  - name: the-declared-lines-name-the-reports-rule
     role: objective
     mode: assert
     check:
@@ -122,9 +140,29 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: no$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: zonal-control-plane; graded as: [^\n]+$'
       forbidden_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; blocks the upgrade: (?!no$)[^\n]+$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: (?!zonal-control-plane;)[^;\n]+; graded as: [^\n]+$'
+
+  # The grade that makes the line useful: a risk, not a blocker. A report that
+  # blocks every cluster on its own location would stop every upgrade. The
+  # slot is the rule's own grade, so a member blocked by its budget or its
+  # exclusion on the same report still reads `risk` here.
+  - name: the-declared-lines-grade-the-finding-a-risk
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      fixture_roles:
+        - crashloop-workload
+        - version-laggard
+        - drift-outlier
+        - zonal-skew-scheduling
+      any_of_patterns:
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: risk$'
+      forbidden_patterns:
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: (?!risk$)[^\n]+$'
 
   - name: no-invented-cves
     role: objective
