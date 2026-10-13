@@ -2541,12 +2541,14 @@ unit_cost_hint() {
     vcs-forge-cli-request-uses-the-verbs) echo 240 ;;
     # The upgrade-failure catalogue's second scenario group, nightly-only from
     # 2026-10-13: read-only chat prompts that fan out to one Cluster Agent
-    # card per seeded cluster. Measured on a dev install with one user worker
-    # slot, so the cards ran one at a time: entries 1, 2 and 3 at 400-1081s a
-    # repetition (2026-10-07 and 10-08), priced at the 900 band they share.
+    # card per seeded cluster (entry 3's names the multi-zone cluster without
+    # saying which, so the agent reads each to find it). Measured on a dev
+    # install with one user worker slot, so the cards ran one at a time:
+    # entries 1, 2 and 3 at 400-1081s a repetition (2026-10-07 and 10-08),
+    # priced at the 900 band they share.
     upgrades-drain-blocking-budget-named | upgrades-no-surge-pool-recreate-warned) echo 900 ;;
     upgrades-zonal-skew-replicas-warned) echo 900 ;;
-    # Entry 7's chat case, the same fan-out: 1113s and 1375s wall clock on its
+    # Entry 7's chat case, the same fan-out: 1170s and 1441s wall clock on its
     # two graded dev-install runs (2026-10-07 and 10-08) and the 2400s
     # delegation ceiling on the third (10-09); priced between them, the
     # group's largest hint, until the nightly record says otherwise.
