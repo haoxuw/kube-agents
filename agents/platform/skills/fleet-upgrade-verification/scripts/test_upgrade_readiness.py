@@ -449,6 +449,24 @@ class ExtraRulesTest(unittest.TestCase):
         fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
         self.assertEqual([(u["rule"], u["reason"], u["can_block"]) for u in folded["unknown"]], [("broken", "rule raised ValueError('boom'); not evaluated", True)])
+        # The guard's own rendering never escapes it: an exception whose argument's repr raises
+        # is named by its type, and one carrying a tenant-sized payload is cut.
+        class Unprintable:
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        def boom_unprintable(*args):
+            raise ValueError(Unprintable())
+
+        def boom_huge(*args):
+            raise ValueError("bad spec " + "x" * 5000)
+
+        guarded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("unprintable", evaluate=boom_unprintable), rule_module("huge", evaluate=boom_huge), fine])
+        self.assertEqual([(u["rule"], u["reason"]) for u in guarded["unknown"]][0], ("unprintable", "rule raised ValueError; not evaluated"))
+        self.assertTrue(guarded["unknown"][1]["reason"].startswith("rule raised ValueError('bad spec xxx"))
+        self.assertLessEqual(len(guarded["unknown"][1]["reason"]), len("rule raised ; not evaluated") + shared.ERROR_EXCERPT_CHARS)
+        self.assertEqual([f["rule"] for f in guarded["risks"]], ["fine"])
+        json.dumps(guarded)
         self.assertEqual(folded["rules"]["broken"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
         self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"])
         # A describe that raises is the same defect, and a rule returning nothing is empty.

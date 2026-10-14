@@ -862,7 +862,7 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
             try:
                 result = _rule_result(rule, rule_id, entry, can_block, cluster, member, read, target, context)
             except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
-                defect = RULE_FAILED_REASON.format(error=repr(e))
+                defect = RULE_FAILED_REASON.format(error=readiness_rules.exception_text(e))  # never raises, and is capped
         if defect is not None:
             result = _failed_result(defect, rule_id, entry, can_block)
         # The record is the checked attributes and counts; the lists are what `_rule_result`

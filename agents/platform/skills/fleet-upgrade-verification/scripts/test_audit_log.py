@@ -238,6 +238,17 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual(second, first)  # the same cached error, as the caller's own copy
         self.assertIsNotNone(second["error"])
         self.assertEqual(len(context["run_cmd"].calls), 1)
+        # An exception whose repr raises is still the read's error, named by its type, never a
+        # clean cached window.
+        class Unprintable:
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        other = sample_context()
+        with patch.object(audit_log, "caller_records", side_effect=ValueError(Unprintable())):
+            result = audit_log.read_removed(other)
+        self.assertEqual(result["error"], "the removed read raised ValueError; the pages read before it are not graded")
+        self.assertEqual(result["callers"], [])
 
     def test_a_page_the_proxy_cut_is_the_reads_error_naming_the_cap(self):
         removed, _ = split_sample()

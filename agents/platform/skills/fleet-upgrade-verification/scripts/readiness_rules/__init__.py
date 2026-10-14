@@ -78,6 +78,9 @@ RESULT_KEYS = ("blocking", "risks", "unknown", "notes")
 # reason, a note, a read's error) is collapsed to one line here, and a reason or an error is
 # cut to this many characters; the JSON keeps the whole text.
 NOTE_EXCERPT_CHARS = 160
+# How much of an exception's text a guard keeps: a rule may raise with a tenant-sized payload
+# in its arguments, and the reason goes to the JSON whole.
+ERROR_EXCERPT_CHARS = 300
 WHITESPACE_JOIN = " "
 # What the credential proxy prints on stderr when it cut a brokered command's stdout at its
 # output cap, with the command's own exit code; every read through the shims (the report's
@@ -273,6 +276,17 @@ PATH_SEPARATOR = "/"
 def new_result() -> dict:
     """An empty rule result, every key present."""
     return {key: [] for key in RESULT_KEYS}
+
+
+def exception_text(error: BaseException, limit: int = ERROR_EXCERPT_CHARS) -> str:
+    """`repr(error)` on one line, cut to `limit`, for a guard that names what a rule raised:
+    when the repr itself raises (an argument with a broken `__repr__`), the exception's type
+    name, so the guard's own rendering is never what escapes it."""
+    try:
+        text = repr(error)
+    except Exception:  # noqa: BLE001 - whatever the argument's __repr__ raised, the guard still names the type
+        text = type(error).__name__
+    return one_line(text, limit)
 
 
 def one_line(text, limit: int | None = None) -> str:

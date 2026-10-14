@@ -65,6 +65,7 @@ from readiness_rules import (
     CONTEXT_RUN_CMD,
     CONTEXT_TIMEOUT_SECONDS,
     PROXY_TRUNCATION_MARKER,
+    exception_text,
     is_system_namespace,
 )
 
@@ -459,7 +460,7 @@ def read(context: dict, which: str) -> dict:
     try:
         _read_pages(context, which, result)
     except Exception as e:  # noqa: BLE001 - the failure is the read's error, never a clean cached window
-        result["error"] = READ_RAISED_REASON.format(read=which, error=repr(e))
+        result["error"] = READ_RAISED_REASON.format(read=which, error=exception_text(e))  # never raises, so the window is never cached clean
         result["callers"] = []
     finally:
         logs[which] = result
