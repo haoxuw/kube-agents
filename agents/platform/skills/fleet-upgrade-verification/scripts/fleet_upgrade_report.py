@@ -363,7 +363,18 @@ NOTE_ERROR_CHARS = readiness_rules.NOTE_EXCERPT_CHARS
 # a failed kubectl, with the member it belongs to, exit code 1, the rules that read it
 # `unknown`.
 AUDIT_LOG_SUMMARY_KEYS = audit_log.SUMMARY_KEYS  # what `audit_log.summaries` keeps of each read for the JSON
-AUDIT_LOG_ERROR_FORMAT = "audit log ({read} read) not read: {error}"
+# A failed audit-log read is listed under the table in its own block and under
+# `readiness.audit_log_failures` in the JSON, apart from `errors`: the member stays graded
+# by the rules that did not need the read, the rule that did says `unknown`, and the daily
+# watch, which reads a cluster-keyed `errors` entry as a kubectl read that failed and the
+# cluster as not graded, never sees it there. It still sets exit code 1, like any read
+# that failed.
+AUDIT_LOG_FAILURE_LINE = "- audit log not read for {where} ({read} read): {error}; the member stays graded, and the rule that needed the read says unknown"
+READ_FAILED_LINE = "- read failed for {where}: {message}"
+WHERE_LOCATION = "({location})"
+WHERE_CLUSTER = "cluster {cluster}"
+WHERE_SEPARATOR = " "
+WHERE_NOTHING = "the run"
 KUBECONFIG_ENV = "KUBECONFIG"
 HERMES_HOME_ENV = "HERMES_HOME"
 DEFAULT_HERMES_HOME = "/opt/data"
@@ -1062,6 +1073,7 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
     # Projects whose listing failed: a spec can match nothing there, and the
     # unmatched line below says so instead of claiming no match.
     unlisted: list[str] = []
+    audit_log_failures: list[dict] = []  # apart from `errors`: a member whose audit-log read failed stays graded
     # Every project is listed before any member is graded, so a rule that compares a
     # member with its peers sees the whole run, not the projects listed so far.
     found: list[tuple[str, dict]] = []
@@ -1098,7 +1110,7 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
             member["readiness"] = assess_readiness(cluster, member, read, readiness_options["at"], fleet)
             for which, log in member["readiness"]["audit_log"].items():
                 if log.get("error"):
-                    errors.append({"project": project, "location": member["location"], "cluster": member["cluster"], "message": AUDIT_LOG_ERROR_FORMAT.format(read=which, error=log["error"])})
+                    audit_log_failures.append({"project": project, "location": member["location"], "cluster": member["cluster"], "read": which, "message": log["error"]})
         members.append(member)
     errors.extend(cache.errors)
     listed = [p for p in projects if p not in unlisted]
@@ -1131,6 +1143,7 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
             "kubeconfig_dir": readiness_options["kubeconfig_dir"],
             "summary": {status: sum(1 for m in members if m["readiness"]["status"] == status) for status in readiness.READINESS_ORDER},
             "members_with_risks": sum(1 for m in members if m["readiness"]["risks"]),
+            "audit_log_failures": audit_log_failures,
         }
     return report
 
@@ -1181,13 +1194,22 @@ def render_table(report: dict) -> str:
         + (f"; target {report['target_version']}" if report["target_version"] else "; target: each cluster's channel default")
     )
     for err in report["errors"]:
-        parts = [err["project"]] if err.get("project") else []
-        if err.get("location"):
-            parts.append(f"({err['location']})" if parts else err["location"])
-        if err.get("cluster"):
-            parts.append(f"cluster {err['cluster']}")
-        lines.append(f"- read failed for {' '.join(parts) or 'the run'}: {err['message']}")
+        lines.append(READ_FAILED_LINE.format(where=_where(err), message=err["message"]))
+    for failure in (report.get("readiness") or {}).get("audit_log_failures") or []:
+        lines.append(AUDIT_LOG_FAILURE_LINE.format(where=_where(failure), read=failure["read"], error=failure["message"]))
     return "\n".join(lines)
+
+
+def _where(entry: dict) -> str:
+    """`project (location) cluster name`, as far as the entry names them: a location stands
+    bare when no project precedes it (an unmatched `--cluster` spec names no project), and
+    an entry naming nothing is `the run`."""
+    parts = [entry["project"]] if entry.get("project") else []
+    if entry.get("location"):
+        parts.append(WHERE_LOCATION.format(location=entry["location"]) if parts else entry["location"])
+    if entry.get("cluster"):
+        parts.append(WHERE_CLUSTER.format(cluster=entry["cluster"]))
+    return WHERE_SEPARATOR.join(parts) or WHERE_NOTHING
 
 
 def _pdb_cell(r: dict) -> str:
@@ -1621,7 +1643,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stderr.write(f"failed to write {args.output}: {e}\n")
                 write_failed = True
 
-    return EXIT_PARTIAL if report["errors"] or write_failed else EXIT_OK
+    return EXIT_PARTIAL if report["errors"] or (report.get("readiness") or {}).get("audit_log_failures") or write_failed else EXIT_OK
 
 
 if __name__ == "__main__":

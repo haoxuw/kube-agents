@@ -1917,8 +1917,13 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("timed out after 60 seconds", b["audit_log"]["removed"]["error"])
         self.assertEqual([u["rule"] for u in b["unknown"]], ["reads-audit-log"])
         self.assertIn("reads-audit-log: removed-release read failed: `gcloud logging read` (removed read, page 1) failed (rc=-1): timed out after 60 seconds", b["note"])
-        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-b"])
-        self.assertIn("- read failed for p1 (us-central1-a) cluster seeded-b: audit log (removed read) not read: `gcloud logging read` (removed read, page 1) failed (rc=-1): timed out after 60 seconds", text)
+        # Apart from `errors`, which the daily watch reads as a kubectl read that failed and the
+        # cluster as not graded: the member stays graded, listed in its own block, exit 1.
+        self.assertEqual(data["errors"], [])
+        self.assertEqual([(f["cluster"], f["read"]) for f in data["readiness"]["audit_log_failures"]], [("seeded-b", "removed")])
+        self.assertIn("timed out after 60 seconds", data["readiness"]["audit_log_failures"][0]["message"])
+        self.assertIn("- audit log not read for p1 (us-central1-a) cluster seeded-b (removed read): `gcloud logging read` (removed read, page 1) failed (rc=-1): timed out after 60 seconds; the member stays graded, and the rule that needed the read says unknown", text)
+        self.assertNotIn("- read failed for p1 (us-central1-a) cluster seeded-b", text)
         self.assertEqual(by_name["robot-host"]["status"], "blocked")
 
     def test_unknown_target_grades_the_pdb_rule_and_marks_the_rest_unknown(self):

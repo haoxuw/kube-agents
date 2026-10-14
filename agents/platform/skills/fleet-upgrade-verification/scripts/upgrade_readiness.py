@@ -27,12 +27,14 @@ under "risks", and its `notes` the note column. A rule that raises is one `unkno
 never a crash.
 """
 
+import copy
 import json
 import re
 from datetime import datetime, time, timedelta, timezone
 
 import readiness_rules
 from readiness_rules import audit_log, zonal_control_plane
+from readiness_rules import finding as finding_tiers  # the tier vocabulary; `finding` itself names a loop variable below
 
 # Per-member verdicts. `blocked` when any rule blocks; `unknown` when a rule could not be
 # evaluated (the cluster read failed, or there is no target to grade against) and nothing
@@ -156,6 +158,11 @@ TEXT_KEY = "text"
 REASON_KEY = "reason"
 DETAIL_KEY = "detail"
 CAN_BLOCK_KEY = "can_block"
+# The two words the shared helpers write a finding's own grade under (`new_finding` and
+# `finding.py`'s tiers); a blocker the fold demotes to a risk is re-graded under whichever
+# it carries, so the JSON never carries a risk that says it blocks.
+GRADE_KEY = "grade"
+TIER_KEY = "tier"
 RULE_ID_ATTRIBUTE = "RULE_ID"
 ENTRY_ATTRIBUTE = "ENTRY"
 CAN_BLOCK_ATTRIBUTE = "CAN_BLOCK"
@@ -183,6 +190,13 @@ DEMOTED_BLOCKER_NOTE = "filed a blocker but declares CAN_BLOCK False; reported a
 # key would otherwise be read letter by letter, and a finding that is not a dict or whose
 # `text` is not a string would fail the stamping or the table after every member was read.
 RESULT_NOT_A_DICT = "evaluate returned {type}, not a dict"
+# A key the contract does not name: a misnamed list (`risk`, `findings`) would otherwise
+# read as a clean rule. A key left out is an empty list.
+RESULT_UNKNOWN_KEY = "the result carries {keys}, not among {expected}"
+# An `unknown` entry is a string or a dict whose `reason` or `detail` is a non-empty string;
+# anything else is a shape defect, named rather than rendered as a repr.
+UNKNOWN_WITHOUT_REASON = "an unknown entry carries no reason or detail (keys {keys})"
+UNKNOWN_ENTRY_NOT_TEXT = "an unknown entry is {type}, not a string or a dict with a reason"
 RESULT_KEY_NOT_A_LIST = "{key} is {type}, not a list"
 FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
 FINDING_TEXT_NOT_TEXT = "a {kind} finding's text is {type}, not a string"
@@ -673,9 +687,18 @@ def evaluate_skew(target, pools: list[dict], autopilot: bool) -> dict:
 def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
     """One `unknown` entry as the JSON carries it: a dict with `reason` (whole), the rule's
     id and entry, whether the rule could have blocked, and the `text` the note column prints,
-    the reason on one line of at most NOTE_EXCERPT_CHARS."""
-    out = dict(item) if isinstance(item, dict) else {}
-    reason = out.get(REASON_KEY) or out.get(DETAIL_KEY) or str(item)
+    the reason on one line of at most NOTE_EXCERPT_CHARS. `item` is a non-empty string or a
+    dict whose `reason` or `detail` is one; anything else raises, a shape defect the fold
+    makes the rule's `unknown`."""
+    if isinstance(item, dict):
+        out = dict(item)
+        reason = next((out[key] for key in (REASON_KEY, DETAIL_KEY) if isinstance(out.get(key), str) and out[key].strip()), None)
+        if reason is None:
+            raise TypeError(UNKNOWN_WITHOUT_REASON.format(keys=sorted(str(key) for key in out)))
+    elif isinstance(item, str) and item.strip():
+        out, reason = {}, item
+    else:
+        raise TypeError(UNKNOWN_ENTRY_NOT_TEXT.format(type=type(item).__name__))
     out[REASON_KEY] = reason
     out[RULE_KEY] = rule_id
     out[ENTRY_KEY] = entry
@@ -697,7 +720,7 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     `unknown`."""
     snapshot = audit_log.cache_snapshot(context)
     try:
-        result = rule.evaluate(cluster, member, read, target, context)
+        result = rule.evaluate(*_rule_arguments(cluster, member, read, target, context))
     finally:  # on the raising path too: the raising rule is the one charged, and the next rule reads a sound cache; neither call raises
         damage = audit_log.cache_damage(context, snapshot)
         if damage is not None:
@@ -708,6 +731,9 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
         result = {}
     if not isinstance(result, dict):
         raise TypeError(RESULT_NOT_A_DICT.format(type=type(result).__name__))
+    foreign = sorted(str(key) for key in result if key not in RULE_RESULT_KEYS)
+    if foreign:
+        raise TypeError(RESULT_UNKNOWN_KEY.format(keys=foreign, expected=list(RULE_RESULT_KEYS)))
     out = {}
     for key in RULE_RESULT_KEYS:
         value = result.get(key)
@@ -735,6 +761,11 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
         if not isinstance(note, str):
             raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
     if not can_block and out["blocking"]:
+        for demoted in out["blocking"]:  # re-graded under whichever word it carries, so the JSON never carries a risk that says it blocks
+            if GRADE_KEY in demoted:
+                demoted[GRADE_KEY] = readiness_rules.GRADE_RISK
+            if TIER_KEY in demoted:
+                demoted[TIER_KEY] = finding_tiers.TIER_RISK
         out["risks"] = out["blocking"] + out["risks"]
         out["blocking"] = []
         out["notes"].append(DEMOTED_BLOCKER_NOTE)
@@ -745,6 +776,20 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     except (TypeError, ValueError) as e:
         raise TypeError(RESULT_NOT_JSON.format(error=e)) from e
     return out
+
+
+def _rule_arguments(cluster: dict, member: dict, read, target, context: dict) -> tuple:
+    """What a rule is handed: `cluster`, `member` and `read` as deep copies, `target` as it
+    is (a tuple), and a context whose fleet records (`clusters`, `pools`) are deep copies
+    while the runner, the instant and the cache are shared, the cache through
+    `audit_log.read`, which hands out copies. A rule's writes to its arguments reach no
+    other rule and not the report; the shared cache is the one thing it can damage, and
+    the fold holds it to that."""
+    own = dict(context)
+    for key in (readiness_rules.CONTEXT_CLUSTERS, readiness_rules.CONTEXT_POOLS):
+        if key in own:
+            own[key] = copy.deepcopy(own[key])
+    return copy.deepcopy(cluster), copy.deepcopy(member), copy.deepcopy(read), target, own
 
 
 def _failed_result(reason: str, rule_id: str, entry, can_block: bool) -> dict:
@@ -791,7 +836,9 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     `reason`, `can_block` and the `text` the note column prints, each note prefixed with
     its rule's id; and `rules`, per rule id, the rule's `entry`, `can_block` and a count per
     list, so the findings are serialised once and `rules[id]` counts what the lists carry
-    under that id. A rule that raises, returns a shape the contract forbids, or returns a
+    under that id. Each rule is handed its own copies of `cluster`, `member`, `read` and the
+    context's fleet records (`_rule_arguments`), so what it writes to them reaches no other
+    rule and not the report. A rule that raises, returns a shape the contract forbids, or returns a
     value JSON cannot carry is one `unknown` entry naming the error, never a crash: one
     rule's defect must not hide the others' findings. So is a module whose `RULE_ID` is not
     a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a bool, under

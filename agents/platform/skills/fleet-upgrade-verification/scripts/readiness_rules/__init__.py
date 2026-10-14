@@ -11,11 +11,15 @@ One module per entry of docs/designs/upgrade-failure-catalogue.md. Each module e
   could not make would not have blocked either, and a blocker it files is demoted to a risk
   with a note saying so.
 - `evaluate(cluster, member, read, target, context) -> dict`, a pure function over what the
-  report has already read, returning `blocking`, `risks`, `unknown` and `notes`, every key
-  present and each a list (`new_result()` is the empty one): `cluster` is the `gcloud
-  container clusters list` record; `member` the graded version row; `read` the member's
-  kubectl reads (below); `target` the parsed target version tuple, None without one;
-  `context` the per-member read context (below).
+  report has already read, returning `blocking`, `risks`, `unknown` and `notes`, each a list
+  (`new_result()` is the empty one; a key left out is an empty list, a key outside the four
+  is refused, so a misnamed list is the rule's `unknown` rather than a clean rule): `cluster`
+  is the `gcloud container clusters list` record; `member` the graded version row; `read` the
+  member's kubectl reads (below); `target` the parsed target version tuple, None without
+  one; `context` the per-member read context (below). Each argument is the rule's own copy
+  (the fleet records in the context too), so a rule's writes to them reach no other rule
+  and not the report; the audit-log cache is the one shared thing, through `audit_log.read`,
+  which hands out copies.
 - `describe(finding) -> str`, one blocking or risk finding as a table cell.
 
 `read` is the dict `fleet_upgrade_report.read_cluster_objects` returns. `items` is every
@@ -661,8 +665,8 @@ def shell_forks(script) -> bool | None:
     file` names a file). `sh` on a Debian image is dash, which reads `((x & 1))` as two
     subshells with a fork inside and `cmd &>f` as `cmd &` then `>f`, two forks the scanner
     does not report; a rule that grades an `sh -c` script with those two spellings grades it
-    as bash would. A `case … esac` inside a substitution is read as one, its patterns' `)`
-    closing nothing.
+    as bash would. A `case … esac` is read as one wherever it stands, inside a substitution
+    or a subshell: a pattern's `)` closes neither.
 
     None when the script cannot be read this way: an unterminated quote, heredoc, command
     substitution or expansion, a trailing backslash, or substitutions and expansions nested
@@ -717,7 +721,7 @@ def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> i
     n = len(script)
     out = state.out
     depth = 0  # subshell parentheses open in this command list
-    case_depth = 0  # `case` statements open: a pattern's `)` then closes no substitution
+    case_bases: list[int] = []  # the depth each open `case` sits at: a `)` at that depth is a pattern's and closes nothing
     command = True  # at command position, where a reserved word is a word
     while i < n:
         c = script[i]
@@ -814,12 +818,13 @@ def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> i
                 i = resume
             command = True
         elif command and _shell_word_at(script, i, SHELL_CASE_WORD, out):
-            case_depth += 1
+            case_bases.append(depth)
             out.extend(SHELL_CASE_WORD)
             i += len(SHELL_CASE_WORD)
             command = False
         elif command and _shell_word_at(script, i, SHELL_ESAC_WORD, out):
-            case_depth = max(case_depth - 1, 0)
+            if case_bases:
+                case_bases.pop()
             out.extend(SHELL_ESAC_WORD)
             i += len(SHELL_ESAC_WORD)
             command = False
@@ -836,9 +841,11 @@ def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> i
             i += 1
             command = True
         elif c == SHELL_CLOSE_PAREN:
-            if closer == SHELL_CLOSE_PAREN and depth == 0 and case_depth == 0:
+            if case_bases and depth == case_bases[-1]:  # a pattern's `)`, at the depth its `case` sits at: closes nothing
+                pass
+            elif closer == SHELL_CLOSE_PAREN and depth == 0:
                 return i + 1
-            if depth:  # a `case` pattern's `)` closes nothing
+            elif depth:
                 depth -= 1
             out.append(c)
             i += 1

@@ -435,6 +435,9 @@ class ShapeTablesTest(unittest.TestCase):
             'echo "$(grep case app.log)"; sleep 9 &',
             'cat <<E"O"F\nx\nEOF\nsleep 1 &',
             "if true; then coproc sleep 9; fi",
+            # A `case` inside a subshell inside a quoted substitution: the pattern's `)` closes
+            # neither the subshell nor the substitution.
+            'echo "$( (case $MODE in dev) sleep 9 & ;; esac) )"',
         )
         not_forks = (
             "a && b",
@@ -489,6 +492,9 @@ class ShapeTablesTest(unittest.TestCase):
             'cat <<E"O"F\n$(start-agent &)\nEOF\necho done',
             "echo $(($(($((1))))))",
             "cmd < file; cat > case",
+            'x="$( (case $1 in a) echo "a & b";; esac) )"',
+            "( case $x in a) :;; esac ) && exec app",
+            "(case $x in (a) (b);; esac)",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)

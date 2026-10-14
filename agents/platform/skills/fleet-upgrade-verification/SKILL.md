@@ -308,7 +308,9 @@ writes only, because the Admin Activity log carries no reads, so a caller that o
 is not in it. Each audit-log read a member's rules performed is listed in the JSON under
 `audit_log` (empty for a member whose rules performed none) with its commands, entry and page
 counts, whether it was sampled, its error and the window bounds, and a failed one is listed under
-the table as a read failure and sets exit code 1. Each rule returns blockers,
+the table as an audit-log read that failed, apart from the kubectl read failures, so the member stays
+graded by the rules that did not need it while the rule that did says `unknown`; it sets exit code 1.
+Each rule returns blockers,
 risks, reasons it could not decide, and notes, and declares whether it can block at all; a
 blocker joins the verdict, a risk never does, and the table prints them under `other blockers`
 and `risks`, each as `<rule id>: <the rule's description>`, so the cell names the rule the way the

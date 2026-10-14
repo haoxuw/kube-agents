@@ -433,6 +433,19 @@ class Retired(Base):
         self.assertIn("1 ready;", out)
         self.assertNotIn(TARGET, self.ledger()["announced"].get("ungraded", {}))
 
+    def test_a_failed_audit_log_read_leaves_the_member_graded(self) -> None:
+        """The report lists a failed audit-log read under ``readiness.audit_log_failures``,
+        apart from ``errors``, so the watch's reading of a cluster-keyed error as a kubectl
+        read that failed never sees it: the member keeps its verdict."""
+        graded = member("a", "lagging", readiness=watch.READINESS_READY)
+        report = {
+            watch.MEMBERS_KEY: [graded],
+            watch.ERRORS_KEY: [],
+            watch.READINESS_KEY: {"audit_log_failures": [{"project": "p1", "location": "us-central1-a", "cluster": "a", "read": "removed", "message": "timed out"}]},
+        }
+        blocked, ready, unknown, unread = watch.readiness_verdicts(report, [watch.member_key(graded)])
+        self.assertEqual((blocked, ready, unknown, unread), ([], [watch.member_key(graded)], [], []))
+
     def test_a_server_config_failure_leaves_the_location_s_unknown_members_unread(self) -> None:
         readiness = envelope(
             [member("a", "lagging", readiness="unknown")],
