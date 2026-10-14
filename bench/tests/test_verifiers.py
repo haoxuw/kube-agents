@@ -7707,3 +7707,82 @@ def test_worker_commands_required_run_names_what_did_not_run():
     v = WorkerCommandsVerifier(type="worker_commands", required_runs=_WEBHOOK_RUNS)
     res = v.verify(5.0)
     assert res.status == "fail" and "no worker command ran fleet_upgrade_report.py --readiness across 2 command(s)" in res.reason
+
+
+
+
+# The readiness case for the same catalogue entry grades the readiness report's
+# own output: a fifth declared-line slot quotes the cell the report prints for
+# the finding. That cell carries a `;`, which keeps `_VALUE_WRAP` from removing
+# a quote or angle bracket the agent kept around it, so the case's patterns
+# admit one opener before the text; these tests hold the case to that, through
+# the shipped entry and the real fold, for every wrap an agent is likely to keep.
+_READINESS_CASE = TASKS / "upgrades-readiness-zonal-control-plane" / "task.yaml"
+_READINESS_SPEC = yaml.safe_load(_READINESS_CASE.read_text(encoding="utf-8"))
+_READINESS_CELL = (
+    "zonal-control-plane: control plane is zonal (us-central1-a): the API is unavailable for minutes while GKE replaces its one replica, "
+    "so schedule the control-plane upgrade in a maintenance window and have API clients retry with backoff; "
+    "running pods are unaffected, and only a regional cluster, a recreate, keeps the API available"
+)
+_READINESS_SLOT_OBJECTIVES = (
+    "every-seeded-cluster-has-a-declared-line",
+    "the-declared-lines-say-the-control-plane-is-zonal",
+    "the-declared-lines-name-the-reports-rule",
+    "the-declared-lines-grade-the-finding-a-risk",
+    "the-declared-lines-quote-the-reports-cell",
+)
+
+
+def _readiness_case_check(objective: str) -> dict:
+    for entry in _READINESS_SPEC["verification_spec"]:
+        if entry["name"] == objective:
+            return entry["check"]
+    raise AssertionError(f"{objective} not in {_READINESS_CASE}")
+
+
+def _readiness_case_grades(objective: str, text: str) -> bool:
+    v = parse_node(_readiness_case_check(objective))
+    _stash(text)
+    with tempfile.TemporaryDirectory(prefix="readiness-fleet-") as root:
+        _write_fleet_dir(Path(root), list(_READINESS_SPEC["fixtures"]), None)
+        with mock.patch.dict(os.environ, {fleet.FLEET_KUBECONFIG_DIR_ENV: root}):
+            return v.verify(5.0).status == "pass"
+
+
+def _readiness_line(cluster: str, cell: str = _READINESS_CELL, rule="zonal-control-plane", grade="risk") -> str:
+    return f"{cluster}: kind Cluster; control plane: zonal; readiness rule: {rule}; graded as: {grade}; cell: {cell}"
+
+
+@pytest.mark.parametrize("objective", _READINESS_SLOT_OBJECTIVES)
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        "{cell}",
+        '"{cell}"',
+        "'{cell}'",
+        "“{cell}”",
+        "<{cell}>",
+        "`{cell}`",
+    ],
+)
+def test_readiness_case_accepts_the_cell_however_the_agent_wrapped_it(objective, wrap):
+    text = "\n".join(_readiness_line(c, wrap.format(cell=_READINESS_CELL)) for c in _SLOTS)
+    assert _readiness_case_grades(objective, text)
+
+
+@pytest.mark.parametrize(
+    "objective,text",
+    [
+        # A report whose rule is missing prints no cell: `none`, or another rule's text.
+        ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, "none") for c in _SLOTS)),
+        ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, "zonal-control-plane: something else") for c in _SLOTS)),
+        ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, '"zonal-control-plane: something else"') for c in _SLOTS)),
+        # The grade slot names its subject; a wrapped cell does not make `blocker` a risk.
+        ("the-declared-lines-grade-the-finding-a-risk", "\n".join(_readiness_line(c, f'"{_READINESS_CELL}"', grade="blocker") for c in _SLOTS)),
+        # A line without the cell slot is the earlier frame and fails the slots that need it.
+        ("the-declared-lines-grade-the-finding-a-risk", "\n".join(_readiness_line(c).rsplit("; cell:", 1)[0] for c in _SLOTS)),
+        ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c).rsplit("; cell:", 1)[0] for c in _SLOTS)),
+    ],
+)
+def test_readiness_case_refuses_a_missing_or_foreign_cell(objective, text):
+    assert not _readiness_case_grades(objective, text)

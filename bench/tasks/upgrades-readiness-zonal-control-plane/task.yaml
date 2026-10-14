@@ -176,7 +176,9 @@ verification_spec:
   # is the rule's `describe` text, which the skill paraphrases and the cluster
   # listing cannot supply. A report whose rule is missing or blocks prints no
   # such cell, so the slot reads `none` or something else and the line fails
-  # here, whatever the other slots say.
+  # here, whatever the other slots say. The cell carries a `;`, which keeps the
+  # verifier's value-wrap fold from removing a quote or angle bracket the agent
+  # kept around it, so both patterns admit one opener before the text.
   - name: the-declared-lines-quote-the-reports-cell
     role: objective
     mode: assert
@@ -189,9 +191,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica[^\n]*$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: ["''“‘<]?zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica[^\n]*$'
       forbidden_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: (?!zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica)[^\n]*$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: (?!["''“‘<]?zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica)[^\n]*$'
 
   - name: no-invented-cves
     role: objective
