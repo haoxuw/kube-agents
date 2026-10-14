@@ -235,7 +235,7 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual(first["callers"], [])
         # The next rule asking for the same read gets the error, not an empty, clean page.
         second = audit_log.read_removed(context)
-        self.assertIs(second, first)
+        self.assertEqual(second, first)  # the same cached error, as the caller's own copy
         self.assertIsNotNone(second["error"])
         self.assertEqual(len(context["run_cmd"].calls), 1)
 
@@ -264,9 +264,21 @@ class AuditLogReadTest(unittest.TestCase):
     def test_each_read_runs_once_per_context_and_is_cached(self):
         context = sample_context()
         first = audit_log.read_removed(context)
-        self.assertIs(first, audit_log.read_removed(context))
+        again = audit_log.read_removed(context)
+        self.assertEqual(first, again)
+        self.assertIsNot(first, again)
         second = audit_log.read_deprecated(context)
-        self.assertIs(second, audit_log.read_deprecated(context))
+        self.assertEqual(second, audit_log.read_deprecated(context))
+        self.assertEqual(len(context["run_cmd"].calls), 2)
+        # The caller's copy is its own: the cache is written by `read` alone.
+        first["callers"].sort(key=lambda c: -c["count"])
+        first["callers"].pop()
+        self.assertEqual(audit_log.read_removed(context), again)
+        self.assertEqual(len(context["run_cmd"].calls), 2)
+        # A read name that is not one of the reads is refused before any command runs.
+        with self.assertRaises(ValueError) as refused:
+            audit_log.read(context, "deprecate")
+        self.assertEqual(str(refused.exception), "audit_log.read('deprecate'): not one of the reads ('removed', 'deprecated')")
         self.assertEqual(len(context["run_cmd"].calls), 2)
         self.assertEqual((first["entries"], first["pages"], first["sampled"], first["error"]), (2, 1, False, None))
         self.assertEqual((second["entries"], second["pages"], second["sampled"], second["error"]), (6, 1, False, None))

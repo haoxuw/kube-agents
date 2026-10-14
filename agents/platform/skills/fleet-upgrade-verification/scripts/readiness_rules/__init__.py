@@ -345,8 +345,13 @@ def parse_quantity(text) -> float | None:
 
 
 def cpu_millis(text) -> int | None:
+    """Millicores, or None when the quantity does not parse or, a thousand times over, does
+    not fit a float (`1e306` parses; its millicores do not)."""
     value = parse_quantity(text)
-    return None if value is None else round(value * MILLIS_PER_CORE)
+    if value is None:
+        return None
+    millis = value * MILLIS_PER_CORE
+    return round(millis) if math.isfinite(millis) else None
 
 
 def memory_bytes(text) -> int | None:

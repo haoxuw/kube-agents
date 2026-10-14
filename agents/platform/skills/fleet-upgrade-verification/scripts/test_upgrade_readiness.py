@@ -610,6 +610,55 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
             self.assertIn("the rule left the audit-log cache unreadable: " + reason, folded["unknown"][0]["reason"], name)
             self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
+        # An object the snapshot cannot copy (a generator) is the storing rule's damage, named,
+        # and the restore still runs, so the next rule is neither charged nor stopped.
+        def storing_generator(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["scratch"] = (e for e in [1, 2])
+            return shared.new_result()
+
+        def poisoning_callers(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["callers"].append((e for e in [1]))
+            return shared.new_result()
+
+        for name, offender, reason in (("generator", storing_generator, "cache['audit_log'] carries 'scratch', which is not one of the reads"), ("poisoning", poisoning_callers, "the 'removed' entry holds an object that cannot be copied")):
+            ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn(reason, folded["unknown"][0]["reason"], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
+            self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
+            self.assertEqual(audit_log.cache_defect(ctx), None, name)
+        # A generator in the cache before the fold ran is nobody's: the snapshot stands, the
+        # rules run, and the entry is left as it was found.
+        ctx = context()
+        ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = {"scratch": (e for e in [1])}
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), fine])
+        self.assertEqual(([u["rule"] for u in folded["unknown"]], [f["rule"] for f in folded["risks"]]), ([], ["reader", "fine"]))
+        self.assertIn("scratch", ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY])
+        # What `read` returns is the rule's own copy: sorting or filtering it in place is
+        # not damage, and the rule keeps its findings.
+        def sorting_reader(cluster, member, read, target, ctx):
+            log = audit_log.read_removed(ctx)
+            log["callers"].sort(key=lambda c: -c.get("count", 0))
+            log["callers"][:] = []
+            out = shared.new_result()
+            out["blocking"].append({"what": "sorted"})
+            return out
+
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module("sorter", evaluate=sorting_reader), rule_module("second", evaluate=reading_deprecated)])
+        self.assertEqual(folded["unknown"], [])
+        self.assertEqual([f["rule"] for f in folded["blocking"]], ["sorter"])
+        self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"])
+        # A read name that is not one of the reads is the rule's own error, named as the call.
+        def misnamed_reader(cluster, member, read, target, ctx):
+            audit_log.read(ctx, "deprecate")
+            return shared.new_result()
+
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("misnamed", evaluate=misnamed_reader), fine])
+        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("misnamed", "rule raised ValueError(\"audit_log.read('deprecate'): not one of the reads ('removed', 'deprecated')\"); not evaluated")])
+        self.assertEqual(audit_log.summaries(ctx), {})
 
     def test_findings_are_copied_before_they_are_stamped(self):
         shared_finding = {"what": "pool p"}

@@ -163,6 +163,12 @@ class SharedHelpersTest(unittest.TestCase):
             self.assertIsNone(shared.memory_bytes(too_wide), too_wide)
         self.assertIsNone(shared.memory_bytes(10**400))  # float() of an int this wide raises instead
         self.assertIsNone(shared.cpu_millis(float("inf")))
+        # A quantity that fits a float may not fit a thousand times over: the millicores are
+        # checked after the scale, not only the parse.
+        for cores_only in ("1e306", "2e305", "1.8e305"):
+            self.assertIsNone(shared.cpu_millis(cores_only), cores_only)
+            self.assertIsInstance(shared.memory_bytes(cores_only), int, cores_only)
+        self.assertEqual(shared.cpu_millis("1e305"), round(1e308))
         self.assertEqual(shared.format_cpu(250), "250m")
         self.assertEqual(shared.format_memory(256 * 1024**2), "256Mi")
 

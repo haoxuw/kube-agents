@@ -7,7 +7,9 @@ Not a rule: the shared read those rules import, shipped with the registry before
 `read(context, which)` runs `gcloud logging read` for one member over the seven days ending
 at the evaluation instant, pages it by timestamp bound, groups the entries by caller
 (principal and user agent) and API, and caches the result in the context, so the rules that
-read it read the log twice between them rather than once each:
+read it read the log twice between them rather than once each. The cache is written by
+`read` alone; a rule gets its own deep copy back, which it may sort or filter, and the
+stored result stays as the read left it:
 
 - the removed-release read: entries the API server stamped `k8s.io/removed-release`;
 - the deprecated-or-kubectl read: entries stamped `k8s.io/deprecated` with no removal
@@ -175,6 +177,10 @@ LOG_WRONG_READ = "its `read` is not {read!r}"
 LOG_MISSING_KEYS = "missing {keys}"
 CACHE_REPLACED = "the readiness context's cache was replaced"
 READ_LOST = "the {read!r} read stored before the rule is gone or changed"
+READ_UNCOPYABLE = "the {read!r} entry holds an object that cannot be copied (a generator, a lock, a handle)"
+UNCOPYABLE_TYPE = "an object that cannot be copied"
+CACHE_UNREADABLE = "the cache could not be compared with the snapshot: {error}"
+UNKNOWN_READ_CALL = "audit_log.read({which!r}): not one of the reads {reads}"
 STDERR_EXCERPT_CHARS = 300
 STDERR_JOIN = " "
 NO_STDERR = "no stderr"
@@ -409,7 +415,9 @@ def _oldest_timestamp(page: list) -> str | None:
 
 
 def read(context: dict, which: str) -> dict:
-    """One member's callers from one read, paged, read once and cached in the context.
+    """One member's callers from one read, paged, read once and cached in the context; the
+    caller gets a deep copy, so sorting or filtering it changes nothing another rule reads.
+    `which` must be one of READS, refused with a ValueError before any command runs.
 
     Returns `{"read", "commands", "error", "entries", "pages", "sampled", "callers",
     "window_days", "page_limit", "window_start", "window_end"}`. `error` is the reason the
@@ -424,6 +432,8 @@ def read(context: dict, which: str) -> dict:
     only once the read is complete, so a rule that raises mid-read never leaves a clean
     half-built result for the next rule to find.
     """
+    if which not in READS:  # refused before any command runs, and named as the call, not as cache damage
+        raise ValueError(UNKNOWN_READ_CALL.format(which=which, reads=READS))
     cache = context.setdefault(CONTEXT_CACHE, {})
     if not isinstance(cache, dict):  # a context built by hand; the fold puts a rule's damage back before the next rule
         cache = context[CONTEXT_CACHE] = {}
@@ -432,7 +442,7 @@ def read(context: dict, which: str) -> dict:
         logs = cache[CACHE_KEY] = {}
     cached = logs.get(which)
     if isinstance(cached, dict) and cached.get(READ_KEY) == which:
-        return cached
+        return copy.deepcopy(cached)
     result = {
         "read": which,
         "commands": [],
@@ -453,7 +463,7 @@ def read(context: dict, which: str) -> dict:
         result["callers"] = []
     finally:
         logs[which] = result
-    return result
+    return copy.deepcopy(result)  # the rule's own copy: the cache is written by `read` alone
 
 
 def _read_pages(context: dict, which: str, result: dict) -> None:
@@ -535,26 +545,38 @@ def cache_defect(context) -> str | None:
     a rule runs, and damage the rule left (`cache_damage`: this, or a stored read gone or
     changed) is the rule's `unknown`, with the cache put back (`cache_restore`) whether the
     rule returned or raised, so no later rule or reader meets it."""
+    defects = cache_defects(context)
+    return defects[0] if defects else None
+
+
+def cache_defects(context) -> list[str]:
+    """Every way the audit-log cache departs from what the reads store (see `cache_defect`),
+    in cache order; empty when it is sound. Read through a snapshot, so an entry that cannot
+    be copied is a defect named as such and nothing here raises."""
     if not isinstance(context, dict) or CONTEXT_CACHE not in context:
-        return None
+        return []
     cache = context[CONTEXT_CACHE]
     if not isinstance(cache, dict):
-        return CACHE_NOT_A_DICT.format(type=type(cache).__name__)
-    logs = cache.get(CACHE_KEY)
+        return [CACHE_NOT_A_DICT.format(type=type(cache).__name__)]
+    return _log_defects(_copy_logs(cache.get(CACHE_KEY)))
+
+
+def _log_defects(logs) -> list[str]:
+    """The defects of a snapshot's `audit_log` entry (`_copy_logs` output, or None)."""
     if logs is None:
-        return None
+        return []
+    if logs is UNCOPYABLE:
+        return [LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=UNCOPYABLE_TYPE)]
     if not isinstance(logs, dict):
-        return LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=type(logs).__name__)
-    for which, log in logs.items():
-        defect = _read_result_defect(which, log)
-        if defect is not None:
-            return defect
-    return None
+        return [LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=type(logs).__name__)]
+    return [defect for which, log in logs.items() if (defect := _read_result_defect(which, log)) is not None]
 
 
 def _read_result_defect(which, log) -> str | None:
     if which not in READS:
         return LOG_UNKNOWN_READ.format(key=CACHE_KEY, read=which)
+    if log is UNCOPYABLE:
+        return READ_UNCOPYABLE.format(read=which)
     if not isinstance(log, dict):
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_TYPE.format(type=type(log).__name__))
     if log.get(READ_KEY) != which:
@@ -569,13 +591,35 @@ def _read_result_defect(which, log) -> str | None:
     return None
 
 
+UNCOPYABLE = object()  # a snapshot's stand-in for an entry that cannot be deep-copied
+
+
+def _copy_logs(logs):
+    """A deep copy of the cache's `audit_log` entry, entry by entry; an entry a rule filled
+    with something that cannot be copied (a generator, a lock, a handle) is UNCOPYABLE, so a
+    snapshot never raises and a restore can drop what it cannot put back."""
+    if not isinstance(logs, dict):
+        try:
+            return copy.deepcopy(logs)
+        except Exception:  # noqa: BLE001 - whatever the object refuses with, the snapshot still stands
+            return UNCOPYABLE
+    out = {}
+    for which, log in logs.items():
+        try:
+            out[which] = copy.deepcopy(log)
+        except Exception:  # noqa: BLE001
+            out[which] = UNCOPYABLE
+    return out
+
+
 def cache_snapshot(context) -> tuple:
     """The audit-log cache as it stands, for `cache_damage` and `cache_restore` around a
-    rule: the context's cache object (None when the context has none) and a deep copy of
-    its `audit_log` entry (None when absent)."""
+    rule: the context's cache object (None when the context has none) and a copy of its
+    `audit_log` entry (None when absent; an entry that cannot be copied is UNCOPYABLE).
+    Never raises."""
     cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
     logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
-    return cache, copy.deepcopy(logs)
+    return cache, _copy_logs(logs)
 
 
 def cache_damage(context, snapshot) -> str | None:
@@ -583,23 +627,32 @@ def cache_damage(context, snapshot) -> str | None:
     a shape defect (`cache_defect`), the cache object replaced, or a read stored before the
     rule now gone or changed. A rule may add reads; it may not alter or drop the ones
     already stored, however well-formed what it writes."""
-    cache, logs = snapshot
-    now_cache, now_logs = cache_snapshot(context)
-    defect = cache_defect(context)
-    if defect is not None:  # a defect the rule inherited and left as it was is not the rule's
-        return defect if (now_cache is not cache or now_logs != logs) else None
-    if cache is not None and now_cache is not cache:
-        return CACHE_REPLACED
-    for which, log in (logs.items() if isinstance(logs, dict) else ()):
-        if not isinstance(now_logs, dict) or which not in now_logs or now_logs[which] != log:
-            return READ_LOST.format(read=which)
-    return None
+    try:
+        cache, logs = snapshot
+        now_cache, now_logs = cache_snapshot(context)
+        # A defect the rule inherited and left as it was is not the rule's; one it added is,
+        # whatever else sits in the cache before it.
+        before_defects = [CACHE_NOT_A_DICT.format(type=type(cache).__name__)] if cache is not None and not isinstance(cache, dict) else _log_defects(logs)
+        new_defects = [defect for defect in cache_defects(context) if defect not in before_defects]
+        if new_defects:
+            return new_defects[0]
+        if cache is not None and now_cache is not cache:
+            return CACHE_REPLACED
+        for which, log in (logs.items() if isinstance(logs, dict) else ()):
+            if log is UNCOPYABLE:  # inherited; a rule that replaced it with a read is not charged
+                continue
+            if not isinstance(now_logs, dict) or which not in now_logs or now_logs[which] != log:
+                return READ_LOST.format(read=which)
+        return None
+    except Exception as e:  # noqa: BLE001 - an object whose comparison raises is damage too, and the restore must run
+        return CACHE_UNREADABLE.format(error=repr(e))
 
 
 def cache_restore(context, snapshot) -> None:
     """Puts the audit-log cache back as `snapshot` saw it: the same cache object under the
-    context key (or none), carrying the copied `audit_log` entry (or none), so a rule's
-    damage reaches no later rule and no reader."""
+    context key (or none), carrying the copied `audit_log` entry (or none; an entry the
+    snapshot could not copy is dropped), so a rule's damage reaches no later rule and no
+    reader."""
     cache, logs = snapshot
     if not isinstance(context, dict):
         return
@@ -608,10 +661,10 @@ def cache_restore(context, snapshot) -> None:
     else:
         context[CONTEXT_CACHE] = cache
     if isinstance(cache, dict):
-        if logs is None:
+        if logs is None or logs is UNCOPYABLE:
             cache.pop(CACHE_KEY, None)
         else:
-            cache[CACHE_KEY] = logs
+            cache[CACHE_KEY] = {which: log for which, log in logs.items() if log is not UNCOPYABLE} if isinstance(logs, dict) else logs
 
 
 def summaries(context) -> dict[str, dict]:

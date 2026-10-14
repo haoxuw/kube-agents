@@ -698,7 +698,7 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     snapshot = audit_log.cache_snapshot(context)
     try:
         result = rule.evaluate(cluster, member, read, target, context)
-    finally:  # on the raising path too: the raising rule is the one charged, and the next rule reads a sound cache
+    finally:  # on the raising path too: the raising rule is the one charged, and the next rule reads a sound cache; neither call raises
         damage = audit_log.cache_damage(context, snapshot)
         if damage is not None:
             audit_log.cache_restore(context, snapshot)
