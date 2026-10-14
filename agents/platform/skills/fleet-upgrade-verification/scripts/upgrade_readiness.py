@@ -196,6 +196,7 @@ RESULT_UNKNOWN_KEY = "the result carries {keys}, not among {expected}"
 # An `unknown` entry is a string or a dict whose `reason` or `detail` is a non-empty string;
 # anything else is a shape defect, named rather than rendered as a repr.
 UNKNOWN_WITHOUT_REASON = "an unknown entry carries no reason or detail (keys {keys})"
+UNKNOWN_EMPTY_TEXT = "an unknown entry is an empty string"
 UNKNOWN_ENTRY_NOT_TEXT = "an unknown entry is {type}, not a string or a dict with a reason"
 RESULT_KEY_NOT_A_LIST = "{key} is {type}, not a list"
 FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
@@ -695,7 +696,9 @@ def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
         reason = next((out[key] for key in (REASON_KEY, DETAIL_KEY) if isinstance(out.get(key), str) and out[key].strip()), None)
         if reason is None:
             raise TypeError(UNKNOWN_WITHOUT_REASON.format(keys=sorted(str(key) for key in out)))
-    elif isinstance(item, str) and item.strip():
+    elif isinstance(item, str):
+        if not item.strip():  # named as what it is, not as "str, not a string"
+            raise TypeError(UNKNOWN_EMPTY_TEXT)
         out, reason = {}, item
     else:
         raise TypeError(UNKNOWN_ENTRY_NOT_TEXT.format(type=type(item).__name__))

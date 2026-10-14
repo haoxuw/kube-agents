@@ -495,6 +495,9 @@ class ExtraRulesTest(unittest.TestCase):
             # An unknown entry with neither a reason nor a detail was rendered as the dict's repr.
             "unknown-without-reason": (lambda *a: {**shared.new_result(), "unknown": [{"rule": "x", "entry": 4, "grade": "unknown", "object": None, "detail": ""}]}, "an unknown entry carries no reason or detail (keys ['detail', 'entry', 'grade', 'object', 'rule'])"),
             "unknown-int": (lambda *a: {**shared.new_result(), "unknown": [3]}, "an unknown entry is int, not a string or a dict with a reason"),
+            # An empty or whitespace-only string is named as such, not as "str, not a string".
+            "unknown-empty": (lambda *a: {**shared.new_result(), "unknown": [""]}, "an unknown entry is an empty string"),
+            "unknown-blank": (lambda *a: {**shared.new_result(), "unknown": ["   "]}, "an unknown entry is an empty string"),
         }
         fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
         for name, (evaluate, reason) in cases.items():
