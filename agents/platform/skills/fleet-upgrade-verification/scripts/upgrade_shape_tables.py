@@ -19,6 +19,7 @@ them, so a section with no reader in the tree yet is expected rather than stale.
 """
 
 import json
+import pkgutil
 import re
 from pathlib import Path
 
@@ -524,8 +525,13 @@ RETIRED_IMAGE_HOST_NOTES = {
 
 # The removal table the GitOps scan reads (`api_deprecation_scan.py`), reused here for
 # the replacement column of a removed-API finding. The same file, so the two reads can
-# never disagree about a removal.
-REMOVED_APIS_PATH = Path(__file__).resolve().parent / "removed_apis.json"
+# never disagree about a removal. It is read through the module's loader
+# (`pkgutil.get_data`), which is the file beside this module on a checkout or in the
+# skill directory and the shipped copy under the daily watch, whose loader serves the
+# skill's data files beside its modules; `__file__` there is a path the sandbox lacks.
+REMOVED_APIS_NAME = "removed_apis.json"
+REMOVED_APIS_UNREADABLE = "{name} could not be read beside {module}: {error}"
+NO_LOADER_DATA = "the module's loader serves no data"
 REMOVED_APIS_KEY = "removed"
 REMOVED_API_VERSION_KEY = "api_version"
 REMOVED_KIND_KEY = "kind"
@@ -561,14 +567,19 @@ def node_image_os_family(image_type: str) -> str:
 
 
 def _removed_apis() -> list[dict]:
+    """The removal table, read once through the module's loader. A table that cannot be
+    read raises, so a rule that needs it is `unknown` naming the table rather than
+    reporting a removal with no replacement."""
     global _REMOVED_APIS_CACHE
     if _REMOVED_APIS_CACHE is None:
         try:
-            with open(REMOVED_APIS_PATH, encoding="utf-8") as f:
-                raw = json.load(f)
-            _REMOVED_APIS_CACHE = [e for e in raw.get(REMOVED_APIS_KEY, []) if isinstance(e, dict)]
-        except (OSError, ValueError):
-            _REMOVED_APIS_CACHE = []
+            raw_bytes = pkgutil.get_data(__name__, REMOVED_APIS_NAME)
+            if raw_bytes is None:
+                raise OSError(NO_LOADER_DATA)
+            raw = json.loads(raw_bytes)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(REMOVED_APIS_UNREADABLE.format(name=REMOVED_APIS_NAME, module=__name__, error=e)) from e
+        _REMOVED_APIS_CACHE = [e for e in raw.get(REMOVED_APIS_KEY, []) if isinstance(e, dict)]
     return _REMOVED_APIS_CACHE
 
 

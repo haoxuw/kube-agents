@@ -181,6 +181,9 @@ SKILL_TEST_PREFIX = "test_"
 PACKAGE_INIT = "__init__"
 PYCACHE_DIR = "__pycache__"
 MODULE_SEPARATOR = "."
+# The skill's data files ship beside its modules (the removal table the shape tables read
+# through `pkgutil.get_data`); the tests' fixtures do not.
+SKILL_DATA_SKIPPED_DIRS = (PYCACHE_DIR, "testdata")
 
 # How the report runs in the sandbox.
 PYTHON_EXECUTABLE = "python3"
@@ -495,13 +498,19 @@ def skill_scripts_dir() -> Path:
     raise RuntimeError(f"{REPORT_MODULE}.py not found under {', '.join(str(c) for c in candidates)}")
 
 
-def shipped_modules() -> dict[str, tuple[str, str, bool]]:
-    """Every module the loader ships, by import name: its source, the path it was read
-    from (the module's ``__file__`` in the sandbox, so the report's own path-relative
-    lookups are unchanged) and whether it is a package. Every ``.py`` under the skill's
-    scripts directory except the tests, so a module a later rule adds ships without a
-    change here, and an import the set does not satisfy fails the loader tests rather
-    than the job."""
+def _stamped(path: Path, scripts: Path, root: str | None) -> str:
+    """The path a shipped file is known by in the sandbox: where it was read from on the
+    agent side, or the same path under ``root`` when a caller re-roots the set (the tests
+    do, to a directory that does not exist, so a read can only come from the shipped set)."""
+    return str(path) if root is None else str(Path(root) / path.relative_to(scripts))
+
+
+def shipped_modules(root: str | None = None) -> dict[str, tuple[str, str, bool]]:
+    """Every module the loader ships, by import name: its source, the path it is known by
+    (the module's ``__file__`` in the sandbox, so the report's own path-relative lookups
+    are unchanged) and whether it is a package. Every ``.py`` under the skill's scripts
+    directory except the tests, so a module a later rule adds ships without a change here,
+    and an import the set does not satisfy fails the loader tests rather than the job."""
     scripts = skill_scripts_dir()
     shipped: dict[str, tuple[str, str, bool]] = {}
     for path in sorted(scripts.rglob("*" + PYTHON_SOURCE_SUFFIX)):
@@ -512,19 +521,38 @@ def shipped_modules() -> dict[str, tuple[str, str, bool]]:
         is_package = parts[-1] == PACKAGE_INIT
         if is_package:
             parts = parts[:-1]
-        shipped[MODULE_SEPARATOR.join(parts)] = (path.read_text(encoding="utf-8"), str(path), is_package)
+        shipped[MODULE_SEPARATOR.join(parts)] = (path.read_text(encoding="utf-8"), _stamped(path, scripts, root), is_package)
     return shipped
 
 
-def loader_preamble() -> str:
-    """The first part of the sandbox program: the shipped modules as literals behind a
-    meta-path finder, so ``import fleet_upgrade_report`` and every import under it resolve
-    from them, in whatever order the imports ask, each module's ``__file__`` its path on
-    the agent side."""
+def shipped_data(root: str | None = None) -> dict[str, str]:
+    """Every data file the loader ships, by the path it is known by (beside its module, so
+    ``pkgutil.get_data(module, name)`` finds it through the finder): every file under the
+    skill's scripts directory that is not a module, a test or a test fixture. Today that is
+    the removal table the shape tables and the GitOps scan share."""
+    scripts = skill_scripts_dir()
+    data: dict[str, str] = {}
+    for path in sorted(scripts.rglob("*")):
+        relative = path.relative_to(scripts)
+        if not path.is_file() or path.suffix == PYTHON_SOURCE_SUFFIX or relative.name.startswith(SKILL_TEST_PREFIX):
+            continue
+        if any(part in SKILL_DATA_SKIPPED_DIRS for part in relative.parts):
+            continue
+        data[_stamped(path, scripts, root)] = path.read_text(encoding="utf-8")
+    return data
+
+
+def loader_preamble(root: str | None = None) -> str:
+    """The first part of the sandbox program: the shipped modules and data files as
+    literals behind a meta-path finder, so ``import fleet_upgrade_report`` and every import
+    under it resolve from them, in whatever order the imports ask, each module's
+    ``__file__`` the path it is known by, and a module's ``pkgutil.get_data`` reads the
+    shipped file beside it (the finder is the module's loader, and serves the data)."""
     return "\n".join(
         [
             "import contextlib, importlib, importlib.abc, importlib.util, io, json, os, shutil, sys, tempfile",
-            f"SOURCES = {shipped_modules()!r}",
+            f"SOURCES = {shipped_modules(root)!r}",
+            f"DATA = {shipped_data(root)!r}",
             "class Shipped(importlib.abc.MetaPathFinder, importlib.abc.Loader):",
             "    def find_spec(self, name, path=None, target=None):",
             "        entry = SOURCES.get(name)",
@@ -535,6 +563,11 @@ def loader_preamble() -> str:
             "        source, file, _ = SOURCES[module.__name__]",
             "        module.__file__ = file",
             "        exec(compile(source, file, 'exec'), module.__dict__)",
+            "    def get_data(self, path):",
+            "        if path in DATA:",
+            "            return DATA[path].encode('utf-8')",
+            "        with open(path, 'rb') as handle:",
+            "            return handle.read()",
             "sys.meta_path.insert(0, Shipped())",
             "",
         ]

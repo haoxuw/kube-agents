@@ -1492,6 +1492,35 @@ class Loader(unittest.TestCase):
         self.assertTrue(shipped["readiness_rules"][2])
         self.assertFalse(shipped[watch.REPORT_MODULE][2])
         self.assertTrue(all(Path(entry[1]).is_file() for entry in shipped.values()))
+        # The data files beside the modules ship too (the removal table), the test fixtures do not.
+        data = watch.shipped_data()
+        self.assertEqual(sorted(Path(path).name for path in data), ["removed_apis.json"])
+        self.assertTrue(all(Path(path).is_file() for path in data))
+        self.assertEqual(sorted(Path(path).name for path in watch.shipped_data(root="/elsewhere")), ["removed_apis.json"])
+        self.assertTrue(all(path.startswith("/elsewhere/") for path in watch.shipped_data(root="/elsewhere")))
+
+    def test_a_replacement_is_read_from_the_shipped_set_alone(self) -> None:
+        """The shape tables read the removal table through their module's loader. With the
+        set re-rooted to a directory that does not exist, as the sandbox's view of the
+        agent-side paths is, the replacement still comes from the shipped data; without
+        the data, the read fails loudly rather than as an empty table."""
+        with tempfile.TemporaryDirectory() as scratch:
+            absent = os.path.join(scratch, "absent")
+            program = watch.loader_preamble(root=absent) + "\n".join(
+                [
+                    "tables = importlib.import_module('upgrade_shape_tables')",
+                    "print(tables.replacement_for('extensions/v1beta1 networkpolicies'))",
+                ]
+            )
+            env = {"PATH": os.environ.get("PATH", ""), "HOME": scratch, "TMPDIR": scratch}
+            completed = subprocess.run([sys.executable, "-I", "-"], input=program, capture_output=True, text=True, cwd=scratch, env=env, timeout=120)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip().splitlines()[-1], "networking.k8s.io/v1")
+            without_data = program.replace("DATA = {", "DATA = {}  # ", 1)
+            self.assertNotEqual(without_data, program)
+            completed = subprocess.run([sys.executable, "-I", "-"], input=without_data, capture_output=True, text=True, cwd=scratch, env=env, timeout=120)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("removed_apis.json could not be read beside upgrade_shape_tables", completed.stderr)
 
     def test_the_report_imports_from_the_shipped_set_alone(self) -> None:
         """The finder alone, in an empty directory under ``-I``: every import the report

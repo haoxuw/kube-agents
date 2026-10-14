@@ -250,7 +250,10 @@ SHELL_ESAC_WORD = "esac"
 # follows); `grep case file` names a file. `coproc` and a process substitution (`<(…)`,
 # `>(…)`) run their command list asynchronously, so each is a fork, emitted as one.
 SHELL_COPROC_WORD = "coproc"
-SHELL_COMMAND_PREFIX_WORDS = ("if", "then", "else", "elif", "while", "until", "do", "{", "!", "time")
+SHELL_COMMAND_PREFIX_WORDS = ("if", "then", "else", "elif", "while", "until", "do", "!", "time")
+# A `{` that stands as a word opens a group wherever it stands (`{ a; b; }`, `f() { … }`,
+# `function f { … }`, `coproc f { … }`): a command follows, so `case` inside it is read.
+SHELL_GROUP_OPEN = "{"
 SHELL_COMMAND_SEPARATORS = ";&|"
 SHELL_REDIRECTION_CHARS = "<>"
 SHELL_PROCESS_SUBSTITUTIONS = ("<(", ">(")
@@ -665,8 +668,9 @@ def shell_forks(script) -> bool | None:
     file` names a file). `sh` on a Debian image is dash, which reads `((x & 1))` as two
     subshells with a fork inside and `cmd &>f` as `cmd &` then `>f`, two forks the scanner
     does not report; a rule that grades an `sh -c` script with those two spellings grades it
-    as bash would. A `case … esac` is read as one wherever it stands, inside a substitution
-    or a subshell: a pattern's `)` closes neither.
+    as bash would. A `case … esac` is read as one wherever it stands, inside a substitution,
+    a subshell or a `function NAME { … }` / `NAME() { … }` body (a `{` that stands as a word
+    opens a command list wherever it stands): a pattern's `)` closes none of them.
 
     None when the script cannot be read this way: an unterminated quote, heredoc, command
     substitution or expansion, a trailing backslash, or substitutions and expansions nested
@@ -828,6 +832,10 @@ def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> i
             out.extend(SHELL_ESAC_WORD)
             i += len(SHELL_ESAC_WORD)
             command = False
+        elif _shell_word_at(script, i, SHELL_GROUP_OPEN, out):  # a group opens: a command follows, at any position
+            out.extend(SHELL_GROUP_OPEN)
+            i += len(SHELL_GROUP_OPEN)
+            command = True
         elif command and _shell_word_at(script, i, SHELL_COPROC_WORD, out):  # runs its command asynchronously: a fork
             out.extend(SHELL_FORK_MARK)
             out.extend(SHELL_COPROC_WORD)

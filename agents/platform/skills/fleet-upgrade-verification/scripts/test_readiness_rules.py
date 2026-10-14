@@ -438,6 +438,9 @@ class ShapeTablesTest(unittest.TestCase):
             # A `case` inside a subshell inside a quoted substitution: the pattern's `)` closes
             # neither the subshell nor the substitution.
             'echo "$( (case $MODE in dev) sleep 9 & ;; esac) )"',
+            # A `function NAME { … }` body is a command list: the `{` word opens one wherever it stands.
+            'x="$(function f { case $1 in a) sleep 9 & ;; esac; }; f)"',
+            "coproc w { case $1 in a) :;; esac; }",
         )
         not_forks = (
             "a && b",
@@ -495,6 +498,10 @@ class ShapeTablesTest(unittest.TestCase):
             'x="$( (case $1 in a) echo "a & b";; esac) )"',
             "( case $x in a) :;; esac ) && exec app",
             "(case $x in (a) (b);; esac)",
+            'x="$(function f { case $1 in a) echo "a & b";; esac; }; f)"',
+            "f() { case $1 in a) :;; esac; }; f",
+            "function g { :; }; g && exec app",
+            "find . -exec cmd {} \\;",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
