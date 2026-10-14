@@ -377,6 +377,23 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertTrue(label and isinstance(minor, tuple) and source, label)
         self.assertEqual(set(tables.RETIRED_IMAGE_HOSTS), set(tables.RETIRED_IMAGE_HOST_NOTES))
 
+    def test_a_removal_table_of_another_shape_is_unreadable_not_empty(self):
+        # A missing file and bad JSON were named; a JSON array at the top level raised past
+        # the named message, and a dict under `removed` read as an empty table.
+        import pkgutil
+        from unittest import mock
+
+        for raw in (b'[{"api_version": "x"}]', b'{"removed": {"a": 1}}', b'{"other": []}'):
+            tables._REMOVED_APIS_CACHE = None
+            try:
+                with mock.patch.object(pkgutil, "get_data", return_value=raw):
+                    with self.assertRaises(RuntimeError) as refused:
+                        tables.replacement_for("extensions/v1beta1 networkpolicies")
+                self.assertIn("removed_apis.json could not be read beside upgrade_shape_tables: not an object with a list under 'removed'", str(refused.exception), raw)
+            finally:
+                tables._REMOVED_APIS_CACHE = None
+        self.assertEqual(tables.replacement_for("extensions/v1beta1 networkpolicies"), "networking.k8s.io/v1")
+
     def test_replacement_comes_from_the_scan_table(self):
         self.assertEqual(tables.replacement_for("flowcontrol.apiserver.k8s.io/v1beta3 flowschemas"), "flowcontrol.apiserver.k8s.io/v1")
         self.assertEqual(tables.replacement_for("policy/v1beta1 podsecuritypolicies"), "none; Pod Security Admission or a policy controller")

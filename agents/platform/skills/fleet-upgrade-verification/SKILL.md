@@ -1,6 +1,6 @@
 ---
 name: fleet-upgrade-verification
-description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, maintenance exclusions and windows, node-pool version skew, and what the per-entry rules of the upgrade-failure catalogue find, each a blocker or a risk that does not block (a zonal control plane is one). Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, plus the audit log through gcloud logging read when a registered rule reads it, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
+description: Reports every GKE cluster's control-plane and node-pool versions against a target version or each cluster's release-channel default, naming the members that lag and by how many minors; run again during a rollout, it shows which members started, completed or stalled since the previous run; with --readiness, it also grades each member on what would stop the upgrade, naming drain-blocking PodDisruptionBudgets, fail-closed admission webhooks in the upgrade's path or able to refuse the control plane's bootstrap RBAC writes (ClusterRoles and ClusterRoleBindings; Roles and RoleBindings in kube-system and kube-public) with an unreachable backend, maintenance exclusions and windows, node-pool version skew, and what the per-entry rules of the upgrade-failure catalogue find, each a blocker or a risk that does not block (a zonal control plane is one). Scans the linked GitOps repositories' manifests for apiVersions the target removes, with each hit's replacement. Read-only against GCP, the clusters and Git, from gcloud container, kubectl get and repository reads, plus the audit log through gcloud logging read when a registered rule reads it, keeping only its own record of each run and per-member kubeconfig files; the executed counterpart to gke-upgrades' advice.
 ---
 
 # Fleet upgrade verification
@@ -13,10 +13,13 @@ fleet is from a release-channel default, or whether the repositories are ready f
 version. Run the version report again during a rollout and it also says, per member, what changed
 since the previous run and which members have stopped moving (see "Track a rollout across runs").
 With `--readiness` it also says, per member, what would stop the upgrade: a PodDisruptionBudget
-that blocks every node drain, a maintenance exclusion or window, node pools too far below the
-target, or a blocker one of the per-entry rules of the upgrade-failure catalogue files, and, as
-risks that do not block, what those rules name to watch, a zonal control plane among them (see
-"Check upgrade readiness"). For upgrade plans, runbooks and checklists, use the
+that blocks every node drain, a fail-closed admission webhook with an unreachable backend in the
+upgrade's path or able to refuse the control plane's bootstrap RBAC writes (ClusterRoles and
+ClusterRoleBindings; Roles and RoleBindings in kube-system and kube-public), a maintenance
+exclusion or window, node pools too far below the target, or a blocker one of the per-entry rules
+of the upgrade-failure catalogue files, and, as risks that do not block, what those rules name to
+watch, a zonal control plane among them (see "Check upgrade readiness"). For upgrade plans,
+runbooks and checklists, use the
 `gke-upgrades` skill; it links back here when the question is one these two scripts answer.
 
 "Version skew" here is the gap between a member's versions and the target. It is not
@@ -83,16 +86,18 @@ The script runs `gcloud container clusters list`, `gcloud container get-server-c
 project whose `clusters list` was refused as API-disabled or whose configured identifier is a
 project number), each with a 60-second timeout, and
 with `--readiness` one `gcloud container clusters get-credentials` and the `kubectl get`s per
-member that "Check upgrade readiness" lists (the PDB rule's, then one per group of kinds the
-per-entry rules read), plus whatever a registered rule reads itself through the script's own
-runner under the same cap (a rule that reads the audit log runs paged `gcloud logging read`s).
+member that "Check upgrade readiness" lists (the PDB rule's, the webhook rule's, then one per
+group of kinds the per-entry rules read), plus whatever a registered rule reads itself through the
+script's own runner under the same cap (a rule that reads the audit log runs paged `gcloud logging
+read`s).
 It changes nothing in GCP or in any cluster; the only things it writes are its own record under
 `/opt/data/state/fleet-upgrade-verification/`, the per-member kubeconfig files `--readiness`
-needs, and the `--output` file. A failed or timed-out gcloud read, `get-credentials`, PDB read
-or audit-log read is listed under the table and sets exit code 1; the other projects, locations
-and members are still reported. The `kubectl get`s after the PDB read are recorded per kind in
-the member's note and JSON and set no exit code (see "Check upgrade readiness"), so exit 0 says
-the version table and the PDB rule were read on every member, not that every later read was. A project whose own Kubernetes
+needs, and the `--output` file. A failed or timed-out gcloud read, `get-credentials`, PDB read,
+webhook read or audit-log read is listed under the table and sets exit code 1; the other projects,
+locations and members are still reported. The `kubectl get`s after the webhook read are recorded
+per kind in the member's note and JSON and set no exit code (see "Check upgrade readiness"), so
+exit 0 says the version table, the PDB rule and the webhook rule were read on every member, not
+that every later read was. A project whose own Kubernetes
 Engine API is off holds no cluster and is not a failed read; a refusal naming another project,
 such as a quota project, is one. The weekly upgrade audit's collector also runs the script, with
 `--readiness --cluster <location>/<name>`, once per behind cluster: that run writes
@@ -186,12 +191,15 @@ members missing this run.
 `--readiness` adds a second table after the version table, one row per member, graded against
 the same target as the member's version row, and a `readiness` object per member in the JSON
 (`members[].readiness`, with a top-level `readiness` block holding the instant evaluated and a
-count per verdict). Without the flag nothing changes. Three rules, each derived from a governance
-SOP check and named beside it, then the per-entry rules registered in
-`upgrade_readiness.EXTRA_RULES` (`scripts/readiness_rules/`, one module per entry of the
-upgrade-failure catalogue in the repository's design docs; the package docstring is the
-contract a module meets); the maintenance rule departs from its SOP where the two differ, and
-says so below:
+count per verdict). Without the flag nothing changes. The rules below each name the governance
+SOP check they derive from, except the webhook rule, which has no SOP check yet; after them run
+the per-entry rules registered in `upgrade_readiness.EXTRA_RULES` (`scripts/readiness_rules/`, one
+module per entry of the upgrade-failure catalogue in the repository's design docs; the package
+docstring is the contract a module meets); the maintenance rule departs from its SOP where the two
+differ, and says so. Run it once, from this profile, for every cluster the question covers; a
+readiness question fanned out to the Cluster Agents loses the maintenance read and the grading
+below, and a hand survey in their place reports every fail-closed webhook without a visible
+backend, GKE's own URL-backed ones included, as a blocker.
 
 - **Drain-blocking PDBs** (`obtainability_audit_sop.md` §3.4). For each member the script runs
   `gcloud container clusters get-credentials` into a kubeconfig of its own under
@@ -288,8 +296,8 @@ validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpoints
   (GKE keeps nodes within two minors of the control plane); exactly 2 is at the ceiling and
   goes in the note. Autopilot members read `n/a`.
 
-The per-entry rules run after those three, over the same cluster record and the reads after
-the PDB read, one per group of kinds: `kubectl get daemonset,cronjob,pvc,networkpolicy,namespace
+The per-entry rules run after those four, over the same cluster record and the reads after
+the webhook read, one per group of kinds: `kubectl get daemonset,cronjob,pvc,networkpolicy,namespace
 -A -o json`; `kubectl get pods -A -o json` on its own, because the pod list is the one most
 likely to exceed the credential proxy's output cap and a cut read must cost only the rules that
 need pods; the Nodes through a jsonpath template that keeps each node's name, labels, taints,
@@ -317,10 +325,10 @@ and `risks`, each as `<rule id>: <the rule's description>`, so the cell names th
 note column does. The rules registered today, with the catalogue entry each reads:
 
 - **Zonal control plane** (`zonal-control-plane`, entry 11). A cluster whose `location` is a zone
-  is a risk on every report, never a blocker: the API is unavailable for minutes while GKE
-  replaces the one replica, the pods keep running, and the cell carries the retry advice. A
-  location that is neither a zone nor a region is unknown, and since the rule can never block,
-  that unknown goes in the note and leaves the verdict to the other rules.
+  is a risk on every report, never a blocker: the Kubernetes API is unreachable for a short window
+  while the single control-plane replica is rebuilt, running pods are unaffected, and the cell
+  says what to do about it. A location that is neither a zone nor a region is unknown, and since
+  the rule can never block, that unknown goes in the note and leaves the verdict to the other rules.
 
 A member is `blocked` when any rule blocks, whatever else could not be evaluated; `unknown` when
 nothing blocked but a rule that could have blocked could not be evaluated (the cluster read
@@ -333,11 +341,13 @@ whether it can block, and a count of its blocking, risk, unknown and note entrie
 `entry` and the `text` the cell or the note prints; an unknown entry with its `reason` and
 `can_block`), `notes`, `read_errors` (per kind) and `audit_log` (per read); the top-level
 `readiness` block counts the members with risks (`members_with_risks`). A failed
-`get-credentials` or PDB read is listed under the table as a read failure for that member and
-sets exit code 1, like a failed gcloud read; it leaves the PDB rule and every per-entry rule that
-needs an object ungraded (the three reads after it are skipped, since the API server did not
-answer), while the member's maintenance and skew rules, and a per-entry rule that reads the
-cluster record alone, are still graded, and the other members are unaffected. `--at` with a
+`get-credentials`, PDB read or webhook read is listed under the table as a read failure for that
+member and sets exit code 1, like a failed gcloud read. A failed `get-credentials` or PDB read
+leaves the PDB rule and every per-entry rule that needs an object ungraded (the webhook read is
+skipped when the API server did not answer the PDB read, and the reads after the webhook read are
+skipped on any PDB failure), and a failed webhook read leaves the webhook rule alone ungraded,
+while the member's maintenance and skew rules, and a per-entry rule that reads the cluster
+record alone, are still graded, and the other members are unaffected. `--at` with a
 value that is not RFC 3339, or `--at` or `--kubeconfig-dir` without `--readiness`, is a usage
 error (exit 2).
 
@@ -409,10 +419,21 @@ as one that is stuck, and the elapsed time is what lets the user tell them apart
 baseline line means there is nothing to compare yet; say when to run again. When the run printed
 a readiness table, paste it too and name each `blocked` member with what blocks it as the table
 states it: the PDB by `namespace/name` with its field and workload, the exclusion by name with
-its scope and end time and that it holds back automatic upgrades only, the pool with its skew,
-and each `other blockers` entry as the cell states it. Name each member's risks from the `risks`
-column as risks, not blockers (the zonal control plane with the retry advice), and say which
-rules read as `unknown` and why, from the note; never read an `unknown` as clean.
+its scope and end time and that it holds back automatic upgrades only, the webhook as
+`configuration/webhook` with its configuration kind, why its backend is unreachable and what it
+matches, the pool with its skew, and each `other blockers` entry as the cell states it. A webhook
+the cell lists as matching none of the upgrade's path is an outage to report, not a blocker, with
+what it does match named so the operator can judge it. Name each member's risks from the `risks`
+column as risks, not blockers (the zonal control plane with the retry advice), and say which rules
+read as `unknown` and why, from the note; never read an `unknown` as clean. When the user asks for
+a verdict per object — does this budget, exclusion or webhook block the upgrade — take it from the
+table: an entry under `blocking` (or a blocking exclusion or pool) is yes, a webhook under `outage`
+is no, with the outage named; do not re-grade by hand. An exclusion in effect whose scope covers
+the target is `yes` whatever the aside says about automatic versus manual upgrades: the table
+graded the member `blocked` on it, and that is the verdict; the automatic-only qualification
+belongs in the prose beside the line, never in the yes/no. Name a webhook by its configuration,
+the part of the table's `configuration/webhook` cell before the slash; the webhook's own name may
+follow it after a slash, never stand in for it.
 Say what the operator has to change before the upgrade can proceed; do not change it, and do not
 propose deleting an exclusion. When the question is a target version's readiness, paste each
 repository's deprecation section too, with its source line, and state the floor and target the

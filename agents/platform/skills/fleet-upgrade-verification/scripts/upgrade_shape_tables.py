@@ -531,6 +531,7 @@ RETIRED_IMAGE_HOST_NOTES = {
 # skill's data files beside its modules; `__file__` there is a path the sandbox lacks.
 REMOVED_APIS_NAME = "removed_apis.json"
 REMOVED_APIS_UNREADABLE = "{name} could not be read beside {module}: {error}"
+REMOVED_APIS_SHAPE = "not an object with a list under {key!r}"
 NO_LOADER_DATA = "the module's loader serves no data"
 REMOVED_APIS_KEY = "removed"
 REMOVED_API_VERSION_KEY = "api_version"
@@ -568,8 +569,8 @@ def node_image_os_family(image_type: str) -> str:
 
 def _removed_apis() -> list[dict]:
     """The removal table, read once through the module's loader. A table that cannot be
-    read raises, so a rule that needs it is `unknown` naming the table rather than
-    reporting a removal with no replacement."""
+    read, or is not an object with a list under `removed`, raises, so a rule that needs it
+    is `unknown` naming the table rather than reporting a removal with no replacement."""
     global _REMOVED_APIS_CACHE
     if _REMOVED_APIS_CACHE is None:
         try:
@@ -577,9 +578,12 @@ def _removed_apis() -> list[dict]:
             if raw_bytes is None:
                 raise OSError(NO_LOADER_DATA)
             raw = json.loads(raw_bytes)
+            removed = raw.get(REMOVED_APIS_KEY) if isinstance(raw, dict) else None
+            if not isinstance(removed, list):  # a table of another shape is unreadable too, not empty
+                raise ValueError(REMOVED_APIS_SHAPE.format(key=REMOVED_APIS_KEY))
         except (OSError, ValueError) as e:
             raise RuntimeError(REMOVED_APIS_UNREADABLE.format(name=REMOVED_APIS_NAME, module=__name__, error=e)) from e
-        _REMOVED_APIS_CACHE = [e for e in raw.get(REMOVED_APIS_KEY, []) if isinstance(e, dict)]
+        _REMOVED_APIS_CACHE = [e for e in removed if isinstance(e, dict)]
     return _REMOVED_APIS_CACHE
 
 

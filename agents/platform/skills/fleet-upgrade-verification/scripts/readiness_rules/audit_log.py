@@ -646,7 +646,7 @@ def cache_damage(context, snapshot) -> str | None:
                 return READ_LOST.format(read=which)
         return None
     except Exception as e:  # noqa: BLE001 - an object whose comparison raises is damage too, and the restore must run
-        return CACHE_UNREADABLE.format(error=repr(e))
+        return CACHE_UNREADABLE.format(error=exception_text(e))  # never raises, so the restore runs
 
 
 def cache_restore(context, snapshot) -> None:

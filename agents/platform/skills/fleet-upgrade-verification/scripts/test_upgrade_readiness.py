@@ -657,6 +657,28 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
             self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
             self.assertEqual(audit_log.cache_defect(ctx), None, name)
+        # An object whose comparison raises with an unprintable argument: the guard's own
+        # rendering never raises, the rule is charged, and the restore runs for the next rule.
+        class Unprintable:
+            def __repr__(self):
+                raise RuntimeError("no repr")
+
+        class Evil:
+            def __eq__(self, other):
+                raise ValueError(Unprintable())
+
+            __hash__ = object.__hash__
+
+        def poisoning_compare(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = Evil()
+            return shared.new_result()
+
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module("evil", evaluate=poisoning_compare), rule_module("second", evaluate=reading_deprecated)])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["evil"])
+        self.assertIn("the cache could not be compared with the snapshot: ValueError", folded["unknown"][0]["reason"])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"])
+        self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"])
         # A generator in the cache before the fold ran is nobody's: the snapshot stands, the
         # rules run, and the entry is left as it was found.
         ctx = context()
