@@ -1050,7 +1050,9 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
     grade; None leaves the report as the version table alone. `clusters`, when given, is the
     names to grade; every other cluster in the projects is skipped, so a caller that wants a
     few members' readiness does not pay for the others' reads, and the report records them
-    under `narrowed_to` (`None` on a full run).
+    under `narrowed_to` (`None` on a full run). The per-entry rules still see every cluster
+    the projects listed as the member's peers: narrowing selects whom to grade, not whom a
+    rule may see.
     """
     # `<location>/<name>` pins one cluster; a bare name admits that name in
     # every location of the projects (GKE names are unique per location).
@@ -1075,8 +1077,11 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
     unlisted: list[str] = []
     audit_log_failures: list[dict] = []  # apart from `errors`: a member whose audit-log read failed stays graded
     # Every project is listed before any member is graded, so a rule that compares a
-    # member with its peers sees the whole run, not the projects listed so far.
+    # member with its peers sees the whole run, not the projects listed so far; and the
+    # peers are the whole listing even when `--cluster` narrows who is graded (`found`):
+    # narrowing selects whom to grade, not whom a rule may see.
     found: list[tuple[str, dict]] = []
+    fleet: list[dict] = []
     for project in projects:
         cmd = [GCLOUD, "container", "clusters", "list", f"--project={project}", JSON_FORMAT_FLAG]
         listed, error = run_gcloud_json(cmd)
@@ -1092,6 +1097,7 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
         for cluster in listed:
             if not isinstance(cluster, dict):
                 continue
+            fleet.append(cluster)
             if wanted is not None:
                 hits = _wanted(cluster, wanted)
                 if not hits:
@@ -1100,7 +1106,6 @@ def build_report(projects: list[str], explicit_target: str | None, readiness_opt
                 # qualified spec for one cluster are one request, not a hit and a miss.
                 matched.update(hits)
             found.append((project, cluster))
-    fleet = [cluster for _, cluster in found]
     for project, cluster in found:
         member = grade_member(cluster, project, explicit_target, cache)
         if readiness_options is not None:

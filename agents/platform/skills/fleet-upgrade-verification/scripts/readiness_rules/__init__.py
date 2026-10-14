@@ -37,7 +37,9 @@ rule that does not need it.
 (the report's runner) with `timeout_seconds` (the per-call cap a rule passes to it), `at`
 (the aware instant the report evaluates at), `cache` (a dict a rule fills so another rule
 reads the same thing once; the audit-log reads live under `audit_log.CACHE_KEY`), `clusters`
-(every cluster record the run listed, for a rule that compares a member with its peers),
+(every cluster record the run listed, for a rule that compares a member with its peers; the
+whole listing of the projects even when `--cluster` narrows which members are graded, since
+narrowing selects whom to grade, not whom a rule may see),
 `pools` (the member's pools: `name`, `version`, `parsed`, the record's `config` and
 `autoscaling`), `target_text`, `master` (the parsed control-plane version) and `autopilot`;
 tests may add `clock`, a monotonic clock for a read's time budget.

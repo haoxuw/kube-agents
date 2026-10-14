@@ -1649,6 +1649,27 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(r["rules"][ZONAL]["unknown"], 1)
         self.assertIn("| ready | none |", text)
 
+    def test_a_narrowed_run_hands_a_peer_rule_the_whole_listing(self):
+        # `--cluster` (the weekly collector's per-cluster form) selects whom to grade; a rule
+        # that compares a member with its peers still sees every cluster the projects
+        # listed, as the contract promises, not a fleet of one.
+        def evaluate(cluster, member, read, target, context):
+            out = readiness_rules.new_result()
+            peers = sorted(c["name"] for c in context[readiness_rules.CONTEXT_CLUSTERS])
+            out["notes"].append(f"{cluster['name']} sees {len(peers)} peer(s): {', '.join(peers)}")
+            return out
+
+        peer_rule = fake_rule("peers", entry=2, evaluate=evaluate)
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects)
+        with patch.object(readiness, "EXTRA_RULES", [peer_rule]):
+            rc, text, data = self._run(fake, "--cluster", "seeded-a")
+        self.assertEqual(rc, report.EXIT_OK)
+        self.assertEqual([m["cluster"] for m in data["members"]], ["seeded-a"])
+        self.assertEqual(data["narrowed_to"], ["seeded-a"])
+        self.assertEqual(data["members"][0]["readiness"]["notes"], ["peers: seeded-a sees 3 peer(s): robot-host, seeded-a, seeded-b"])
+        # Only the narrowed member paid for its reads.
+        self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), report.KUBECTL_READS_PER_MEMBER)
+
     def test_a_rule_that_breaks_the_audit_log_cache_is_one_unknown_and_the_report_still_writes(self):
         # `assess_readiness` builds the JSON's `audit_log` from the cache the rules fill; a
         # rule that writes another shape there is its own `unknown`, named inside the fold's
