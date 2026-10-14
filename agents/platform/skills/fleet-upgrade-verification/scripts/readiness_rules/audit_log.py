@@ -544,8 +544,8 @@ def _unseen(page: list, seen: set) -> list:
 def cache_defect(context) -> str | None:
     """Why the audit-log cache cannot be read as the reads left it, or None. The context's
     cache must be a dict, its `audit_log` entry a dict keyed by read name, and each value a
-    read result: a dict whose `read` is that name, carrying every summary key, JSON values
-    with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
+    read result: a dict whose `read` is that name, carrying every summary key, a JSON value
+    throughout (`callers` included) with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
     a rule runs, and damage the rule left (`cache_damage`: this, or a stored read gone or
     changed) is the rule's `unknown`, with the cache put back (`cache_restore`) whether the
     rule returned or raised, so no later rule or reader meets it."""
@@ -589,9 +589,16 @@ def _read_result_defect(which, log) -> str | None:
     if missing:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_MISSING_KEYS.format(keys=missing))
     try:
-        json.dumps({key: log[key] for key in SUMMARY_KEYS}, allow_nan=False)
+        # The whole result, `callers` included: `read` stores JSON values alone, so an object a
+        # rule left anywhere in it is that rule's defect at its own cache check, not a changed
+        # read charged to the rule after it, whose copies of the object compare by identity.
+        json.dumps(log, allow_nan=False)
     except (TypeError, ValueError) as e:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=str(e))
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException as e:  # noqa: BLE001 - a value nested past the recursion limit, or one whose encoding raises otherwise, is not a JSON value either
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=exception_text(e))
     return None
 
 

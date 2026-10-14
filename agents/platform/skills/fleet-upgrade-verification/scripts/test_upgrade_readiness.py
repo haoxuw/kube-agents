@@ -690,14 +690,14 @@ class ExtraRulesTest(unittest.TestCase):
             def __repr__(self):
                 raise RuntimeError("no repr")
 
-        class Evil:
+        class Evil(int):  # a value JSON carries, so the shape probe passes it and the comparison is what raises
             def __eq__(self, other):
                 raise ValueError(Unprintable())
 
-            __hash__ = object.__hash__
+            __hash__ = int.__hash__
 
         def poisoning_compare(cluster, member, read, target, ctx):
-            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = Evil()
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = Evil(1000)
             return shared.new_result()
 
         ctx = context()
@@ -713,18 +713,18 @@ class ExtraRulesTest(unittest.TestCase):
             def __deepcopy__(self, memo):
                 raise SystemExit(4)
 
-        class ExitingCompare:
+        class ExitingCompare(int):
             def __eq__(self, other):
                 raise SystemExit(5)
 
-            __hash__ = object.__hash__
+            __hash__ = int.__hash__
 
         def storing_exiting_copy(cluster, member, read, target, ctx):
             ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["callers"].append(ExitingCopy())
             return shared.new_result()
 
         def storing_exiting_compare(cluster, member, read, target, ctx):
-            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = ExitingCompare()
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = ExitingCompare(1000)
             return shared.new_result()
 
         for name, offender, reason in (("exiting-copy", storing_exiting_copy, "the 'removed' entry holds an object that cannot be copied"), ("exiting-compare", storing_exiting_compare, "the cache could not be compared with the snapshot: SystemExit(5)")):
@@ -734,6 +734,24 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertIn(reason, folded["unknown"][0]["reason"], name)
             self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
             self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
+        # A rule that reads a window and then leaves a plain object in the shared copy's
+        # `callers` -- one that copies cleanly and compares by identity -- is charged at its own
+        # cache check as a shape defect; before the probe read the whole result, it passed as
+        # sound and every later rule was charged with a changed read, its findings lost.
+        class Plain:
+            pass
+
+        def reading_then_storing_plain(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["callers"].append(Plain())
+            return shared.new_result()
+
+        ctx = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("writer", evaluate=reading_then_storing_plain), rule_module("second", evaluate=reading_deprecated)])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["writer"])
+        self.assertIn("is not JSON serializable", folded["unknown"][0]["reason"])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["second"])
+        self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated"])
         # A generator in the cache before the fold ran is nobody's: the snapshot stands, the
         # rules run, and the entry is left as it was found.
         ctx = context()
@@ -854,6 +872,49 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual(folded["rules"]["fine"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 1, "unknown": 0, "notes": 0}, name)
             self.assertEqual((folded["blocking"], [f["rule"] for f in folded["risks"]], folded["notes"]), ([], ["fine"], []), name)
             json.dumps(folded)  # what the writer does with it
+        # An attribute whose read itself raises is the same defect under the fold's guard: a
+        # module that resolves its names through a module-level `__getattr__` (the lazy-import
+        # idiom) and raises there is one unknown under its `__name__`; an ENTRY whose encoding
+        # raises something other than the TypeError or ValueError the probe caught (a dict
+        # subclass whose `items()` raises, as a value nested past the recursion limit does) is
+        # "not a JSON value"; an object nothing can be read from is named by its type. The
+        # interpreter's own interrupt still passes through.
+        def no_backend(name):
+            raise ImportError("no backend")
+
+        lazy = types.ModuleType("lazy")
+        lazy.__getattr__ = no_backend
+
+        class Unlistable(dict):
+            def items(self):
+                raise OSError("no items")
+
+        bottomless = bare_module("bottomless", evaluate=None, RULE_ID="bottomless", ENTRY=Unlistable(entry=2), CAN_BLOCK=True)
+
+        class Unreadable:
+            def __getattr__(self, name):
+                raise KeyError(name)
+
+            def __str__(self):
+                raise RuntimeError("no str")
+
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[lazy, bottomless, Unreadable(), fine])
+        self.assertEqual([(u["rule"], u["entry"], u["can_block"], u["reason"]) for u in folded["unknown"]], [
+            ("lazy", None, True, "reading the module's attributes raised ImportError('no backend'); not evaluated"),
+            ("bottomless", None, True, "ENTRY is Unlistable, not a JSON value; not evaluated"),
+            ("Unreadable", None, True, "reading the module's attributes raised KeyError('__name__'); not evaluated"),
+        ])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"])
+        self.assertEqual(folded["rules"]["lazy"], {"entry": None, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
+        json.dumps(folded)
+
+        def interrupting(name):
+            raise KeyboardInterrupt
+
+        interrupted = types.ModuleType("interrupted")
+        interrupted.__getattr__ = interrupting
+        with self.assertRaises(KeyboardInterrupt):
+            r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[interrupted, fine])
         # A module with no RULE_ID at all is keyed by its module name and evaluated as usual.
         nameless = bare_module("nameless", evaluate=returning(risks=[{"what": "n"}]), ENTRY=3, CAN_BLOCK=False)
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[nameless])

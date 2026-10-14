@@ -1224,10 +1224,11 @@ if __name__ == "__main__":
 
 
 class FakeReadinessCommands(FakeGcloud):
-    """FakeGcloud plus `get-credentials`, the four `kubectl get` reads and `logging read`,
+    """FakeGcloud plus `get-credentials`, the six `kubectl get` reads and `logging read`,
     recording the KUBECONFIG each kubectl ran with.
 
-    `objects_by_cluster` answers the PDB read, `namespaced_objects_by_cluster` the namespaced
+    `objects_by_cluster` answers the PDB read and the webhook read, each filtered to the kinds
+    it asks for (`KINDS`), `namespaced_objects_by_cluster` the namespaced
     read, `pods_by_cluster` the pod read, `cluster_objects_by_cluster` the StorageClass and
     PersistentVolume read and `nodes_by_cluster` (Node dicts) the projected node read,
     rendered the way kubectl's jsonpath renders it; `node_output_by_cluster` replaces that
@@ -1238,7 +1239,20 @@ class FakeReadinessCommands(FakeGcloud):
     read` times out.
     """
 
-    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), namespaced_objects_by_cluster=None, pods_by_cluster=None, cluster_objects_by_cluster=None, nodes_by_cluster=None, node_output_by_cluster=None, failing_reads=None, cut_reads=None, audit_by_cluster=None, failing_logging=()):
+    # What each resource name in a `kubectl get` list returns, so a read that stops asking for
+    # a kind stops receiving it, as a real API server would.
+    KINDS = {
+        "pdb": "PodDisruptionBudget",
+        "deploy": "Deployment",
+        "statefulset": "StatefulSet",
+        "validatingwebhookconfigurations": "ValidatingWebhookConfiguration",
+        "mutatingwebhookconfigurations": "MutatingWebhookConfiguration",
+        "services": "Service",
+        "endpointslices": "EndpointSlice",
+        "namespaces": "Namespace",
+    }
+
+    def __init__(self, clusters_by_project, config_by_location, objects_by_cluster, failing_kubectl=(), failing_credentials=(), failing_webhook_read=(), namespaced_objects_by_cluster=None, pods_by_cluster=None, cluster_objects_by_cluster=None, nodes_by_cluster=None, node_output_by_cluster=None, failing_reads=None, cut_reads=None, audit_by_cluster=None, failing_logging=()):
         super().__init__(clusters_by_project, config_by_location)
         self.objects_by_cluster = objects_by_cluster
         self.namespaced_objects_by_cluster = namespaced_objects_by_cluster or {}
@@ -1247,6 +1261,7 @@ class FakeReadinessCommands(FakeGcloud):
         self.nodes_by_cluster = nodes_by_cluster or {}
         self.node_output_by_cluster = node_output_by_cluster or {}
         self.failing_kubectl = set(failing_kubectl)
+        self.failing_webhook_read = set(failing_webhook_read)
         self.failing_reads = failing_reads or {}
         self.cut_reads = cut_reads or {}
         self.failing_credentials = set(failing_credentials)
@@ -1282,10 +1297,14 @@ class FakeReadinessCommands(FakeGcloud):
             self.calls.append(cmd)
             self.kubeconfigs.append(env.get("KUBECONFIG") if env else None)
             resource = cmd[2]
-            if resource == report.KUBECTL_RESOURCES:
+            if resource in (report.KUBECTL_RESOURCES, report.KUBECTL_WEBHOOK_RESOURCES):
                 if self.current_cluster in self.failing_kubectl:
                     return 1, "", "Unable to connect to the server: dial tcp: i/o timeout"
-                return 0, json.dumps({"kind": "List", "items": self.objects_by_cluster.get(self.current_cluster, [])}), ""
+                wanted = {self.KINDS[name] for name in resource.split(",")}
+                if "EndpointSlice" in wanted and self.current_cluster in self.failing_webhook_read:
+                    return 1, "", "Error from server (Timeout): the server was unable to return a response in the time allotted"
+                items = [o for o in self.objects_by_cluster.get(self.current_cluster, []) if o.get("kind") in wanted]
+                return 0, json.dumps({"kind": "List", "items": items}), ""
             if resource in self.failing_reads.get(self.current_cluster, ()):
                 return 1, "", f'Error from server (Forbidden): {resource} is forbidden: User "agent" cannot list resource "{resource}"'
             if resource == report.KUBECTL_NAMESPACED_RESOURCES:
@@ -1314,11 +1333,12 @@ def node_line(node):
 
 
 PDB_READ_CMD = ["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]
+WEBHOOK_READ_CMD = ["kubectl", "get", "validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpointslices,namespaces", "-A", "-o", "json"]
 NAMESPACED_READ_CMD = ["kubectl", "get", "daemonset,cronjob,pvc,networkpolicy,namespace", "-A", "-o", "json"]
 POD_READ_CMD = ["kubectl", "get", "pods", "-A", "-o", "json"]
 NODE_READ_CMD = ["kubectl", "get", "node", "-o", f"jsonpath={report.KUBECTL_NODE_JSONPATH}"]
 CLUSTER_READ_CMD = ["kubectl", "get", "storageclass,pv", "-o", "json"]
-MEMBER_READS = [PDB_READ_CMD, NAMESPACED_READ_CMD, POD_READ_CMD, NODE_READ_CMD, CLUSTER_READ_CMD]
+MEMBER_READS = [PDB_READ_CMD, WEBHOOK_READ_CMD, NAMESPACED_READ_CMD, POD_READ_CMD, NODE_READ_CMD, CLUSTER_READ_CMD]
 CUT_AT_CAP = "output was cut at the credential proxy's output cap"
 
 
@@ -1418,6 +1438,7 @@ class ReadinessTest(unittest.TestCase):
                 k8s_pdb("readiness-1411", "orphan", {"maxUnavailable": 0, "selector": {"matchLabels": {"app": "gone"}}}, 0),
             ],
         }
+
         # seeded-b: the seeded fleet's fixture shape, a gate on ConfigMaps only, whose Service does
         # not exist, scoped to its own namespace as bench/tf/fleet/defects-b.tf scopes it. It is an
         # outage because ConfigMaps are on neither graded list; the scope confines the gate.
@@ -1477,7 +1498,6 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(host["pdbs"]["orphan"], 1)
         self.assertFalse(host["skew"]["applicable"])
         self.assertIn("1 orphan PDB(s)", host["note"])
-
         self.assertEqual([f["webhook"] for f in host["webhooks"]["blocking"]], ["pod-gate/pods.example.com"])
         self.assertEqual(host["webhooks"]["blocking"][0]["upgrade_path"], ["CREATE pods"])
         self.assertEqual(host["webhooks"]["blocking"][0]["reason"], "Service gate/pod-hook has no ready endpoints on port 443")
@@ -1558,8 +1578,8 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(by_name["seeded-b"]["status"], "blocked")
         self.assertIsNone(by_name["seeded-a"]["webhooks"])
         # An API server the first read could not reach is not asked a second time: one
-        # kubectl call for seeded-a, two for each of the other members.
-        self.assertEqual(len([c for c in fake.calls if c[:2] == ["kubectl", "get"]]), 5)
+        # kubectl call for seeded-a, every read for each of the other members.
+        self.assertEqual(len([c for c in fake.calls if c[:2] == ["kubectl", "get"]]), 1 + 2 * report.KUBECTL_READS_PER_MEMBER)
         self.assertTrue(by_name["seeded-a"]["webhook_read_error"].startswith(report.WEBHOOK_READ_SKIPPED))
         # The skipped read is reported as skipped, not failed: one error row, and a note that says why the webhooks are unread.
         self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-a"])
@@ -1570,6 +1590,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(by_name["seeded-a"]["webhook_read_skipped"])
         self.assertIn("| read failed | read skipped |", text)
         self.assertNotIn("| read failed | read failed |", text)
+        # The PDB cell says the read failed; the rules' cells answer for the rules, which ran
+        # on the cluster record: `none` under `other blockers`, the zonal risk under `risks`.
+        row = [line for line in text.splitlines() if "| seeded-a |" in line][-1]  # the readiness table's row, printed after the version table's
+        self.assertEqual(row.count("| read failed |"), 1, row)  # the PDB cell alone; the note names the read in prose
+        self.assertIn("| none | zonal-control-plane: ", row)
         # The version row is unaffected, and the rollout record does not treat the project as unread.
         self.assertEqual({m["cluster"]: m["status"] for m in data["members"]}["seeded-a"], report.STATUS_CURRENT)
         self.assertEqual(data["rollout"]["missing_members"], [])
@@ -1583,17 +1608,144 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(b["status"], "blocked")
         self.assertIsNone(b["pdbs"])
         self.assertIn("forbidden", b["read_error"])
+        self.assertIsNone(b["webhooks"])
         # Every read for each of the two members whose credentials came; none for seeded-b.
         self.assertEqual(len([c for c in fake.calls if c[:1] == ["kubectl"]]), 2 * report.KUBECTL_READS_PER_MEMBER)
         self.assertEqual(report.KUBECTL_READS_PER_MEMBER, len(MEMBER_READS))
+        # One credentials failure is one error row, not one per read, and the note names credentials, not the PDB read.
+        self.assertEqual([e["cluster"] for e in data["errors"]], ["seeded-b"])
+        self.assertIn("credentials for the cluster could not be fetched", b["note"])
+        self.assertNotIn("PDB read failed", b["note"])
         # The skipped reads are recorded per kind, so the JSON cannot be read as nine
         # successful reads, and the note names them from that record.
-        self.assertIn("cluster read failed; PDBs not graded", b["note"])
         self.assertIn(readiness_rules.NOTHING_READ_REASON, b["note"])
         self.assertNotIn("the reads after it were skipped", b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
         self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
         self.assertEqual({kind: readiness_rules.NOTHING_READ_REASON for kind in readiness_rules.READ_KINDS}, b["read_errors"])
+
+    def test_an_unwritable_kubeconfig_dir_is_a_directory_error_not_a_credentials_error(self):
+        # `--kubeconfig-dir` is operator-chosen, so an unwritable path is ordinary input and
+        # the note has to send the operator to the path, not to IAM.
+        read = report.read_cluster_objects({"name": "c", "location": "l"}, "p", os.path.join(os.devnull, "kubeconfigs"))
+        self.assertIsNotNone(read["directory_error"])
+        self.assertIsNone(read["credentials_error"])
+        self.assertIn("cannot create kubeconfig directory", read["error"])
+        self.assertEqual(read["error"], read["webhook_error"])
+
+    def test_a_first_read_killed_by_the_deadline_does_not_skip_the_webhook_read(self):
+        # In the sandbox the deadline measures the credential proxy's admission queue as often as
+        # the server, and a second read enters that queue afresh.
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[0] != report.KUBECTL:
+                return 0, "", ""
+            if cmd[2] == report.KUBECTL_RESOURCES:
+                return -1, "", f"timed out after {report.KUBECTL_TIMEOUT_SECONDS} seconds"
+            return 0, '{"items": []}', ""
+
+        with tempfile.TemporaryDirectory() as d, patch.object(report, "run_cmd", side_effect=fake_run):
+            read = report.read_cluster_objects({"name": "big", "location": "us-central1"}, "p1", d)
+        self.assertIn("timed out after", read["error"])
+        self.assertFalse(read["webhook_skipped"])
+        self.assertEqual((read["webhook_items"], read["webhook_error"]), ([], None))
+        self.assertEqual([c[2] for c in calls if c[0] == report.KUBECTL], [report.KUBECTL_RESOURCES, report.KUBECTL_WEBHOOK_RESOURCES])
+
+    def test_a_server_answered_error_quoting_a_dial_failure_does_not_skip_the_webhook_read(self):
+        # kubectl prefixes an error the API server returned with `Error from server (...)`; its
+        # body can quote the server's own dial failure (apiserver to etcd during a control-plane
+        # event), which is an answer, so the second read is made and may be answered.
+        calls = []
+        answered = 'Error from server (InternalError): an error on the server ("rpc error: code = Unavailable desc = dial tcp 10.0.0.2:2379: connect: connection refused") has prevented the request from succeeding'
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[0] != report.KUBECTL:
+                return 0, "", ""
+            if cmd[2] == report.KUBECTL_RESOURCES:
+                return 1, "", answered
+            return 0, '{"items": []}', ""
+
+        with tempfile.TemporaryDirectory() as d, patch.object(report, "run_cmd", side_effect=fake_run):
+            read = report.read_cluster_objects({"name": "big", "location": "us-central1"}, "p1", d)
+        self.assertIn("connection refused", read["error"])
+        self.assertFalse(read["webhook_skipped"])
+        self.assertEqual((read["webhook_items"], read["webhook_error"]), ([], None))
+        self.assertEqual([c[2] for c in calls if c[0] == report.KUBECTL], [report.KUBECTL_RESOURCES, report.KUBECTL_WEBHOOK_RESOURCES])
+        self.assertTrue(report.first_read_failed_before_the_server_answered("Unable to connect to the server: dial tcp 10.0.0.1:443: connect: connection refused"))
+        self.assertFalse(report.first_read_failed_before_the_server_answered(answered))
+
+    def test_the_shims_broker_down_line_skips_the_webhook_read(self):
+        calls = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[0] != report.KUBECTL:
+                return 0, "", ""
+            return 1, "", "credential proxy unavailable: [Errno 111] Connection refused\n"
+
+        with tempfile.TemporaryDirectory() as d, patch.object(report, "run_cmd", side_effect=fake_run):
+            read = report.read_cluster_objects({"name": "big", "location": "us-central1"}, "p1", d)
+        self.assertTrue(read["webhook_skipped"])
+        self.assertTrue(read["webhook_error"].startswith(report.WEBHOOK_READ_SKIPPED))
+        self.assertEqual([c[2] for c in calls if c[0] == report.KUBECTL], [report.KUBECTL_RESOURCES])
+
+    def test_a_list_cut_at_the_proxy_cap_is_named_as_such(self):
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[0] != report.KUBECTL:
+                return 0, "", ""
+            if cmd[2] == report.KUBECTL_RESOURCES:
+                return 0, '{"items": []}', ""
+            return 0, '{"items": [{"kind": "Service", "metadata": {"na', f"{report.PROXY_TRUNCATION_MARKER}\n"
+
+        with tempfile.TemporaryDirectory() as d, patch.object(report, "run_cmd", side_effect=fake_run):
+            read = report.read_cluster_objects({"name": "big", "location": "us-central1"}, "p1", d)
+        self.assertEqual((read["items"], read["error"]), ([], None))
+        self.assertIsNone(read["webhook_items"])
+        self.assertIn("cut at the credential proxy's output cap", read["webhook_error"])
+        self.assertNotIn("unparsable", read["webhook_error"])
+
+    def test_webhook_read_failure_leaves_the_pdb_rule_graded(self):
+        fake = FakeReadinessCommands(self.clusters, {}, self.objects, failing_webhook_read=["robot-host"])
+        rc, text, data = self._run(fake)
+        self.assertEqual(rc, report.EXIT_PARTIAL)
+        host = next(m for m in data["members"] if m["cluster"] == "robot-host")["readiness"]
+        self.assertIsNone(host["webhooks"])
+        self.assertIsNotNone(host["pdbs"])
+        self.assertEqual(host["pdbs"]["blocking"][0]["pdb"], "readiness-1411/block-drain")
+        self.assertEqual(host["status"], "blocked")  # the PDB still blocks; the webhook rule alone is unread
+        self.assertIn("webhook read failed; webhooks not graded", host["note"])
+        row = next(l for l in text.splitlines() if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
+        self.assertIn("(2 replicas)) | read failed |", row)
+        self.assertIn("kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpointslices,namespaces -A -o json failed (1)", text)
+
+    def test_the_namespace_read_feeds_the_selector(self):
+        # A dead Role gate that exempts kube-system and kube-public by a label the installer
+        # put on them is an outage on the cluster whose Namespace read shows the label, and a
+        # blocker on the cluster whose namespaces do not carry it.
+        gate = k8s_webhook("ValidatingWebhookConfiguration", "policy-gate", "roles.example.com", "Fail", ("policy", "absent"), ["roles"])
+        gate["webhooks"][0]["rules"][0]["apiGroups"] = ["rbac.authorization.k8s.io"]
+        gate["webhooks"][0]["namespaceSelector"] = {"matchExpressions": [{"key": "admission.policy.example/ignore", "operator": "DoesNotExist"}]}
+        exempt = [k8s_namespace("kube-system", {"admission.policy.example/ignore": "true"}), k8s_namespace("kube-public", {"admission.policy.example/ignore": "true"})]
+        plain = [k8s_namespace("kube-system"), k8s_namespace("kube-public")]
+        objects = {**self.objects, "seeded-a": self.objects["seeded-a"] + [gate] + exempt, "robot-host": self.objects["robot-host"] + [gate] + plain}
+        _, _, data = self._run(FakeReadinessCommands(self.clusters, {}, objects))
+        webhooks = {m["cluster"]: m["readiness"]["webhooks"] for m in data["members"]}
+        self.assertEqual(([f["webhook"] for f in webhooks["seeded-a"]["outage"]], webhooks["seeded-a"]["blocking"]), (["policy-gate/roles.example.com"], []))
+        blocking = {f["webhook"]: f["upgrade_path"] for f in webhooks["robot-host"]["blocking"]}
+        self.assertEqual(blocking["policy-gate/roles.example.com"], ["CREATE roles in kube-system,kube-public"])
+
+    def test_url_backend_is_counted_in_the_json_and_not_noted(self):
+        url_hook = {"kind": "ValidatingWebhookConfiguration", "metadata": {"name": "warden"}, "webhooks": [{"name": "warden.example.com", "failurePolicy": "Fail", "rules": [{"apiGroups": [""], "operations": ["CREATE"], "resources": ["pods"]}], "clientConfig": {"url": "https://localhost:5443/validate"}}]}
+        objects = {**self.objects, "seeded-a": self.objects["seeded-a"] + [url_hook]}
+        fake = FakeReadinessCommands(self.clusters, {}, objects)
+        _, _, data = self._run(fake)
+        a = next(m for m in data["members"] if m["cluster"] == "seeded-a")["readiness"]
+        self.assertEqual(a["webhooks"]["url_backends"], 1)
+        self.assertEqual(a["status"], "ready")
+        self.assertNotIn("URL", a["note"])
 
     def test_zonal_risk_fills_the_risks_column_and_the_json_shape(self):
         fake = FakeReadinessCommands(self.clusters, {}, self.objects)
@@ -1627,13 +1779,14 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn(header, lines)
         a_row = next(l for l in lines if l.startswith("| p1 | seeded-a |") and "| ready |" in l)
         cells = [c.strip() for c in a_row.strip("|").split(" | ")]
-        self.assertEqual(cells[7], "none")
+        blockers, risks = report.READINESS_COLUMNS.index("other blockers"), report.READINESS_COLUMNS.index("risks")
+        self.assertEqual(cells[blockers], "none")
         # The cell names the rule, so a reader of the table alone can quote its id.
-        self.assertIn("zonal-control-plane: control plane is zonal (us-central1-a)", cells[8])
-        self.assertIn("retry with backoff", cells[8])
+        self.assertIn("zonal-control-plane: control plane is zonal (us-central1-a)", cells[risks])
+        self.assertIn("retry with backoff", cells[risks])
         host_row = next(l for l in lines if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
         self.assertNotIn("control plane is zonal", host_row)
-        self.assertIn(f"Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; {with_risks} with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, skew or an other blocker any upgrade; a risk does not block.", text)
+        self.assertIn(f"Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; {with_risks} with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, a fail-closed webhook with an unreachable backend in the upgrade's path or able to refuse the control plane's bootstrap RBAC writes (ClusterRoles and ClusterRoleBindings; Roles and RoleBindings in kube-system and kube-public), skew or an other blocker any upgrade; a risk does not block.", text)
 
     def test_an_unknown_from_a_rule_that_cannot_block_stays_in_the_note(self):
         odd = cluster("odd", "everywhere", self.TARGET, [("p", self.TARGET)])
