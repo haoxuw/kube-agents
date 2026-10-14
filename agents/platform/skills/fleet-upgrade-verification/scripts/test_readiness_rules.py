@@ -7,8 +7,10 @@ import os
 import sys
 import time
 import unittest
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
+import fleet_upgrade_report as report  # noqa: E402
 import readiness_rules as shared  # noqa: E402
 import upgrade_readiness as r  # noqa: E402
 import upgrade_shape_tables as tables  # noqa: E402
@@ -16,6 +18,7 @@ from fleet_upgrade_report import parse_version  # noqa: E402
 from readiness_rules import finding, zonal_control_plane  # noqa: E402
 
 TARGET = parse_version("1.35.1-gke.1000")
+AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
 LAGGING = "1.34.11-gke.1000"
 CURRENT = "1.35.1-gke.1000"
 POOL_LABEL = "cloud.google.com/gke-nodepool"
@@ -106,14 +109,26 @@ class ContractTest(unittest.TestCase):
             self.assertIsInstance(module.ENTRY, int, module.RULE_ID)
             self.assertIsInstance(module.CAN_BLOCK, bool, module.RULE_ID)
             self.assertTrue(callable(module.evaluate) and callable(module.describe), module.RULE_ID)
+            # The inputs are the ones the contract promises, built as the report builds them: a
+            # graded member and a context carrying every CONTEXT_KEYS entry, so a rule that
+            # reads `context[CONTEXT_CLUSTERS]` or `context[CONTEXT_AUTOPILOT]` by key passes
+            # here as it does in a run. The runner refuses every command, so a rule that reads
+            # the audit log grades its error and the test runs nothing.
             record = cluster(location="us-central1", pools=[pool("p", CURRENT)])
-            result = module.evaluate(record, {}, read(items=[]), TARGET, {})
-            self.assertEqual(set(result), set(shared.RESULT_KEYS), module.RULE_ID)
-            self.assertTrue(all(isinstance(result[key], list) for key in shared.RESULT_KEYS), module.RULE_ID)
+            member = report.grade_member(record, "p1", CURRENT, report.ServerConfigCache())
+            context = report.readiness_context(member, AT, [record], report._pool_records(record, member), parse_version(LAGGING), False)
+            context[shared.CONTEXT_RUN_CMD] = lambda cmd, timeout=None, env=None: (1, "", "no runner in the contract test")
+            self.assertEqual(set(context), set(shared.CONTEXT_KEYS), module.RULE_ID)
+            result = module.evaluate(record, member, read(items=[]), TARGET, context)
+            # The result shape the fold accepts: the contract's keys or a subset (a key left
+            # out is an empty list to the fold), each present value a list.
+            self.assertIsInstance(result, dict, module.RULE_ID)
+            self.assertLessEqual(set(result), set(shared.RESULT_KEYS), module.RULE_ID)
+            self.assertTrue(all(isinstance(value, list) for value in result.values()), module.RULE_ID)
             # The invariant the fold enforces: a module that declares it cannot block files no
             # blocker on the contract input.
             if not module.CAN_BLOCK:
-                self.assertEqual(result["blocking"], [], module.RULE_ID)
+                self.assertEqual(result.get("blocking", []), [], module.RULE_ID)
         self.assertIn(zonal_control_plane, r.EXTRA_RULES)
 
     def test_entries_are_catalogue_numbers_and_read_kinds_are_named_once(self):
@@ -436,6 +451,8 @@ class ShapeTablesTest(unittest.TestCase):
             "cat <<EOF >/tmp/boot\n$(start-agent &)\nEOF\nexec app",
             "exec ${SIDECAR:-$(sleep 9 &)} app",
             "echo $(( $(sleep 9 &) ))",
+            "echo $[ $(sleep 9 &) ]",
+            "sleep 1 & echo $[1+1]",
             "exec ${X:-`run &`}",
             "echo $'it\\'s up'; sleep 1 &",
             'echo "${X:-"$(sleep 1 &)"}"',
@@ -519,6 +536,16 @@ class ShapeTablesTest(unittest.TestCase):
             "f() { case $1 in a) :;; esac; }; f",
             "function g { :; }; g && exec app",
             "find . -exec cmd {} \\;",
+            # Bash's older `$[…]` arithmetic is a word like `$((…))`, its brackets balanced,
+            # in a word, in double quotes, in a parameter default and in a heredoc body.
+            "echo $[mode & 4]",
+            "flags=$[mode & 4]; exec app",
+            "echo $[1<<2]",
+            "echo $[a[1] & 2]",
+            'echo "$[x & 1]"',
+            "x=${a:-$[1&2]}",
+            "echo $(($[1&2]))",
+            "cat <<EOF\n$[a & b]\nEOF\n",
         )
         for text in forks:
             self.assertIs(shared.shell_forks(text), True, text)
@@ -526,7 +553,7 @@ class ShapeTablesTest(unittest.TestCase):
             self.assertIs(shared.shell_forks(text), False, text)
         # What cannot be read this way is unread, never clean: an unterminated quote or
         # heredoc, a trailing backslash, no script at all.
-        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", 'echo "$(case $x in a) echo', "echo " + "$((" * 70 + "1" + "))" * 70, None, 3):
+        for text in ("echo 'a & b", 'echo "a & b', "cat <<EOF\na & b\n", "cat <<EOF", "echo a \\", "echo $(a", 'echo "$(a"', "echo `a", "x=${a", "echo $[1+", "y=$((1+", "((1", "echo $'abc", "cat <<EOF\n$(a &\nEOF\n", "((a) &", 'echo "$(case $x in a) echo', "echo " + "$((" * 70 + "1" + "))" * 70, None, 3):
             self.assertIsNone(shared.shell_forks(text), text)
         # A span nested forty deep is walked a bounded number of times, not once per level
         # above it; past the nesting cap the script is unread.

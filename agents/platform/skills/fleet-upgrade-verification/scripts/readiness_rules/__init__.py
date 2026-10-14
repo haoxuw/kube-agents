@@ -248,6 +248,10 @@ SHELL_ARITHMETIC_EXPANSION = "$(("
 SHELL_ARITHMETIC_COMMAND = "(("
 SHELL_ARITHMETIC_DEPTH = 2  # `((` opens two parentheses
 SHELL_PARAMETER_EXPANSION = "${"
+SHELL_BRACKET_ARITHMETIC = "$["  # bash's older arithmetic expansion, deprecated and still parsed by bash 5; a word, as `$((…))` is
+SHELL_OPEN_BRACKET = "["
+SHELL_CLOSE_BRACKET = "]"
+SHELL_EXPANSION_OPENERS = (SHELL_ARITHMETIC_EXPANSION, SHELL_PARAMETER_EXPANSION, SHELL_BRACKET_ARITHMETIC)
 SHELL_COMMAND_SUBSTITUTION = "$("
 SHELL_BACKTICK = "`"
 SHELL_OPEN_PAREN = "("
@@ -679,9 +683,9 @@ def shell_forks(script) -> bool | None:
     operators once the quoted spans, escaped characters, `#` comments, heredoc bodies and
     the expansions that are words to the shell are gone, so `&&`, `|&`, `>&`, `<&`, `&>`,
     `;&`, a subshell's `)&` and `2>&1` read as what they are and `'&'`, `$((mode & 4))`,
-    `((x & 1))`, `$((1<<2))` and `${URL:-a&b}` are words. A command list the script embeds
+    `((x & 1))`, `$((1<<2))`, bash's older `$[mode & 4]` and `${URL:-a&b}` are words. A command list the script embeds
     is read with the same rules wherever it stands: `$(…)` and backticks in a word, in
-    double quotes, in `${…}`, in `$((…))` and in an unquoted heredoc body, so
+    double quotes, in `${…}`, in `$((…))` and `$[…]` and in an unquoted heredoc body, so
     `"$(sleep 9 &)"`, `${SIDECAR:-$(sleep 9 &)}` and a heredoc line `$(start-agent &)` fork;
     a quoted heredoc body is text, and a delimiter is read with its quotes removed across
     the whole word (`E"O"F` is `EOF`, quoted). A process substitution (`>(…)`, `<(…)`) and
@@ -785,7 +789,7 @@ def _shell_scan(script: str, i: int, state: _ShellScan, closer: str | None) -> i
         elif c == SHELL_COMMENT and (not out or out[-1] in SHELL_WORD_BREAKS):
             end = script.find(SHELL_NEWLINE, i)
             i = n if end < 0 else end
-        elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
+        elif script.startswith(SHELL_EXPANSION_OPENERS, i):
             i = _shell_expansion(script, i, state)
             if i is None:
                 return None
@@ -943,7 +947,7 @@ def _shell_double_quoted(script: str, i: int, state: _ShellScan) -> int | None:
             return i + 1
         if c == SHELL_ESCAPE:
             i += SHELL_ESCAPED_PAIR
-        elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
+        elif script.startswith(SHELL_EXPANSION_OPENERS, i):
             i = _shell_expansion(script, i, state)
             if i is None:
                 return None
@@ -980,12 +984,18 @@ def _shell_arithmetic_span(script: str, start: int, state: _ShellScan) -> int | 
 
 
 def _shell_expansion(script: str, i: int, state: _ShellScan) -> int | None:
-    """The index after the parameter expansion `${…}` or arithmetic expansion `$((…))` at
-    `i`, one neutral character in `state.out` with the command lists inside it scanned;
-    `$((` not closed by `))` is `$(` opening a subshell, as bash reads it. None when it
-    never closes."""
+    """The index after the parameter expansion `${…}`, the arithmetic expansion `$((…))` or
+    bash's older arithmetic `$[…]` at `i`, one neutral character in `state.out` with the
+    command lists inside it scanned; `$((` not closed by `))` is `$(` opening a subshell,
+    as bash reads it. None when it never closes."""
     if script.startswith(SHELL_PARAMETER_EXPANSION, i):
         end = _shell_balanced(script, i + len(SHELL_PARAMETER_EXPANSION), SHELL_OPEN_BRACE, SHELL_CLOSE_BRACE, 1, state)
+        if end is None:
+            return None
+        state.out.append(SHELL_NEUTRAL)
+        return end
+    if script.startswith(SHELL_BRACKET_ARITHMETIC, i):
+        end = _shell_balanced(script, i + len(SHELL_BRACKET_ARITHMETIC), SHELL_OPEN_BRACKET, SHELL_CLOSE_BRACKET, 1, state)
         if end is None:
             return None
         state.out.append(SHELL_NEUTRAL)
@@ -1026,7 +1036,7 @@ def _shell_balanced(script: str, i: int, opener: str, closer: str, depth: int, s
                 i = _shell_double_quoted(script, i + 1, state)
                 if i is None:
                     return None
-            elif script.startswith(SHELL_ARITHMETIC_EXPANSION, i) or script.startswith(SHELL_PARAMETER_EXPANSION, i):
+            elif script.startswith(SHELL_EXPANSION_OPENERS, i):
                 i = _shell_expansion(script, i, state)
                 if i is None:
                     return None
@@ -1129,7 +1139,7 @@ def _shell_heredoc_body(body: str, state: _ShellScan) -> int | None:
         c = body[j]
         if c == SHELL_ESCAPE:
             j += SHELL_ESCAPED_PAIR
-        elif body.startswith(SHELL_ARITHMETIC_EXPANSION, j) or body.startswith(SHELL_PARAMETER_EXPANSION, j):
+        elif body.startswith(SHELL_EXPANSION_OPENERS, j):
             j = _shell_expansion(body, j, inner)
         elif body.startswith(SHELL_COMMAND_SUBSTITUTION, j) or c == SHELL_BACKTICK:
             j = _shell_substitution(body, j, inner)
