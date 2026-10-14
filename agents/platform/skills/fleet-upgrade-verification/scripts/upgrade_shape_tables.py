@@ -59,13 +59,17 @@ NODEPOOL_LABEL = "cloud.google.com/gke-nodepool"
 # A cache is the acceptable use the catalogue names, so it is not here. Each word stands
 # on its own in the name, a non-letter (a dash, an underscore, a digit, an end) on each
 # side, so `restore`, `metadata`, `logdatadog`, `dequeue`, `firestore`, `dbus` and `walrus`
-# do not match while `data-0`, `pg-wal`, `redis_data` and `db` do; the charts' spellings
-# that run words together (`pgdata`, `datadir`, `database`, `mysqldata`, `mongodata`) are
-# named whole. `nginx-cache` matches nothing; `wal-e-bin` matches on `wal`, the name of a
-# WAL directory more often than of WAL-E's binaries.
+# do not match while `data-0`, `pg-wal`, `redis_data` and `db` do. A run of letters made
+# of listed words and nothing else (`datastore`, `dbdata`, `statedb`) matches as the
+# compound it is, the `+` below; a run with letters outside the words (`esdata`,
+# `statefulset`, `datalog`) does not. The charts' spellings that run a word into an
+# unlisted one (`pgdata`, `datadir`, `database`, `mysqldata`, `mongodata`, and `datalogdir`,
+# Confluent's cp-zookeeper transaction-log volume) are named whole. `nginx-cache` matches
+# nothing; `wal-e-bin` matches on `wal`, the name of a WAL directory more often than of
+# WAL-E's binaries.
 STATEFUL_VOLUME_WORDS = ("data", "state", "queue", "store", "storage", "journal", "persist", "persistent", "persistence", "db", "wal")
-STATEFUL_VOLUME_CHART_SPELLINGS = ("pgdata", "datadir", "database", "mysqldata", "mongodata")
-STATEFUL_VOLUME_NAME_RE = re.compile(r"(?<![a-z])(?:" + "|".join(STATEFUL_VOLUME_CHART_SPELLINGS + STATEFUL_VOLUME_WORDS) + r")(?![a-z])", re.I)
+STATEFUL_VOLUME_CHART_SPELLINGS = ("pgdata", "datadir", "database", "mysqldata", "mongodata", "datalogdir")
+STATEFUL_VOLUME_NAME_RE = re.compile(r"(?<![a-z])(?:" + "|".join(STATEFUL_VOLUME_CHART_SPELLINGS + STATEFUL_VOLUME_WORDS) + r")+(?![a-z])", re.I)
 # Where a node exposes Local SSD: Compute Engine formats and mounts Local SSD under
 # /mnt/disks (cloud.google.com/compute/docs/disks/add-local-ssd#formatandmount); GKE's
 # ephemeral Local SSD lives under /mnt/stateful_partition on Container-Optimized OS

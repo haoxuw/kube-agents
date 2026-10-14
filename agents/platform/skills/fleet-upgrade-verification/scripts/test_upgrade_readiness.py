@@ -468,6 +468,30 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertEqual([f["rule"] for f in guarded["risks"]], ["fine"])
         json.dumps(guarded)
         self.assertEqual(folded["rules"]["broken"], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0})
+        # `SystemExit` is a rule's defect too: `sys.exit()` in a module ported from a script
+        # is a BaseException, and a guard on `Exception` alone let it end the run after
+        # every member was read. A repr that exits is named by its type like one that
+        # raises. The interpreter's own signals pass through.
+        def boom_exit(*args):
+            sys.exit(2)
+
+        class ExitingRepr:
+            def __repr__(self):
+                raise SystemExit(3)
+
+        def boom_exiting_repr(*args):
+            raise ValueError(ExitingRepr())
+
+        exited = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("exiting", evaluate=boom_exit), rule_module("exiting-repr", evaluate=boom_exiting_repr), fine])
+        self.assertEqual([(u["rule"], u["reason"]) for u in exited["unknown"]], [("exiting", "rule raised SystemExit(2); not evaluated"), ("exiting-repr", "rule raised ValueError; not evaluated")])
+        self.assertEqual([f["rule"] for f in exited["risks"]], ["fine"])
+        json.dumps(exited)
+
+        def interrupted(*args):
+            raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("interrupted", evaluate=interrupted), fine])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"])
         # A describe that raises is the same defect, and a rule returning nothing is empty.
         bad_describe = rule_module("bad-describe", evaluate=returning(risks=[{"what": "x"}]), describe=boom)
@@ -682,6 +706,34 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertIn("the cache could not be compared with the snapshot: ValueError", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"])
         self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"])
+        # The same guards hold when what a rule stored exits instead of raising: an object
+        # whose copy raises SystemExit is uncopyable, one whose comparison does is damage,
+        # the rule is charged either way, and the run goes on.
+        class ExitingCopy:
+            def __deepcopy__(self, memo):
+                raise SystemExit(4)
+
+        class ExitingCompare:
+            def __eq__(self, other):
+                raise SystemExit(5)
+
+            __hash__ = object.__hash__
+
+        def storing_exiting_copy(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["callers"].append(ExitingCopy())
+            return shared.new_result()
+
+        def storing_exiting_compare(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = ExitingCompare()
+            return shared.new_result()
+
+        for name, offender, reason in (("exiting-copy", storing_exiting_copy, "the 'removed' entry holds an object that cannot be copied"), ("exiting-compare", storing_exiting_compare, "the cache could not be compared with the snapshot: SystemExit(5)")):
+            ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn(reason, folded["unknown"][0]["reason"], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
+            self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
         # A generator in the cache before the fold ran is nobody's: the snapshot stands, the
         # rules run, and the entry is left as it was found.
         ctx = context()

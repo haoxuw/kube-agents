@@ -64,6 +64,7 @@ from readiness_rules import (
     CONTEXT_PROJECT,
     CONTEXT_RUN_CMD,
     CONTEXT_TIMEOUT_SECONDS,
+    NOT_A_RULE_DEFECT,
     PROXY_TRUNCATION_MARKER,
     exception_text,
     is_system_namespace,
@@ -459,7 +460,9 @@ def read(context: dict, which: str) -> dict:
     }
     try:
         _read_pages(context, which, result)
-    except Exception as e:  # noqa: BLE001 - the failure is the read's error, never a clean cached window
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException as e:  # noqa: BLE001 - the failure is the read's error, SystemExit included, never a clean cached window
         result["error"] = READ_RAISED_REASON.format(read=which, error=exception_text(e))  # never raises, so the window is never cached clean
         result["callers"] = []
     finally:
@@ -602,13 +605,17 @@ def _copy_logs(logs):
     if not isinstance(logs, dict):
         try:
             return copy.deepcopy(logs)
-        except Exception:  # noqa: BLE001 - whatever the object refuses with, the snapshot still stands
+        except NOT_A_RULE_DEFECT:
+            raise
+        except BaseException:  # noqa: BLE001 - whatever the object refuses with, SystemExit included, the snapshot still stands
             return UNCOPYABLE
     out = {}
     for which, log in logs.items():
         try:
             out[which] = copy.deepcopy(log)
-        except Exception:  # noqa: BLE001
+        except NOT_A_RULE_DEFECT:
+            raise
+        except BaseException:  # noqa: BLE001
             out[which] = UNCOPYABLE
     return out
 
@@ -645,7 +652,9 @@ def cache_damage(context, snapshot) -> str | None:
             if not isinstance(now_logs, dict) or which not in now_logs or now_logs[which] != log:
                 return READ_LOST.format(read=which)
         return None
-    except Exception as e:  # noqa: BLE001 - an object whose comparison raises is damage too, and the restore must run
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException as e:  # noqa: BLE001 - an object whose comparison raises, or exits, is damage too, and the restore must run
         return CACHE_UNREADABLE.format(error=exception_text(e))  # never raises, so the restore runs
 
 

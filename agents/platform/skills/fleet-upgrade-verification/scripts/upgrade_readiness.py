@@ -23,8 +23,8 @@ per entry of docs/designs/upgrade-failure-catalogue.md under `readiness_rules/`,
 package docstring is the contract a module meets. The fold stamps each finding with its
 rule; a rule's `blocking` joins the `blocked` verdict, an `unknown` from a rule that can block
 joins `unknown`, its `risks` the member's risks list, which the table and the report print
-under "risks", and its `notes` the note column. A rule that raises is one `unknown` finding,
-never a crash.
+under "risks", and its `notes` the note column. A rule that raises, `SystemExit` included, is
+one `unknown` finding, never a crash.
 """
 
 import copy
@@ -841,7 +841,8 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     list, so the findings are serialised once and `rules[id]` counts what the lists carry
     under that id. Each rule is handed its own copies of `cluster`, `member`, `read` and the
     context's fleet records (`_rule_arguments`), so what it writes to them reaches no other
-    rule and not the report. A rule that raises, returns a shape the contract forbids, or returns a
+    rule and not the report. A rule that raises (`SystemExit` included; `KeyboardInterrupt` and
+    `GeneratorExit` alone pass through), returns a shape the contract forbids, or returns a
     value JSON cannot carry is one `unknown` entry naming the error, never a crash: one
     rule's defect must not hide the others' findings. So is a module whose `RULE_ID` is not
     a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a bool, under
@@ -864,7 +865,9 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
         if defect is None:
             try:
                 result = _rule_result(rule, rule_id, entry, can_block, cluster, member, read, target, context)
-            except Exception as e:  # noqa: BLE001 - a rule's defect is a reason the verdict is unknown, not a crash
+            except readiness_rules.NOT_A_RULE_DEFECT:
+                raise
+            except BaseException as e:  # noqa: BLE001 - a rule's defect, SystemExit included, is a reason the verdict is unknown, not a crash
                 defect = RULE_FAILED_REASON.format(error=readiness_rules.exception_text(e))  # never raises, and is capped
         if defect is not None:
             result = _failed_result(defect, rule_id, entry, can_block)

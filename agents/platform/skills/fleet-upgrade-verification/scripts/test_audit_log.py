@@ -249,6 +249,16 @@ class AuditLogReadTest(unittest.TestCase):
             result = audit_log.read_removed(other)
         self.assertEqual(result["error"], "the removed read raised ValueError; the pages read before it are not graded")
         self.assertEqual(result["callers"], [])
+        # A `SystemExit` from under the read is the read's error too, never a clean cached
+        # window and never the run's end; the interpreter's own interrupt passes through.
+        exiting = sample_context()
+        with patch.object(audit_log, "caller_records", side_effect=SystemExit(2)):
+            result = audit_log.read_removed(exiting)
+        self.assertEqual(result["error"], "the removed read raised SystemExit(2); the pages read before it are not graded")
+        self.assertEqual(result["callers"], [])
+        self.assertIsNotNone(audit_log.read_removed(exiting)["error"])
+        with self.assertRaises(KeyboardInterrupt), patch.object(audit_log, "caller_records", side_effect=KeyboardInterrupt):
+            audit_log.read_removed(sample_context())
 
     def test_a_page_the_proxy_cut_is_the_reads_error_naming_the_cap(self):
         removed, _ = split_sample()

@@ -51,8 +51,10 @@ return the same object twice or cache what it returns. The fold in
 turns each `unknown` entry (a string, or a dict carrying `reason` or `detail`) into a dict
 with `reason`, `can_block` and the `text` the note column prints, the reason collapsed to one
 line of at most NOTE_EXCERPT_CHARS. A finding is written to the JSON as it is, so it holds
-JSON values only; a rule that raises, returns a shape the contract forbids, or returns a
-value JSON cannot carry becomes one `unknown` finding, never a crash, and a module whose
+JSON values only; a rule that raises (`SystemExit` included: `sys.exit()` in a rule is its
+defect, not the run's end; `KeyboardInterrupt` and `GeneratorExit` alone pass through),
+returns a shape the contract forbids, or returns a value JSON cannot carry becomes one
+`unknown` finding, never a crash, and a module whose
 `RULE_ID` is not a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a
 bool is not evaluated: one `unknown` under its module name. A second module that carries a
 registered `RULE_ID` is not evaluated either: it is one `unknown` under that id with that
@@ -82,6 +84,12 @@ NOTE_EXCERPT_CHARS = 160
 # in its arguments, and the reason goes to the JSON whole.
 ERROR_EXCERPT_CHARS = 300
 WHITESPACE_JOIN = " "
+# What a guard around a rule's code lets through: the interpreter's own signals, which no
+# rule raises as a verdict. Everything else a rule raises is the rule's defect, `SystemExit`
+# included: `sys.exit()` in a module ported from a script is a BaseException, and a guard
+# that caught `Exception` alone let it end the run after every member was read, with no
+# table, no `--output` and no rollout record.
+NOT_A_RULE_DEFECT = (KeyboardInterrupt, GeneratorExit)
 # What the credential proxy prints on stderr when it cut a brokered command's stdout at its
 # output cap, with the command's own exit code; every read through the shims (the report's
 # kubectl reads, the audit-log reader's gcloud reads) checks it before parsing.
@@ -284,7 +292,9 @@ def exception_text(error: BaseException, limit: int = ERROR_EXCERPT_CHARS) -> st
     name, so the guard's own rendering is never what escapes it."""
     try:
         text = repr(error)
-    except Exception:  # noqa: BLE001 - whatever the argument's __repr__ raised, the guard still names the type
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException:  # noqa: BLE001 - whatever the argument's __repr__ raised, SystemExit included, the guard still names the type
         text = type(error).__name__
     return one_line(text, limit)
 

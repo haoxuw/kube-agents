@@ -538,10 +538,16 @@ class ShapeTablesTest(unittest.TestCase):
 
     def test_stateful_volume_names_match_how_the_database_charts_spell_them(self):
         stateful = ("data", "pgdata", "datadir", "database", "mysqldata", "mongodata", "state", "pg-wal", "wal", "db", "journal", "queue", "store", "persist", "wal-e-bin", "redis_data", "data-0", "es-data-1", "persistent-storage", "DATA")
+        # Listed words run together with nothing between them are the compound they spell,
+        # and a chart's own run-together name is named whole.
+        compounds = ("datastore", "dbdata", "statedb", "storagedb", "persistentstate", "DataStore", "wal-datastore", "datalogdir")
         # Each word on its own: a stem inside an unrelated word (`restore`, `metadata`,
-        # `logdatadog`, `dequeue`, `firestore`, `statefulset`) is not the volume it names.
-        scratch = ("nginx-cache", "cache", "tmp", "dbus", "walrus", "config", "logs", "bin", "restore-scripts", "backup-restore", "pod-metadata", "logdatadog", "dequeue-worker", "firestore-creds", "statefulset-config")
-        for name in stateful:
+        # `logdatadog`, `dequeue`, `firestore`, `statefulset`) is not the volume it names,
+        # and neither is a listed word with a residue of other letters beside it (`esdata`,
+        # `datalog`); a 61-letter run of listed words with one stray letter is refused
+        # in one pass, not backtracked over.
+        scratch = ("nginx-cache", "cache", "tmp", "dbus", "walrus", "config", "logs", "bin", "restore-scripts", "backup-restore", "pod-metadata", "logdatadog", "dequeue-worker", "firestore-creds", "statefulset-config", "esdata", "datalog", "logdir", "sdata", "data" * 15 + "x")
+        for name in stateful + compounds:
             self.assertTrue(tables.STATEFUL_VOLUME_NAME_RE.search(name), name)
         for name in scratch:
             self.assertFalse(tables.STATEFUL_VOLUME_NAME_RE.search(name), name)
