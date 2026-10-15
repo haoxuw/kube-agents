@@ -234,12 +234,6 @@
 # lock, so it is the thirteenth tofu case: ~10 more serial minutes there. With
 # oobe-first-run-audits, the twelfth (~120 at its 2400s hint), the thirteen
 # come to ~583 serial minutes against the 480m deadline.
-# kubectl execs each). It is the entry before upgrades-freeze-runbook-probe
-# below: sixty-five cases (195
-# units) here, of a seventy-nine-case, 237-unit matrix. Its stack holds the
-# infra lock, so it is the thirteenth tofu case: ~10 more serial minutes
-# there. With oobe-first-run-audits, the twelfth (~120 at its 2400s hint),
-# the thirteen come to ~583 serial minutes against the 480m deadline.
 #
 # 2026-10-09 parks oobe-first-run-audits: it is in no roster file, and its
 # KNOWN_UNREGISTERED entry in scripts/validate_bench_cases.py says what brings
@@ -363,10 +357,12 @@
 # gitops-drift-noise-filtered-triage and upgrades-fleet-readiness-failclosed-webhook
 # entries above): one case, three units at
 # the 200s default (a read-only chat turn that runs the readiness report; the
-# report alone measured 62s on the dev install). It is the last entry below.
-# Counted over every entry below on 2026-10-15, after the merge of `6377575a`:
-# seventy-eight cases (234 units) here, of a ninety-two-case, 276-unit matrix with
-# the presubmit file's fourteen.
+# report alone measured 62s on the dev install). It is the entry after
+# manage-cluster-exclusion-installer-route-probe below. Counted over every
+# entry below on 2026-10-15, after the merge of `6377575a`: seventy-eight
+# cases (234 units) here, of a ninety-two-case, 276-unit matrix with the
+# presubmit file's fourteen (the 2026-10-09 paragraph below counted ninety
+# before the two entries that joined after it).
 # No stack, so the infra lock is untouched.
 # 2026-10-09 adds stop-on-permission-refusal: one case, three units at a
 # 1200s hint (one front-door turn and one delegated card; noop, no infra
