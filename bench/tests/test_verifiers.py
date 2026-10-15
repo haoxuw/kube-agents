@@ -7782,6 +7782,10 @@ def test_readiness_case_accepts_the_cell_however_the_agent_wrapped_it(objective,
         # A line without the cell slot is the earlier frame and fails the slots that need it.
         ("the-declared-lines-grade-the-finding-a-risk", "\n".join(_readiness_line(c).rsplit("; cell:", 1)[0] for c in _SLOTS)),
         ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c).rsplit("; cell:", 1)[0] for c in _SLOTS)),
+        # Three complete lines and one that stops at a wrong grade without the cell slot: the
+        # frame every cluster must satisfy refuses it, so the grade and cell objectives, whose
+        # forbidden patterns need the slot to fire, cannot be passed around on that line.
+        ("every-seeded-cluster-has-a-declared-line", "\n".join(_readiness_line(c) if c != _SLOTS[1] else _readiness_line(c, grade="blocker").rsplit("; cell:", 1)[0] for c in _SLOTS)),
     ],
 )
 def test_readiness_case_refuses_a_missing_or_foreign_cell(objective, text):

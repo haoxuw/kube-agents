@@ -99,8 +99,12 @@ fixtures:
 verification_spec:
   # One line per seeded cluster, fixed vocabulary, the cluster named at the
   # start of the line; every pattern matches the whole declared frame, anchored
-  # at both ends, with the line's decoration folded first. Each value objective
-  # also forbids a frame whose value slot holds anything but the right word.
+  # at both ends, with the line's decoration folded first, and the frame every
+  # cluster must satisfy carries all five slots, the cell included, so a line
+  # that drops the slot fails here and the value objectives below, whose
+  # forbidden patterns need the slot to fire, cannot be passed around on it.
+  # Each value objective also forbids a frame whose value slot holds anything
+  # but the right word.
   - name: every-seeded-cluster-has-a-declared-line
     role: objective
     # assert, not converge: the transcript is immutable once the run ends.
@@ -114,7 +118,7 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:b}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^\n]+$)'
+        - '(?ms)\A(?=.*^{cluster:a}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: [^\n]+$)(?=.*^{cluster:b}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: [^\n]+$)(?=.*^{cluster:c}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: [^\n]+$)(?=.*^{cluster:d}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: [^\n]+$)'
 
   - name: the-declared-lines-say-the-control-plane-is-zonal
     role: objective
