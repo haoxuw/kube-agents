@@ -386,7 +386,8 @@ RULE_NONE = "no rules"
 
 
 # The per-entry rules (readiness_rules/, one module per entry of the upgrade-failure
-# catalogue; the package docstring is the contract), run after the three rules above, in
+# catalogue; the package docstring is the contract), run after the PDB, maintenance, skew and
+# webhook rules above, in
 # this order, which is the order the table and the JSON list their findings in. One list,
 # grouped by entry number, the entry in the comment.
 EXTRA_RULES = [

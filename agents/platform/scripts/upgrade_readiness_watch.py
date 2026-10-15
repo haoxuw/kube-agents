@@ -55,12 +55,12 @@ project the sandbox cannot finish leaves only its own clusters ungraded.
 Where it runs, and how. The agent container carries no ``gcloud`` or
 ``kubectl``; both live in the shell sandbox behind the credential proxy, and
 the sandbox login never executes a file under the agent-owned ``/opt/data``
-(``deploy/sandbox/Dockerfile``). So the skill's two scripts are read here, from
-the agent image's copy under ``/opt/platform-template``, and handed to
-``python3 -I -`` on the command's stdin wrapped in a small loader that
-registers ``upgrade_readiness`` as a module before running
-``fleet_upgrade_report.main``: the same route ``stall_watch.py`` takes with
-``stall_report.py``. ``-I`` keeps the sandbox's working directory off the
+(``deploy/sandbox/Dockerfile``). So every module under the skill's ``scripts/``
+except its tests, with the data files beside them, is read here from the agent
+image's copy under ``/opt/platform-template`` and handed to ``python3 -I -`` on
+the command's stdin behind a loader, a meta-path finder that serves the shipped
+set, before running ``fleet_upgrade_report.main``: the route ``stall_watch.py``
+takes with ``stall_report.py``, widened to a package. ``-I`` keeps the sandbox's working directory off the
 module path. The loader gives the report script a private temporary directory
 of its own (``tempfile.mkdtemp``, owned by the sandbox login and readable by
 nobody else) for its JSON output and its rollout record, reads the output

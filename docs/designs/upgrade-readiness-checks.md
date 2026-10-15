@@ -170,8 +170,9 @@ Closest thing on `main`: `fleet-upgrade-verification --readiness` already emits
 `blocked`/`unknown`/`ready` per cluster from drain-blocking PDBs, fail-closed webhooks with an
 unreachable backend in the upgrade's path or able to refuse the control plane's bootstrap RBAC
 writes (ClusterRoles and ClusterRoleBindings; Roles and RoleBindings in `kube-system` and
-`kube-public`), maintenance exclusions, skew and the per-entry rules registered in its
-`readiness_rules/` package, each a blocker or a risk that the Scope table credits as it lands. Two
+`kube-public`), maintenance exclusions, skew and the per-entry rules registered in
+`upgrade_readiness.EXTRA_RULES`, each a module of its `readiness_rules/` package and each a
+blocker or a risk that the Scope table credits as it lands. Two
 things are missing — the verdict is per cluster, not per family, and it reads a subset of the
 checks here, not every one. It is on the schedule for the clusters that are behind: the upgrade
 audit's `upgrade-blocked` check runs it weekly and files the join, and the daily

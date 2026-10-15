@@ -355,11 +355,6 @@ NOTE_READ_FAILED = "{kinds} not read ({error}); the per-entry rules that need th
 # A read's error in the note column: collapsed to one line and cut to this, the length the
 # fold gives a rule's unknown reason; the JSON carries it whole.
 NOTE_ERROR_CHARS = readiness_rules.NOTE_EXCERPT_CHARS
-# What the JSON keeps of each audit-log read a rule performed through the context, beside
-# the rules' findings, and how a failed one is listed under the table: a read failure like
-# a failed kubectl, with the member it belongs to, exit code 1, the rules that read it
-# `unknown`.
-AUDIT_LOG_SUMMARY_KEYS = audit_log.SUMMARY_KEYS  # what `audit_log.summaries` keeps of each read for the JSON
 # A failed audit-log read is listed under the table in its own block and under
 # `readiness.audit_log_failures` in the JSON, apart from `errors`: the member stays graded
 # by the rules that did not need the read, the rule that did says `unknown`, and the daily
@@ -983,8 +978,9 @@ def readiness_context(member: dict, at: datetime, clusters: list[dict] | None = 
 
 
 def assess_readiness(cluster: dict, member: dict, read: dict, at: datetime, fleet: list[dict] | None = None) -> dict:
-    """The member's `readiness` object: the three rules, then EXTRA_RULES, against the row's
-    target. `fleet` is every cluster record in the run, for the rules that compare peers."""
+    """The member's `readiness` object: the PDB, maintenance, skew and webhook rules, then
+    EXTRA_RULES, against the row's target. `fleet` is every cluster record in the run, for the
+    rules that compare peers."""
     target = parse_version(member["target_version"]) if member["target_version"] else None
     master = parse_version(member["control_plane_version"])
     pools = _pool_records(cluster, member)

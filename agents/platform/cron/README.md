@@ -208,10 +208,11 @@ without it is a custom grant) or the project id in place of the number
 (`spec.harness.projectId` has to be the id; `UPGRADE_READINESS_PROJECTS` for a
 hand run).
 
-It runs the skill the way `stall-watch` runs `stall_report.py`: the two scripts
-are read from the agent image's `/opt/platform-template/skills/` copy and
-handed to `python3 -I -` in the sandbox on stdin, behind a loader that
-registers `upgrade_readiness` before running `fleet_upgrade_report.main`. The
+It runs the skill the way `stall-watch` runs `stall_report.py`: every module
+under the skill's `scripts/` except its tests, with the data files beside them,
+is read from the agent image's `/opt/platform-template/skills/` copy and handed
+to `python3 -I -` in the sandbox on stdin, behind a loader (a meta-path finder
+serving the shipped set) before running `fleet_upgrade_report.main`. The
 loader gives the report a private `tempfile.mkdtemp` directory for its JSON
 output and rollout record, so nothing the model can write to is on the path
 the result crosses, and removes it afterwards; the sandbox's `/opt/data` is
