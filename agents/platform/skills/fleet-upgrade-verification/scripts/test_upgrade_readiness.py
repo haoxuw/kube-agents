@@ -539,13 +539,20 @@ class ExtraRulesTest(unittest.TestCase):
         for name, (evaluate, reason) in cases.items():
             broken = rule_module(name, evaluate=evaluate)
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[broken, fine])
-            self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [(name, f"rule raised TypeError({reason!r}); not evaluated")], name)
+            self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [(name, reason)], name)
             self.assertEqual(folded["rules"][name], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0}, name)
             self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
             self.assertEqual(folded["notes"], [], name)
         # A `describe` that renders empty is the same blank text.
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("mute", evaluate=returning(risks=[{"what": "x"}]), describe=lambda finding: ""), fine])
-        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("mute", "rule raised TypeError(\"a risks finding's text is blank\"); not evaluated")])
+        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("mute", "a risks finding's text is blank")])
+        # The bare reason is the fold's own probe's: a TypeError the rule itself raises is still
+        # what it raised, under `rule raised`.
+        def raising_type_error(*args):
+            raise TypeError("mine")
+
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("typed", evaluate=raising_type_error), fine])
+        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("typed", "rule raised TypeError('mine'); not evaluated")])
 
     def test_a_finding_json_cannot_carry_is_the_rules_defect_not_the_writers(self):
         # The findings go to `--output` as they are; a set, a datetime or a tuple-keyed dict
@@ -590,7 +597,7 @@ class ExtraRulesTest(unittest.TestCase):
             ctx = context()
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module(name, evaluate=writing(value)), fine])
             self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
-            self.assertIn("the rule left the audit-log cache unreadable: ", folded["unknown"][0]["reason"], name)
+            self.assertTrue(folded["unknown"][0]["reason"].startswith("the rule left the audit-log cache unreadable: "), (name, folded["unknown"][0]["reason"]))
             self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
             self.assertEqual(audit_log.summaries(ctx), {}, name)
             json.dumps(folded)

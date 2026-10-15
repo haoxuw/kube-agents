@@ -1355,23 +1355,29 @@ def describe_webhook_finding(finding: dict) -> str:
 # --------------------------------------------------------------------- extra rules
 
 
+class RuleDefect(TypeError):
+    """A rule's result, or the audit-log cache as the rule left it, does not meet the contract:
+    raised by the fold's own probes (`_rule_result`, `_unknown_entry`) with the defect as its
+    text, and recorded by the fold as that text, not as the rule raising, which it did not."""
+
+
 def _unknown_entry(item, rule_id: str, entry, can_block: bool) -> dict:
     """One `unknown` entry as the JSON carries it: a dict with `reason` (whole), the rule's
     id and entry, whether the rule could have blocked, and the `text` the note column prints,
     the reason on one line of at most NOTE_EXCERPT_CHARS. `item` is a non-empty string or a
-    dict whose `reason` or `detail` is one; anything else raises, a shape defect the fold
-    makes the rule's `unknown`."""
+    dict whose `reason` or `detail` is one; anything else raises `RuleDefect`, the shape
+    defect the fold records as the rule's `unknown`."""
     if isinstance(item, dict):
         out = dict(item)
         reason = next((out[key] for key in (REASON_KEY, DETAIL_KEY) if isinstance(out.get(key), str) and out[key].strip()), None)
         if reason is None:
-            raise TypeError(UNKNOWN_WITHOUT_REASON.format(keys=sorted(str(key) for key in out)))
+            raise RuleDefect(UNKNOWN_WITHOUT_REASON.format(keys=sorted(str(key) for key in out)))
     elif isinstance(item, str):
         if not item.strip():  # named as what it is, not as "str, not a string"
-            raise TypeError(UNKNOWN_EMPTY_TEXT)
+            raise RuleDefect(UNKNOWN_EMPTY_TEXT)
         out, reason = {}, item
     else:
-        raise TypeError(UNKNOWN_ENTRY_NOT_TEXT.format(type=type(item).__name__))
+        raise RuleDefect(UNKNOWN_ENTRY_NOT_TEXT.format(type=type(item).__name__))
     out[REASON_KEY] = reason
     out[RULE_KEY] = rule_id
     out[ENTRY_KEY] = entry
@@ -1388,9 +1394,10 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     prefixed with the rule's id, a blocker from a rule that cannot block kept as a risk with
     a note, every `unknown` entry in the dict form `_unknown_entry` gives, and the whole, as
     it will be written, a JSON value; and the audit-log cache, the one thing the report reads
-    that a rule may write, as `audit_log.read` leaves it. Raises on a shape the contract
-    forbids, and whatever the rule raises; the caller turns either into the rule's
-    `unknown`."""
+    that a rule may write, as `audit_log.read` leaves it. Raises `RuleDefect` naming a shape
+    the contract forbids or the cache damage, and lets through whatever the rule raises; the
+    caller records the first as that defect and the second as the rule raising, either as the
+    rule's `unknown`."""
     snapshot = audit_log.cache_snapshot(context)
     try:
         result = rule.evaluate(*_rule_arguments(cluster, member, read, target, context))
@@ -1399,34 +1406,34 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
         if damage is not None:
             audit_log.cache_restore(context, snapshot)
     if damage is not None:
-        raise TypeError(CACHE_DEFECT_REASON.format(defect=damage))
+        raise RuleDefect(CACHE_DEFECT_REASON.format(defect=damage))
     if result is None:
         result = {}
     if not isinstance(result, dict):
-        raise TypeError(RESULT_NOT_A_DICT.format(type=type(result).__name__))
+        raise RuleDefect(RESULT_NOT_A_DICT.format(type=type(result).__name__))
     foreign = sorted(str(key) for key in result if key not in RULE_RESULT_KEYS)
     if foreign:
-        raise TypeError(RESULT_UNKNOWN_KEY.format(keys=foreign, expected=list(RULE_RESULT_KEYS)))
+        raise RuleDefect(RESULT_UNKNOWN_KEY.format(keys=foreign, expected=list(RULE_RESULT_KEYS)))
     out = {}
     for key in RULE_RESULT_KEYS:
         value = result.get(key)
         if value is None:
             value = []
         if not isinstance(value, list):
-            raise TypeError(RESULT_KEY_NOT_A_LIST.format(key=key, type=type(value).__name__))
+            raise RuleDefect(RESULT_KEY_NOT_A_LIST.format(key=key, type=type(value).__name__))
         out[key] = list(value)
     for kind in ("blocking", "risks"):
         stamped = []
         for finding in out[kind]:
             if not isinstance(finding, dict):
-                raise TypeError(FINDING_NOT_A_DICT.format(kind=kind, type=type(finding).__name__))
+                raise RuleDefect(FINDING_NOT_A_DICT.format(kind=kind, type=type(finding).__name__))
             finding = dict(finding)
             if TEXT_KEY not in finding:
                 finding[TEXT_KEY] = rule.describe(finding)
             if not isinstance(finding[TEXT_KEY], str):
-                raise TypeError(FINDING_TEXT_NOT_TEXT.format(kind=kind, type=type(finding[TEXT_KEY]).__name__))
+                raise RuleDefect(FINDING_TEXT_NOT_TEXT.format(kind=kind, type=type(finding[TEXT_KEY]).__name__))
             if not finding[TEXT_KEY].strip():
-                raise TypeError(FINDING_TEXT_BLANK.format(kind=kind))
+                raise RuleDefect(FINDING_TEXT_BLANK.format(kind=kind))
             finding[TEXT_KEY] = readiness_rules.one_line(finding[TEXT_KEY])
             finding[RULE_KEY] = rule_id
             finding[ENTRY_KEY] = entry
@@ -1434,9 +1441,9 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
         out[kind] = stamped
     for note in out["notes"]:
         if not isinstance(note, str):
-            raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
+            raise RuleDefect(NOTE_NOT_TEXT.format(type=type(note).__name__))
         if not note.strip():
-            raise TypeError(NOTE_BLANK)
+            raise RuleDefect(NOTE_BLANK)
     if not can_block and out["blocking"]:
         for demoted in out["blocking"]:  # re-graded under whichever word it carries, so the JSON never carries a risk that says it blocks
             if GRADE_KEY in demoted:
@@ -1451,11 +1458,11 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     try:
         json.dumps(out, allow_nan=False)
     except (TypeError, ValueError) as e:
-        raise TypeError(RESULT_NOT_JSON.format(error=e)) from e
+        raise RuleDefect(RESULT_NOT_JSON.format(error=e)) from e
     except readiness_rules.NOT_A_RULE_DEFECT:
         raise
     except BaseException as e:  # noqa: BLE001 - a value nested past the recursion limit, or one whose encoding raises otherwise, is not JSON either: named as the value's defect, not as the rule raising
-        raise TypeError(RESULT_NOT_JSON.format(error=readiness_rules.exception_text(e))) from e
+        raise RuleDefect(RESULT_NOT_JSON.format(error=readiness_rules.exception_text(e))) from e
     return out
 
 
@@ -1540,9 +1547,10 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     under that id. Each rule is handed its own copies of `cluster`, `member`, `read` and the
     context's fleet records (`_rule_arguments`), so what it writes to them reaches no other
     rule and not the report. A rule that raises (`SystemExit` included; `KeyboardInterrupt` and
-    `GeneratorExit` alone pass through), returns a shape the contract forbids, or returns a
-    value JSON cannot carry is one `unknown` entry naming the error, never a crash: one
-    rule's defect must not hide the others' findings. So is a module whose `RULE_ID` is not
+    `GeneratorExit` alone pass through), returns a shape the contract forbids, returns a
+    value JSON cannot carry, or damages the audit-log cache is one `unknown` entry naming
+    what it raised, or the shape, value or damage at fault, never a crash: one rule's defect
+    must not hide the others' findings. So is a module whose `RULE_ID` is not
     a string, whose `ENTRY` is not a JSON value or whose `CAN_BLOCK` is not a bool, under
     its module name: the three are checked before anything is derived from them, so the
     fold emits nothing it has not probed or built from checked values. A blocker from a
@@ -1571,6 +1579,8 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
                 result = _rule_result(rule, rule_id, entry, can_block, cluster, member, read, target, context)
         except readiness_rules.NOT_A_RULE_DEFECT:
             raise
+        except RuleDefect as e:  # the fold's own probe refused the result, or the cache the rule left: named as that defect, the rule having returned
+            defect = readiness_rules.one_line(str(e), readiness_rules.ERROR_EXCERPT_CHARS)
         except BaseException as e:  # noqa: BLE001 - a module's defect, in its attributes or its result, SystemExit included, is a reason the verdict is unknown, not a crash
             error = readiness_rules.exception_text(e)  # never raises, and is capped
             if rule_id is None:  # the attribute reads raised: named by what can still be read, with no entry and the conservative `can_block`
