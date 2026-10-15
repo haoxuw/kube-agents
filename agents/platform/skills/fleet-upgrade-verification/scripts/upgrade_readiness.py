@@ -412,8 +412,8 @@ TIER_KEY = "tier"
 RULE_ID_ATTRIBUTE = "RULE_ID"
 ENTRY_ATTRIBUTE = "ENTRY"
 CAN_BLOCK_ATTRIBUTE = "CAN_BLOCK"
-# What names a rule that has no RULE_ID, or one that fails the check below: its module
-# name, for the unknown entry it earns.
+# What names a rule that has no RULE_ID (it is keyed and evaluated under this name) or one
+# whose attributes fail the check below (its unknown entry carries this name).
 MODULE_NAME_ATTRIBUTE = "__name__"
 RULE_PREFIX_FORMAT = "{rule}: {text}"
 RULE_FAILED_REASON = "rule raised {error}; not evaluated"

@@ -8,7 +8,7 @@ One home for the tables the rules read. Every constant is named for the catalogu
 serves, so any other reader of the same shapes (a review of what an upgrade did, after the
 fact) imports this module instead of carrying a copy. A table is appended to, never
 rewritten: a constant keeps its name and its shape once it exists. Every table names its
-source beside it, and the day it was read where the source is a page that moves. The tables
+source beside it; a date beside one is the day a page that moves was read. The tables
 are deliberately small: a rule whose input has no row here grades `unknown` with the reason
 rather than guessing (docs/designs/upgrade-readiness-checks.md, "What a run produces").
 Nothing here is computed from a cluster and nothing here runs a command.
@@ -329,8 +329,8 @@ NODE_OS_LINUX = "linux"
 NODE_OS_WINDOWS = "windows"
 CONTAINERD_MAJOR_1 = 1
 CONTAINERD_MAJOR_2 = 2
-# (first minor that ships the major, major), ascending; a minor below the first row ships
-# the row's predecessor, here containerd 1.
+# Per node OS family, (first minor that ships containerd 2, 2); a minor below it ships
+# CONTAINERD_MAJOR_BEFORE_TABLE, containerd 1.
 CONTAINERD_MAJOR_BY_GKE_MINOR = {
     NODE_OS_LINUX: ((1, 33), CONTAINERD_MAJOR_2),
     NODE_OS_WINDOWS: ((1, 35), CONTAINERD_MAJOR_2),

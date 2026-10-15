@@ -4,6 +4,7 @@ the rules share, the `finding` helpers, the shape tables' sources, and the rules
 here, on canned cluster records and kubectl objects."""
 
 import os
+import re
 import sys
 import time
 import unittest
@@ -17,6 +18,8 @@ import upgrade_shape_tables as tables  # noqa: E402
 from fleet_upgrade_report import parse_version  # noqa: E402
 from readiness_rules import finding, zonal_control_plane  # noqa: E402
 
+CATALOGUE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5), "docs", "designs", "upgrade-failure-catalogue.md")
+CATALOGUE_HEADING_RE = re.compile(r"^### (\d+)\. ", re.MULTILINE)
 TARGET = parse_version("1.35.1-gke.1000")
 AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
 LAGGING = "1.34.11-gke.1000"
@@ -132,6 +135,12 @@ class ContractTest(unittest.TestCase):
         self.assertIn(zonal_control_plane, r.EXTRA_RULES)
 
     def test_entries_are_catalogue_numbers_and_read_kinds_are_named_once(self):
+        # The catalogue's scenario headings are the entry numbers a rule may claim.
+        with open(CATALOGUE_PATH, encoding="utf-8") as f:
+            catalogue_entries = {int(number) for number in CATALOGUE_HEADING_RE.findall(f.read())}
+        self.assertGreaterEqual(len(catalogue_entries), 20)
+        for module in r.EXTRA_RULES:
+            self.assertIn(module.ENTRY, catalogue_entries, module.RULE_ID)
         self.assertEqual([m.ENTRY for m in r.EXTRA_RULES], sorted(m.ENTRY for m in r.EXTRA_RULES))
         self.assertEqual(shared.READ_KINDS, ("daemonset", "cronjob", "pvc", "networkpolicy", "namespace", "pods", "node", "storageclass", "pv"))
         self.assertEqual(len(shared.READ_KINDS), len(set(shared.READ_KINDS)))

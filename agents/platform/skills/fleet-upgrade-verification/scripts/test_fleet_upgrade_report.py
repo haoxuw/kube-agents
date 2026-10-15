@@ -22,6 +22,8 @@ import readiness_rules  # noqa: E402
 import upgrade_readiness as readiness  # noqa: E402
 from readiness_rules import audit_log, zonal_control_plane  # noqa: E402
 
+PAGE_BOUND_CLAUSE = audit_log.PAGE_CLAUSE[: audit_log.PAGE_CLAUSE.index("{")]  # the bound the window and every later page carry
+
 ZONAL = zonal_control_plane.RULE_ID
 
 # Every resolver asks the operator's answer when a run passes neither scope flag:
@@ -1280,8 +1282,8 @@ class FakeReadinessCommands(FakeGcloud):
             name = match.group(1) if match else None
             if name in self.failing_logging:
                 return -1, "", "timed out after 60 seconds"
-            if 'timestamp<"' in filter_text:
-                return 0, "[]", ""  # a later page: the canned lists are one page
+            if filter_text.count(PAGE_BOUND_CLAUSE) > 1:
+                return 0, "[]", ""  # a later page (the window's bound and the page's): the canned lists are one page
             entries = self.audit_by_cluster.get(name, [])
             removed = [e for e in entries if "k8s.io/removed-release" in (e.get("labels") or {})]
             page = [e for e in entries if e not in removed] if 'k8s.io/deprecated"="true"' in filter_text else removed
@@ -1632,7 +1634,7 @@ class ReadinessTest(unittest.TestCase):
         # The skipped reads are recorded per kind, so the JSON cannot be read as nine
         # successful reads, and the note names them from that record.
         self.assertIn(readiness_rules.NO_READ_RAN_REASON, b["note"])
-        self.assertNotIn("the reads after it were skipped", b["note"])
+        self.assertNotIn(readiness_rules.LATER_READS_SKIPPED_REASON, b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
         self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
         self.assertEqual({kind: readiness_rules.NO_READ_RAN_REASON for kind in readiness_rules.READ_KINDS}, b["read_errors"])
