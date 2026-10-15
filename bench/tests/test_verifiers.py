@@ -7724,6 +7724,8 @@ _READINESS_CELL = (
     "so schedule the control-plane upgrade in a maintenance window and have API clients retry with backoff; "
     "running pods are unaffected, and only a regional cluster, a recreate, keeps the API available"
 )
+# The same cell as `report.json` carries it (`readiness.risks[].text`): the column's rule prefix is the table's.
+_READINESS_CELL_BARE = _READINESS_CELL.removeprefix("zonal-control-plane: ")
 _READINESS_SLOT_OBJECTIVES = (
     "every-seeded-cluster-has-a-declared-line",
     "the-declared-lines-say-the-control-plane-is-zonal",
@@ -7770,6 +7772,15 @@ def test_readiness_case_accepts_the_cell_however_the_agent_wrapped_it(objective,
     assert _readiness_case_grades(objective, text)
 
 
+@pytest.mark.parametrize("objective", _READINESS_SLOT_OBJECTIVES)
+@pytest.mark.parametrize("wrap", ["{cell}", '"{cell}"'])
+def test_readiness_case_accepts_the_cell_as_the_json_carries_it(objective, wrap):
+    # An agent that reads `report.json` copies the cell without the column's rule prefix;
+    # the rule slot names the rule, so the cell proves the report ran either way.
+    text = "\n".join(_readiness_line(c, wrap.format(cell=_READINESS_CELL_BARE)) for c in _SLOTS)
+    assert _readiness_case_grades(objective, text)
+
+
 @pytest.mark.parametrize(
     "objective,text",
     [
@@ -7777,6 +7788,7 @@ def test_readiness_case_accepts_the_cell_however_the_agent_wrapped_it(objective,
         ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, "none") for c in _SLOTS)),
         ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, "zonal-control-plane: something else") for c in _SLOTS)),
         ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, '"zonal-control-plane: something else"') for c in _SLOTS)),
+        ("the-declared-lines-quote-the-reports-cell", "\n".join(_readiness_line(c, "control plane is zonal (us-central1-a): something else") for c in _SLOTS)),
         # The grade slot names its subject; a wrapped cell does not make `blocker` a risk.
         ("the-declared-lines-grade-the-finding-a-risk", "\n".join(_readiness_line(c, f'"{_READINESS_CELL}"', grade="blocker") for c in _SLOTS)),
         # A line without the cell slot is the earlier frame and fails the slots that need it.

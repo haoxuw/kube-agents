@@ -15,9 +15,10 @@
 # rule id (`zonal-control-plane`) and the grade (`risk`) are the report's
 # vocabulary, which the skill's own text also names, so neither slot alone
 # proves the report ran. The cell slot does: it is the rule's `describe` text as
-# the `risks` column prints it, beginning `zonal-control-plane: control plane is
-# zonal (<zone>): the API is unavailable for minutes while GKE replaces its one
-# replica`, wording the skill paraphrases and the cluster listing cannot supply;
+# the `risks` column prints it, beginning `control plane is zonal (<zone>): the
+# API is unavailable for minutes while GKE replaces its one replica` behind the
+# column's `zonal-control-plane: ` prefix or without it, as `report.json`
+# carries it, wording the skill paraphrases and the cluster listing cannot supply;
 # a report whose rule is missing prints no such cell, and one whose rule blocks
 # prints it under `other blockers` with a grade the grade slot refuses, so a
 # regression of the rule reds this case rather than passing on the location and
@@ -179,11 +180,15 @@ verification_spec:
 
   # The report's own wording: the cell the risks column prints for the finding
   # is the rule's `describe` text, which the skill paraphrases and the cluster
-  # listing cannot supply. A report whose rule is missing or blocks prints no
-  # such cell, so the slot reads `none` or something else and the line fails
-  # here, whatever the other slots say. The cell carries a `;`, which keeps the
-  # verifier's value-wrap fold from removing a quote or angle bracket the agent
-  # kept around it, so both patterns admit one opener before the text.
+  # listing cannot supply. The column prints it behind `zonal-control-plane: `
+  # and `report.json` carries it bare (`readiness.risks[].text`); an agent that
+  # reads the JSON copies the bare text, so the prefix is optional here, the
+  # rule slot having named the rule already. A report whose rule is missing or
+  # blocks prints no such cell, so the slot reads `none` or something else and
+  # the line fails here, whatever the other slots say. The cell carries a `;`,
+  # which keeps the verifier's value-wrap fold from removing a quote or angle
+  # bracket the agent kept around it, so both patterns admit one opener before
+  # the text.
   - name: the-declared-lines-quote-the-reports-cell
     role: objective
     mode: assert
@@ -196,9 +201,9 @@ verification_spec:
         - drift-outlier
         - zonal-skew-scheduling
       any_of_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: ["''“‘<]?zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica[^\n]*$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: ["''“‘<]?(?:zonal-control-plane: )?control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica[^\n]*$'
       forbidden_patterns:
-        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: (?!["''“‘<]?zonal-control-plane: control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica)[^\n]*$'
+        - '(?m)^{cluster:any}(?:\s*\([^)\n]*\))?: kind cluster; control plane: [^;\n]+; readiness rule: [^;\n]+; graded as: [^;\n]+; cell: (?!["''“‘<]?(?:zonal-control-plane: )?control plane is zonal \([a-z0-9-]+\): the api is unavailable for minutes while gke replaces its one replica)[^\n]*$'
 
   - name: no-invented-cves
     role: objective
