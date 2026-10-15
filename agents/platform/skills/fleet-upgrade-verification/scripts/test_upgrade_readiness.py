@@ -2,6 +2,7 @@
 """Unit tests for upgrade_readiness.py: the PDB, webhook, maintenance and skew rules on canned objects."""
 
 import collections
+import copy
 import json
 import os
 import sys
@@ -733,6 +734,32 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertIn("cache['audit_log'] is OrderedDict, not a dict of read results", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["reader"])
         self.assertEqual(sorted(audit_log.summaries(reordered)), ["deprecated"])
+        # A writer that leaves, under the cache key, an object of its own class whose
+        # `__deepcopy__` returns a dict of the stored shape: the snapshot names it by its class
+        # and never copies it (a copy would run that method, and the writer would pass as clean
+        # while the reader after it was charged with a read the fabricated snapshot held), so
+        # the writer is charged at its own check, the key is dropped, and the reader after it
+        # reads afresh and keeps its findings.
+        probe = context()
+        audit_log.read_removed(probe)
+        stored = copy.deepcopy(probe[shared.CONTEXT_CACHE][audit_log.CACHE_KEY])
+
+        class Copier:
+            def __deepcopy__(self, memo):
+                return copy.deepcopy(stored)
+
+        def storing_copier(cluster, member, read, target, ctx):
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = Copier()
+            out = shared.new_result()
+            out["risks"].append({"what": "w"})
+            return out
+
+        copied = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, copied, rules=[rule_module("writer", evaluate=storing_copier), rule_module("reader", evaluate=reading_deprecated_log)])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["writer"])
+        self.assertIn("cache['audit_log'] is Copier, not a dict of read results", folded["unknown"][0]["reason"])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["reader"])
+        self.assertEqual(sorted(audit_log.summaries(copied)), ["deprecated"])
         # A value of a JSON type's subclass a writer leaves inside a read it created (its own
         # snapshot held no read to compare), and a stored entry of a dict subclass whose `get`
         # raises: both are named at the writer's own check by the exact-type walk, so no
@@ -860,13 +887,14 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"], name)
             self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"], name)
             self.assertEqual(audit_log.cache_defect(ctx), None, name)
-        # An object whose comparison raises with an unprintable argument: the guard's own
-        # rendering never raises, the rule is charged, and the restore runs for the next rule.
+        # A value of a JSON type's subclass whose comparison would raise with an unprintable
+        # argument: the by-class walk names it before any comparison runs, the rule is charged,
+        # and the restore runs for the next rule.
         class Unprintable:
             def __repr__(self):
                 raise RuntimeError("no repr")
 
-        class Evil(int):  # a value JSON carries, so the shape probe passes it and the comparison is what raises
+        class Evil(int):  # an int subclass: the walk names it by class, so its `__eq__` never runs
             def __eq__(self, other):
                 raise ValueError(Unprintable())
 
@@ -882,9 +910,9 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertIn("the 'removed' entry holds a value of class Evil at the entry['page_limit'], not a JSON value", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"])
         self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"])
-        # The same guards hold when what a rule stored exits instead of raising: an object
-        # whose copy raises SystemExit is uncopyable, one whose comparison does is damage,
-        # the rule is charged either way, and the run goes on.
+        # The same holds when what a rule stored would exit instead of raising: an object whose
+        # copy would raise SystemExit and an int subclass whose comparison would are both named
+        # by class before either method runs, the rule is charged either way, and the run goes on.
         class ExitingCopy:
             def __deepcopy__(self, memo):
                 raise SystemExit(4)

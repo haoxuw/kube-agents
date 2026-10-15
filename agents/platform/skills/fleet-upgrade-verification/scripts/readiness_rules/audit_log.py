@@ -739,10 +739,13 @@ def _plain_json_defect(value, path: str = ENTRY_PATH) -> str | None:
 
 
 class ForeignMapping:
-    """A snapshot's stand-in for an `audit_log` entry that is a mapping of another class than
-    `dict` (an OrderedDict, a defaultdict, a rule's own subclass): `read` stores a plain dict
-    and keeps one, so the class is a rule's write, named as such by the defect probe, never
-    iterated by the snapshot, and dropped by the restore like an entry it could not copy."""
+    """A snapshot's stand-in for an `audit_log` entry that is not a plain `dict`: a mapping of
+    another class (an OrderedDict, a defaultdict, a rule's own subclass) or any other object
+    (a scalar, a list, an instance of a rule's class). `read` stores a plain dict and keeps
+    one, so the class is a rule's write, named as such by the defect probe, never iterated or
+    copied by the snapshot (a copy would run the object's own `__deepcopy__`, and a rule's
+    method then decides what the snapshot believes), and dropped by the restore like an entry
+    it could not copy."""
 
     __slots__ = ("type_name",)
 
@@ -754,17 +757,13 @@ CACHE_ABSENT = object()  # a snapshot's stand-in for a context with no cache key
 def _copy_logs(logs):
     """A deep copy of the cache's `audit_log` entry, entry by entry, each a plain JSON value or
     a marker: an entry holding a value of a class `read` never stores is a ForeignValue carrying
-    the walk's detail, one whose walk or copy raises is UNCOPYABLE, and a mapping of another
-    class than `dict` is a ForeignMapping, so a snapshot never raises or runs a rule's methods,
+    the walk's detail, one whose walk or copy raises is UNCOPYABLE, and an entry that is not a
+    plain `dict` at all is a ForeignMapping named by its class, so a snapshot never raises or
+    runs a rule's methods (`copy.deepcopy` of a rule's object would run its `__deepcopy__`),
     a defect is named where it was made, and a restore can drop what it cannot put back."""
-    if not isinstance(logs, dict):
-        try:
-            return copy.deepcopy(logs)
-        except NOT_A_RULE_DEFECT:
-            raise
-        except BaseException:  # noqa: BLE001 - whatever the object refuses with, SystemExit included, the snapshot still stands
-            return UNCOPYABLE
-    if type(logs) is not dict:  # a mapping of another class is a rule's write, whatever it holds: a defect named by its class, as `read` reads it
+    if logs is None:
+        return None
+    if type(logs) is not dict:  # a mapping of another class, or any other object, is a rule's write, whatever it holds: a defect named by its class, as `read` reads it, and never copied through its own methods
         return ForeignMapping(type(logs).__name__)
     try:
         pairs = list(logs.items())

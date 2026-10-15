@@ -2313,7 +2313,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(set(bare), set(readiness_rules.CONTEXT_KEYS))
         self.assertEqual((bare["clusters"], bare["pools"], bare["master"], bare["autopilot"]), ([], [], None, False))
 
-    def test_an_audit_log_read_runs_through_the_context_and_a_failure_is_an_error_row(self):
+    def test_an_audit_log_read_runs_through_the_context_and_a_failure_is_the_rules_unknown_not_an_error_row(self):
         def evaluate(cluster, member, read, target, context):
             out = readiness_rules.new_result()
             log = audit_log.read_removed(context)
