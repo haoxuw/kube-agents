@@ -447,14 +447,14 @@ def read(context: dict, which: str) -> dict:
     """
     if which not in READS:  # refused before any command runs, and named as the call, not as cache damage
         raise ValueError(UNKNOWN_READ_CALL.format(which=which, reads=READS))
-    cache = context.setdefault(CONTEXT_CACHE, {})
-    if not isinstance(cache, dict):  # a context built by hand; the fold puts a rule's damage back before the next rule
+    cache = context.get(CONTEXT_CACHE)
+    if type(cache) is not dict:  # by class, as the fold's checks read it: a context built by hand, or a mapping of another class, gets a plain dict of its own (the fold normalises its context once before the first rule)
         cache = context[CONTEXT_CACHE] = {}
     logs = cache.get(CACHE_KEY)
     if type(logs) is not dict:  # a context built by hand, or a mapping of a rule's own class: `read` keeps a plain dict of its own; the fold puts a rule's damage back before the next rule
         logs = cache[CACHE_KEY] = {}
     cached = logs.get(which)
-    if type(cached) is dict and cached.get(READ_KEY) == which:  # by class, as the fold's checks read it: an entry of another class is not a cached read
+    if _read_result_defect(which, cached) is None:  # cached only when it is a read result by the probe's own test: an inherited entry the probe faults is read afresh, never handed to a rule as the read
         return copy.deepcopy(cached)
     result = {
         "read": which,
@@ -571,7 +571,7 @@ def cache_defects(context) -> list[str]:
     if not isinstance(context, dict) or CONTEXT_CACHE not in context:
         return []
     cache = context[CONTEXT_CACHE]
-    if not isinstance(cache, dict):
+    if type(cache) is not dict:  # by class, before any method of it runs
         return [CACHE_NOT_A_DICT.format(type=type(cache).__name__)]
     return _log_defects(_copy_logs(cache.get(CACHE_KEY)))
 
@@ -717,7 +717,7 @@ def cache_snapshot(context) -> tuple:
     when the key holds None, a defect the rule inherits) and a copy of its `audit_log`
     entry (None when absent; an entry that cannot be copied is UNCOPYABLE). Never raises."""
     cache = context.get(CONTEXT_CACHE, CACHE_ABSENT) if isinstance(context, dict) else CACHE_ABSENT
-    logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
+    logs = cache.get(CACHE_KEY) if type(cache) is dict else None  # by class: a mapping of another class is a defect the probe names, and none of its methods runs here
     return cache, _copy_logs(logs)
 
 
@@ -736,7 +736,7 @@ def cache_damage(context, snapshot) -> str | None:
         # defects for a dict.
         if cache is CACHE_ABSENT:
             before_defects = []
-        elif not isinstance(cache, dict):
+        elif type(cache) is not dict:
             before_defects = [CACHE_NOT_A_DICT.format(type=type(cache).__name__)]
         else:
             before_defects = _log_defects(logs)
@@ -769,7 +769,7 @@ def cache_restore(context, snapshot) -> None:
         context.pop(CONTEXT_CACHE, None)
     else:
         context[CONTEXT_CACHE] = cache  # a key holding None is put back holding None: as found, not popped
-    if isinstance(cache, dict):
+    if type(cache) is dict:  # a cache of another class is left as the snapshot saw it: none of its methods runs here
         if logs is None or logs is UNCOPYABLE or isinstance(logs, ForeignMapping):
             cache.pop(CACHE_KEY, None)
         else:
@@ -782,7 +782,7 @@ def summaries(context) -> dict[str, dict]:
     having named it as that rule's `unknown`, so the writer sees only what `read` stored.
     Never raises."""
     cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
-    logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
+    logs = cache.get(CACHE_KEY) if type(cache) is dict else None  # by class: a cache of another class is a defect the fold named, and none of its methods runs here
     if type(logs) is not dict:  # a mapping of another class is a rule's write the fold named; the writer shows what `read` stored
         return {}
     try:

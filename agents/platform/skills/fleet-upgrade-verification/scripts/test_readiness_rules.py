@@ -407,6 +407,17 @@ class ShapeTablesTest(unittest.TestCase):
                 self.assertIn("removed_apis.json could not be read beside upgrade_shape_tables: not an object with a list under 'removed'", str(refused.exception), raw)
             finally:
                 tables._REMOVED_APIS_CACHE = None
+        # A row that is not an object with `api_version`, `kind` and `replacement` is unreadable
+        # too, as the scan's own loader has it, rather than dropping out of the lookup.
+        for raw in (b'{"removed": ["extensions/v1beta1 NetworkPolicy"]}', b'{"removed": [{"kind": "NetworkPolicy", "replacement": "networking.k8s.io/v1"}]}', b'{"removed": [{"api_version": "extensions/v1beta1", "kind": "NetworkPolicy", "replacement": ""}]}'):
+            tables._REMOVED_APIS_CACHE = None
+            try:
+                with mock.patch.object(pkgutil, "get_data", return_value=raw):
+                    with self.assertRaises(RuntimeError) as refused:
+                        tables.replacement_for("extensions/v1beta1 networkpolicies")
+                self.assertIn("row 0 under 'removed' is not an object with non-empty strings under 'api_version', 'kind', 'replacement'", str(refused.exception), raw)
+            finally:
+                tables._REMOVED_APIS_CACHE = None
         self.assertEqual(tables.replacement_for("extensions/v1beta1 networkpolicies"), "networking.k8s.io/v1")
 
     def test_replacement_comes_from_the_scan_table(self):

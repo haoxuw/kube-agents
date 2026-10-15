@@ -1550,6 +1550,14 @@ def evaluate_extra_rules(cluster: dict, member: dict, read, target, context: dic
     carrying a registered id is not evaluated; it is one `unknown` counted under that id
     with the registered module's `can_block`.
     """
+    # One plain dict under the cache key for the whole fold: `read`, the snapshot, the probe and
+    # the summary all see it, every rule's shallow copy of the context shares it, and a context
+    # built by hand with no cache key, `None` or a mapping of another class there starts from
+    # an empty one here rather than being tolerated at each access (a reading rule's result
+    # would otherwise land in a dict the fold never sees, read again by the next rule and
+    # missing from the member's summary).
+    if isinstance(context, dict) and type(context.get(readiness_rules.CONTEXT_CACHE)) is not dict:
+        context[readiness_rules.CONTEXT_CACHE] = {}
     folded = {key: [] for key in RULE_RESULT_KEYS}
     folded["rules"] = {}
     for rule in EXTRA_RULES if rules is None else rules:

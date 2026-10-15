@@ -536,6 +536,11 @@ RETIRED_IMAGE_HOST_NOTES = {
 REMOVED_APIS_NAME = "removed_apis.json"
 REMOVED_APIS_UNREADABLE = "{name} could not be read beside {module}: {error}"
 REMOVED_APIS_SHAPE = "not an object with a list under {key!r}"
+# Each row as `api_deprecation_scan.load_table` requires it, so the two readers of one file
+# agree on what a readable table is: a row of another shape would otherwise drop out of the
+# lookup and read as a removal with no replacement.
+REMOVED_APIS_ROW_SHAPE = "row {index} under {key!r} is not an object with non-empty strings under {fields}"
+REMOVED_APIS_ROW_FIELDS = ("api_version", "kind", "replacement")
 NO_LOADER_DATA = "the module's loader serves no data"
 REMOVED_APIS_KEY = "removed"
 REMOVED_API_VERSION_KEY = "api_version"
@@ -573,8 +578,10 @@ def node_image_os_family(image_type: str) -> str:
 
 def _removed_apis() -> list[dict]:
     """The removal table, read once through the module's loader. A table that cannot be
-    read, or is not an object with a list under `removed`, raises, so a rule that needs it
-    is `unknown` naming the table rather than reporting a removal with no replacement."""
+    read, is not an object with a list under `removed`, or has a row that is not an object
+    with non-empty strings under `api_version`, `kind` and `replacement` (what the scan's own
+    loader requires), raises, so a rule that needs it is `unknown` naming the table rather
+    than reporting a removal with no replacement."""
     global _REMOVED_APIS_CACHE
     if _REMOVED_APIS_CACHE is None:
         try:
@@ -585,9 +592,12 @@ def _removed_apis() -> list[dict]:
             removed = raw.get(REMOVED_APIS_KEY) if isinstance(raw, dict) else None
             if not isinstance(removed, list):  # a table of another shape is unreadable too, not empty
                 raise ValueError(REMOVED_APIS_SHAPE.format(key=REMOVED_APIS_KEY))
+            for index, row in enumerate(removed):  # and so is a row of another shape, which would otherwise drop out of the lookup
+                if not isinstance(row, dict) or not all(isinstance(row.get(field), str) and row[field].strip() for field in REMOVED_APIS_ROW_FIELDS):
+                    raise ValueError(REMOVED_APIS_ROW_SHAPE.format(index=index, key=REMOVED_APIS_KEY, fields=", ".join(repr(f) for f in REMOVED_APIS_ROW_FIELDS)))
         except (OSError, ValueError) as e:
             raise RuntimeError(REMOVED_APIS_UNREADABLE.format(name=REMOVED_APIS_NAME, module=__name__, error=e)) from e
-        _REMOVED_APIS_CACHE = [e for e in removed if isinstance(e, dict)]
+        _REMOVED_APIS_CACHE = list(removed)
     return _REMOVED_APIS_CACHE
 
 

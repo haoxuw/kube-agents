@@ -614,7 +614,9 @@ class ExtraRulesTest(unittest.TestCase):
         none_cache = {shared.CONTEXT_CACHE: None}
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, none_cache, rules=[fine, rule_module("second", evaluate=returning(risks=[{"what": "s"}]))])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["fine", "second"]))
-        self.assertEqual(none_cache, {shared.CONTEXT_CACHE: None})
+        # The fold replaces a cache that is not a plain dict once, before the first rule, so the
+        # rules share one dict: a reading rule's result is cached for the next and summarised.
+        self.assertEqual(none_cache, {shared.CONTEXT_CACHE: {}})
         # A defective entry under a read name (`None` here) is not a stored read: a rule that
         # replaces it through `read` is not charged with a lost read, so no restore runs and the
         # read stays for the rule after it, which reads it from the cache, and for the summary.
@@ -629,6 +631,40 @@ class ExtraRulesTest(unittest.TestCase):
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, inherited, rules=[rule_module("reader", evaluate=reading_removed), rule_module("second", evaluate=reading_removed)])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
         self.assertEqual(sorted(audit_log.summaries(inherited)), ["removed"])
+        # The same holds one level in and one level out. An inherited entry the probe faults for
+        # a reason `read`'s own test did not see (every summary key missing) is read afresh, never
+        # handed to a rule as the read; over `cache: None` the first reader's result is cached
+        # for the second and summarised; and a cache of another class, whose `get` raises, is
+        # replaced before the first rule, so no snapshot, probe or summary runs its methods.
+        def reading_callers(cluster, member, read, target, ctx):
+            log = audit_log.read_removed(ctx)
+            out = shared.new_result()
+            out["risks"].append({"what": len(log["callers"])})
+            return out
+
+        short = context()
+        short[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = {"removed": {"read": "removed"}}
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, short, rules=[rule_module("reader", evaluate=reading_callers), rule_module("second", evaluate=reading_callers)])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
+        self.assertEqual(sorted(audit_log.summaries(short)), ["removed"])
+        none_read = context()
+        none_read[shared.CONTEXT_CACHE] = None
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, none_read, rules=[rule_module("reader", evaluate=reading_callers), rule_module("second", evaluate=reading_callers)])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
+        self.assertEqual(sorted(audit_log.summaries(none_read)), ["removed"])
+
+        class BadCache(dict):
+            def get(self, *args):
+                raise OSError("no get")
+
+        self.assertEqual(audit_log.cache_snapshot({shared.CONTEXT_CACHE: BadCache()})[1], None)
+        self.assertEqual(audit_log.cache_defect({shared.CONTEXT_CACHE: BadCache()}), "the readiness context's cache is BadCache, not a dict")
+        self.assertEqual(audit_log.summaries({shared.CONTEXT_CACHE: BadCache()}), {})
+        bad = context()
+        bad[shared.CONTEXT_CACHE] = BadCache()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, bad, rules=[rule_module("reader", evaluate=reading_callers), fine])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "fine"]))
+        self.assertEqual(sorted(audit_log.summaries(bad)), ["removed"])
         # A mapping of a rule's own class whose `items()` raises, inherited under the key, is a
         # defect named by its class and not the first rule's: no snapshot, probe or summary runs
         # its methods, nothing is charged, and a rule that reads replaces it with the plain dict
