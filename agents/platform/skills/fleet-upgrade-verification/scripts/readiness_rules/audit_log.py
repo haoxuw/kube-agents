@@ -112,6 +112,42 @@ READS = (READ_REMOVED, READ_DEPRECATED)
 # `summaries` hands the report only entries that pass it.
 SUMMARY_KEYS = ("commands", "entries", "pages", "sampled", "error", "window_start", "window_end")
 READ_KEY = "read"
+CALLERS_KEY = "callers"
+WINDOW_DAYS_KEY = "window_days"
+PAGE_LIMIT_KEY = "page_limit"
+NONE_CLASS = type(None)
+# The one shape of a stored read: every key `read` stores, each with the classes its value may
+# be, by class. `read` builds its result in this order, the probe requires all of it of a stored
+# entry before a rule is handed it, and SUMMARY_KEYS is the subset the report publishes.
+STORED_VALUE_CLASSES = {
+    READ_KEY: (str,),
+    "commands": (list,),
+    "entries": (int,),
+    "pages": (int,),
+    "sampled": (bool,),
+    "error": (str, NONE_CLASS),
+    "window_start": (str, NONE_CLASS),
+    "window_end": (str, NONE_CLASS),
+    CALLERS_KEY: (list,),
+    WINDOW_DAYS_KEY: (int,),
+    PAGE_LIMIT_KEY: (int,),
+}
+STORED_KEYS = tuple(STORED_VALUE_CLASSES)
+# The one shape of a caller record, as `caller_records` builds it and the probe requires of
+# every `callers` entry.
+CALLER_VALUE_CLASSES = {
+    "principal": (str,),
+    "user_agent": (str,),
+    "api": (str,),
+    "removed_release": (str, NONE_CLASS),
+    "deprecated": (bool,),
+    "kubectl": (bool,),
+    "caller_class": (str,),
+    "count": (int,),
+    "first_seen": (str, NONE_CLASS),
+    "last_seen": (str, NONE_CLASS),
+}
+CALLER_RECORD_KEYS = tuple(CALLER_VALUE_CLASSES)
 SCOPE_CLAUSE = 'resource.type="{resource_type}" AND logName:"{activity_log}" AND resource.labels.cluster_name="{cluster}" AND resource.labels.location="{location}"'
 REMOVED_CLAUSE = 'labels."{removed}":*'
 DEPRECATED_CLAUSE = '((labels."{deprecated}"="{deprecated_true}" AND NOT labels."{removed}":*) OR {user_agent_field}:"{kubectl}")'
@@ -177,7 +213,12 @@ LOG_UNKNOWN_READ = "cache[{key!r}] carries {read!r}, which is not one of the rea
 LOG_NOT_A_READ = "cache[{key!r}][{read!r}] is not the read's result: {detail}"
 LOG_WRONG_TYPE = "{type}, not a dict"
 LOG_WRONG_READ = "its `read` is not {read!r}"
-LOG_MISSING_KEYS = "missing {keys}"
+LOG_MISSING_KEYS = "{where}missing {keys}"
+LOG_WRONG_VALUE = "{where}{key!r} is {type}, not {expected}"
+LOG_WHERE_ENTRY = ""
+LOG_WHERE_CALLER = "`callers`[{index}] "
+LOG_CALLER_NOT_A_RECORD = "`callers`[{index}] is {type}, not a dict"
+EXPECTED_CLASSES_JOIN = " or "
 CACHE_REPLACED = "the readiness context's cache was replaced"
 READ_LOST = "the {read!r} read stored before the rule is gone or changed"
 READ_UNCOPYABLE = "the {read!r} entry holds an object that cannot be copied (a generator, a lock, a handle)"
@@ -432,8 +473,9 @@ def read(context: dict, which: str) -> dict:
     caller gets a deep copy, so sorting or filtering it changes nothing another rule reads.
     `which` must be one of READS, refused with a ValueError before any command runs.
 
-    Returns `{"read", "commands", "error", "entries", "pages", "sampled", "callers",
-    "window_days", "page_limit", "window_start", "window_end"}`. `error` is the reason the
+    Returns a dict carrying STORED_KEYS, each value of its listed class: `read`, `commands`,
+    `entries`, `pages`, `sampled`, `error`, `window_start`, `window_end`, `callers`,
+    `window_days`, `page_limit`; the probe requires the same of a stored entry. `error` is the reason the
     read stopped producing usable pages (no runner, a failed or timed-out command, output
     that is not a list, a page the credential proxy cut at its output cap, or an exception
     inside the read); the pages before it are kept and graded, except after an exception,
@@ -456,29 +498,35 @@ def read(context: dict, which: str) -> dict:
     cached = logs.get(which)
     if _read_result_defect(which, cached) is None:  # cached only when it is a read result by the probe's own test: an inherited entry the probe faults is read afresh, never handed to a rule as the read
         return copy.deepcopy(cached)
-    result = {
-        "read": which,
-        "commands": [],
-        "error": None,
-        "entries": 0,
-        "pages": 0,
-        "sampled": False,
-        "callers": [],
-        "window_days": tables.AUDIT_LOG_WINDOW_DAYS,
-        "page_limit": tables.AUDIT_LOG_PAGE_LIMIT,
-        "window_start": None,
-        "window_end": None,
-    }
+    result = _empty_result(which)
     try:
         _read_pages(context, which, result)
     except NOT_A_RULE_DEFECT:
         raise
     except BaseException as e:  # noqa: BLE001 - the failure is the read's error, SystemExit included, never a clean cached window
         result["error"] = READ_RAISED_REASON.format(read=which, error=exception_text(e))  # never raises, so the window is never cached clean
-        result["callers"] = []
+        result[CALLERS_KEY] = []
     finally:
         logs[which] = result
     return copy.deepcopy(result)  # the rule's own copy: the cache is written by `read` alone
+
+
+def _empty_result(which: str) -> dict:
+    """A read result before its first page: every key in STORED_KEYS, in that order, holding a
+    value of its class, so what `read` stores is an entry its own probe accepts."""
+    return {
+        READ_KEY: which,
+        "commands": [],
+        "entries": 0,
+        "pages": 0,
+        "sampled": False,
+        "error": None,
+        "window_start": None,
+        "window_end": None,
+        CALLERS_KEY: [],
+        WINDOW_DAYS_KEY: tables.AUDIT_LOG_WINDOW_DAYS,
+        PAGE_LIMIT_KEY: tables.AUDIT_LOG_PAGE_LIMIT,
+    }
 
 
 def _read_pages(context: dict, which: str, result: dict) -> None:
@@ -555,8 +603,9 @@ def _unseen(page: list, seen: set) -> list:
 def cache_defect(context) -> str | None:
     """Why the audit-log cache cannot be read as the reads left it, or None. The context's
     cache must be a dict, its `audit_log` entry a plain dict keyed by read name, and each value a
-    read result: a dict whose `read` is that name, carrying every summary key, a JSON value
-    throughout (`callers` included) with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
+    read result: a dict whose `read` is that name, carrying every stored key (STORED_KEYS) with a
+    value of its class, every `callers` entry a caller record (CALLER_RECORD_KEYS), and a JSON
+    value throughout with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
     a rule runs, and damage the rule left (`cache_damage`: this, or a stored read gone or
     changed) is the rule's `unknown`, with the cache put back (`cache_restore`) whether the
     rule returned or raised, so no later rule or reader meets it."""
@@ -611,9 +660,20 @@ def _read_result_shape_defect(which, log) -> str | None:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_TYPE.format(type=type(log).__name__))
     if log.get(READ_KEY) != which:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_READ.format(read=which))
-    missing = [key for key in SUMMARY_KEYS if key not in log]
-    if missing:
-        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_MISSING_KEYS.format(keys=missing))
+    # Every key `read` stores, each value of its class, and every caller record whole: the probe
+    # requires what a rule is told it gets, so an entry of the summary's shape alone, or one whose
+    # `callers` is not a list of records, is read afresh, never handed to a rule as the read.
+    detail = _record_defect(log, STORED_VALUE_CLASSES, LOG_WHERE_ENTRY)
+    if detail is None:
+        for index, caller in enumerate(log[CALLERS_KEY]):
+            if type(caller) is not dict:  # by class, before any method of it runs
+                detail = LOG_CALLER_NOT_A_RECORD.format(index=index, type=type(caller).__name__)
+                break
+            detail = _record_defect(caller, CALLER_VALUE_CLASSES, LOG_WHERE_CALLER.format(index=index))
+            if detail is not None:
+                break
+    if detail is not None:
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=detail)
     # The whole result, `callers` included, by class: `read` stores plain JSON values alone, so
     # a value of any other class a rule left anywhere in it, a JSON type's subclass included,
     # is that rule's defect at its own cache check, never a changed read charged to the rule
@@ -621,6 +681,19 @@ def _read_result_shape_defect(which, log) -> str | None:
     detail = _plain_json_defect(log)
     if detail is not None:
         return READ_FOREIGN_VALUE.format(read=which, detail=detail)
+    return None
+
+
+def _record_defect(record: dict, classes: dict, where: str) -> str | None:
+    """Why the plain dict `record` is not of the shape `classes` gives (every key present, each
+    value of one of its listed classes, by class), prefixed by `where`, or None. Reads the dict
+    with dict's own methods and the values' classes alone, so nothing a rule stored runs here."""
+    missing = [key for key in classes if key not in record]
+    if missing:
+        return LOG_MISSING_KEYS.format(where=where, keys=missing)
+    for key, allowed in classes.items():
+        if type(record[key]) not in allowed:
+            return LOG_WRONG_VALUE.format(where=where, key=key, type=type(record[key]).__name__, expected=EXPECTED_CLASSES_JOIN.join(c.__name__ for c in allowed))
     return None
 
 

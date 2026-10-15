@@ -878,9 +878,10 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
     `directory_error` name those two causes); `webhook_items`, `webhook_error` and
     `webhook_skipped`, the webhook read's outcome; and `read_errors`, keyed by kind for the
     reads after the webhook read, each None when the kind was read, else the error of the read
-    that carried it, or, when `get-credentials` or the PDB read failed and nothing after it
-    ran, the reason nothing was read, so a member whose first read failed never reads as nine
-    successful reads.
+    that carried it, or, when the kubeconfig, `get-credentials` or the PDB read failed, the
+    reason those reads did not run (no read ran, or the reads after the webhook read were
+    skipped, which says nothing of the webhook read itself), so a member whose first read
+    failed never reads as nine successful reads.
 
     `get-credentials` writes the member's kubeconfig; then one `kubectl get` reads every
     PodDisruptionBudget, Deployment and StatefulSet, and a second reads the webhook
@@ -903,21 +904,21 @@ def read_cluster_objects(cluster: dict, project: str, kubeconfig_dir: str) -> di
         os.makedirs(kubeconfig_dir, exist_ok=True)
     except OSError as e:
         read["error"] = read["webhook_error"] = read["directory_error"] = f"cannot create kubeconfig directory {kubeconfig_dir}: {e}"
-        return _nothing_read(read)
+        return _later_reads_skipped(read, readiness_rules.NO_READ_RAN_REASON)
     env = {**os.environ, KUBECONFIG_ENV: path}
     cmd = get_credentials_cmd(cluster, project)
     rc, _, stderr = run_cmd(cmd, GCLOUD_TIMEOUT_SECONDS, env)
     if rc != 0:
         read["error"] = read["webhook_error"] = read["credentials_error"] = f"{' '.join(cmd)} failed ({rc}): {stderr.strip()}"
-        return _nothing_read(read)
+        return _later_reads_skipped(read, readiness_rules.NO_READ_RAN_REASON)
     read["items"], read["error"] = _kubectl_get(KUBECTL_RESOURCES, env, True)
     if read["error"] is not None and first_read_failed_before_the_server_answered(read["error"]):
         read["webhook_skipped"] = True
         read["webhook_error"] = f"{WEBHOOK_READ_SKIPPED} ({read['error']})"
-        return _nothing_read(read)
+        return _later_reads_skipped(read, readiness_rules.LATER_READS_SKIPPED_REASON)
     read["webhook_items"], read["webhook_error"] = _kubectl_get(KUBECTL_WEBHOOK_RESOURCES, env, True)
     if read["error"] is not None:
-        return _nothing_read(read)
+        return _later_reads_skipped(read, readiness_rules.LATER_READS_SKIPPED_REASON)
     for kinds, resources, mode in LATER_READS:
         objects, error = _later_read(resources, mode, env)
         if error is not None:
@@ -941,11 +942,12 @@ def _error_excerpt(error: str) -> str:
     return readiness_rules.one_line(error, NOTE_ERROR_CHARS) if error else ""
 
 
-def _nothing_read(read: dict) -> dict:
-    """`read` with every later kind marked as not read, because `get-credentials` or the PDB
-    read failed first: `read_errors` then says so per kind, the note names the kinds, and
-    the JSON cannot be mistaken for nine successful reads."""
-    read["read_errors"] = {kind: readiness_rules.NOTHING_READ_REASON for kind in readiness_rules.READ_KINDS}
+def _later_reads_skipped(read: dict, reason: str) -> dict:
+    """`read` with every kind of the reads after the webhook read marked as not read, for
+    `reason`: no read ran (the kubeconfig directory or `get-credentials` failed), or the PDB
+    read failed, whether or not the webhook read ran after it. `read_errors` then says so per
+    kind, the note names the kinds, and the JSON cannot be mistaken for nine successful reads."""
+    read["read_errors"] = {kind: reason for kind in readiness_rules.READ_KINDS}
     return read
 
 

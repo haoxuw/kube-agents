@@ -154,8 +154,8 @@ class ReadHelpersTest(unittest.TestCase):
         self.assertEqual(shared.read_items(nothing), [])
         self.assertEqual(shared.read_error(nothing, "deploy"), "get-credentials failed (1): forbidden")
         self.assertEqual(shared.read_error(nothing, "pods"), "get-credentials failed (1): forbidden")
-        self.assertEqual(shared.read_error({"items": None}, "pods"), shared.NOTHING_READ_REASON)
-        self.assertEqual(shared.read_error(None, "pods"), shared.NOTHING_READ_REASON)
+        self.assertEqual(shared.read_error({"items": None}, "pods"), shared.LATER_READS_SKIPPED_REASON)
+        self.assertEqual(shared.read_error(None, "pods"), shared.LATER_READS_SKIPPED_REASON)
         self.assertEqual(shared.items_of_kind(items, "Node"), items)
         self.assertEqual(shared.items_of_kind(None, "Node"), [])
 

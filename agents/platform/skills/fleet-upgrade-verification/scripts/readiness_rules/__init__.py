@@ -24,8 +24,9 @@ One module per entry of docs/designs/upgrade-failure-catalogue.md. Each module e
 
 `read` is the dict `fleet_upgrade_report.read_cluster_objects` returns. `items` is every
 object the reads returned, None when `get-credentials` or the PDB read failed, in which case
-nothing was read and `error` says why. `read_errors` is keyed by kind as the reads after the
-PDB read name them (READ_KINDS), each None or the error of the read that carried the kind:
+the reads after the webhook read were skipped and `error` says why. `read_errors` is keyed by
+kind as the reads after the webhook read name them (READ_KINDS), each None or the error of the
+read that carried the kind:
 the namespaced kinds (NAMESPACED_READ_KINDS) come in one read, the Pods in one of their own,
 the Nodes in one through a jsonpath template, the StorageClasses and PersistentVolumes in
 one. A read the credential proxy cut at its output cap is that kind's read error, naming the
@@ -110,7 +111,12 @@ POD_READ_KIND = "pods"
 NODE_READ_KIND = "node"
 CLUSTER_READ_KINDS = ("storageclass", "pv")
 READ_KINDS = NAMESPACED_READ_KINDS + (POD_READ_KIND, NODE_READ_KIND) + CLUSTER_READ_KINDS
-NOTHING_READ_REASON = "the cluster read failed, so nothing was read"
+# The reason `read_errors` carries for every kind when the reads after the webhook read did not
+# run: the kubeconfig was never written (the directory or `get-credentials` failed, so no read
+# ran), or the PDB read failed, which says nothing of the webhook read, made or skipped on its
+# own terms and graded beside these kinds.
+NO_READ_RAN_REASON = "the member's kubeconfig was not written, so no read ran"
+LATER_READS_SKIPPED_REASON = "the PDB read failed, so the reads after the webhook read were skipped"
 
 # The per-member context keys (the module docstring says what each holds).
 CONTEXT_PROJECT = "project"
@@ -328,15 +334,16 @@ def describe(entry: dict) -> str:
 
 
 def read_items(read) -> list:
-    """Every object the member's reads returned; empty when nothing was read."""
+    """Every object the member's reads returned; empty when the PDB read failed."""
     return ((read or {}).get("items")) or []
 
 
 def read_error(read, kind: str) -> str | None:
-    """Why `kind` was not read, or None when it was: the PDB read's failure when nothing was
-    read at all, else the error of the read after it that carried the kind."""
+    """Why `kind` was not read, or None when it was: the credentials or PDB read's failure when
+    `items` is None (the reads after the webhook read were skipped), else the error of the read
+    after it that carried the kind."""
     if not read or read.get("items") is None:
-        return (read or {}).get("error") or NOTHING_READ_REASON
+        return (read or {}).get("error") or LATER_READS_SKIPPED_REASON
     return (read.get("read_errors") or {}).get(kind)
 
 

@@ -1618,11 +1618,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertNotIn("PDB read failed", b["note"])
         # The skipped reads are recorded per kind, so the JSON cannot be read as nine
         # successful reads, and the note names them from that record.
-        self.assertIn(readiness_rules.NOTHING_READ_REASON, b["note"])
+        self.assertIn(readiness_rules.NO_READ_RAN_REASON, b["note"])
         self.assertNotIn("the reads after it were skipped", b["note"])
         # The zonal rule reads the cluster record alone, so the risk is still filed.
         self.assertEqual([f["location"] for f in b["risks"] if f["rule"] == ZONAL], ["us-central1-a"])
-        self.assertEqual({kind: readiness_rules.NOTHING_READ_REASON for kind in readiness_rules.READ_KINDS}, b["read_errors"])
+        self.assertEqual({kind: readiness_rules.NO_READ_RAN_REASON for kind in readiness_rules.READ_KINDS}, b["read_errors"])
 
     def test_an_unwritable_kubeconfig_dir_is_a_directory_error_not_a_credentials_error(self):
         # `--kubeconfig-dir` is operator-chosen, so an unwritable path is ordinary input and
@@ -1676,6 +1676,11 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual([c[2] for c in calls if c[0] == report.KUBECTL], [report.KUBECTL_RESOURCES, report.KUBECTL_WEBHOOK_RESOURCES])
         self.assertTrue(report.first_read_failed_before_the_server_answered("Unable to connect to the server: dial tcp 10.0.0.1:443: connect: connection refused"))
         self.assertFalse(report.first_read_failed_before_the_server_answered(answered))
+        # The webhook read ran and is graded beside the kinds the PDB failure skipped, so the
+        # per-kind record and the note say the later reads were skipped, not that nothing was read.
+        self.assertEqual(set(read["read_errors"].values()), {readiness_rules.LATER_READS_SKIPPED_REASON})
+        self.assertEqual(report._read_error_notes(read["read_errors"]), [report.NOTE_READ_FAILED.format(kinds=readiness.LIST_SEPARATOR.join(readiness_rules.READ_KINDS), error=readiness_rules.LATER_READS_SKIPPED_REASON)])
+        self.assertNotIn("nothing was read", report._read_error_notes(read["read_errors"])[0])
 
     def test_the_shims_broker_down_line_skips_the_webhook_read(self):
         calls = []
@@ -1691,6 +1696,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(read["webhook_skipped"])
         self.assertTrue(read["webhook_error"].startswith(report.WEBHOOK_READ_SKIPPED))
         self.assertEqual([c[2] for c in calls if c[0] == report.KUBECTL], [report.KUBECTL_RESOURCES])
+        self.assertEqual(set(read["read_errors"].values()), {readiness_rules.LATER_READS_SKIPPED_REASON})
 
     def test_a_list_cut_at_the_proxy_cap_is_named_as_such(self):
         def fake_run(cmd, *args, **kwargs):

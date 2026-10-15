@@ -306,6 +306,40 @@ class AuditLogReadTest(unittest.TestCase):
         self.assertEqual((first["window_start"], first["window_end"]), ("2026-09-22T16:00:00Z", "2026-09-29T16:00:00Z"))
         self.assertIn('timestamp>="2026-09-22T16:00:00Z"', first["commands"][0])
 
+    def test_a_stored_read_is_the_one_shape_the_probe_requires(self):
+        # `read` and the probe share STORED_VALUE_CLASSES, a caller record and the probe share
+        # CALLER_VALUE_CLASSES: what `read` stores, with callers and without, carries every
+        # stored key in that order with a value of its class and passes the probe, and the
+        # summary's keys are a subset of them. An entry of the summary's shape alone (which a
+        # rule reading `callers` cannot use), a `callers` that is not a list, a count that is a
+        # bool, and a caller record missing a key or holding a value of another class are not
+        # read results, by the probe, so none of them is handed to a rule or summarised.
+        with_callers = audit_log.read_removed(sample_context())
+        without = audit_log.read_removed(context_with())
+        self.assertGreater(len(with_callers["callers"]), 0)
+        for result in (with_callers, without):
+            self.assertEqual(tuple(result), audit_log.STORED_KEYS)
+            self.assertIsNone(audit_log.cache_defect({shared.CONTEXT_CACHE: {audit_log.CACHE_KEY: {audit_log.READ_REMOVED: result}}}))
+        self.assertEqual(tuple(with_callers["callers"][0]), audit_log.CALLER_RECORD_KEYS)
+        self.assertTrue(set(audit_log.SUMMARY_KEYS) < set(audit_log.STORED_KEYS))
+        caller = with_callers["callers"][0]
+        summary_only = {key: with_callers[key] for key in (audit_log.READ_KEY,) + audit_log.SUMMARY_KEYS}
+        defects = {
+            "summary-only": (summary_only, "missing ['callers', 'window_days', 'page_limit']"),
+            "callers-int": ({**with_callers, "callers": 3}, "'callers' is int, not list"),
+            "entries-bool": ({**with_callers, "entries": True}, "'entries' is bool, not int"),
+            "error-int": ({**with_callers, "error": 0}, "'error' is int, not str or NoneType"),
+            "caller-int": ({**with_callers, "callers": [caller, 3]}, "`callers`[1] is int, not a dict"),
+            "caller-short": ({**with_callers, "callers": [{"principal": caller["principal"]}]}, "`callers`[0] missing ['user_agent', 'api'"),
+            "caller-count-str": ({**with_callers, "callers": [{**caller, "count": "9"}]}, "`callers`[0] 'count' is str, not int"),
+        }
+        for name, (entry, detail) in defects.items():
+            context = {shared.CONTEXT_CACHE: {audit_log.CACHE_KEY: {audit_log.READ_REMOVED: entry}}}
+            defect = audit_log.cache_defect(context)
+            self.assertIsNotNone(defect, name)
+            self.assertIn(detail, defect, name)
+            self.assertEqual(audit_log.summaries(context), {}, name)
+
     def test_failed_timed_out_and_unparsable_reads_are_errors_on_one_line(self):
         two_lines = "ERROR: (gcloud.logging.read) PERMISSION_DENIED: Cloud Logging API has not been used\n- '@type': type.googleapis.com/google.rpc.ErrorInfo\n  reason: SERVICE_DISABLED"
         failed = audit_log.read_removed(context_with(FakeRunner(rc=1, stderr=two_lines)))

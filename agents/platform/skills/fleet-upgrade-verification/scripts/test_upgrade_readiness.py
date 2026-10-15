@@ -583,7 +583,9 @@ class ExtraRulesTest(unittest.TestCase):
 
         fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
         clean = audit_log.read_removed(context())
-        cases = {"list": [{"error": "x"}], "none-entry": {"removed": None}, "stranger": {"other": clean}, "nan-entry": {"removed": {**clean, "entries": float("nan")}}, "short": {"removed": {"read": "removed"}}}
+        caller = audit_log.caller_records([{"protoPayload": {"authenticationInfo": {"principalEmail": "ops@example.com"}}}])[0]
+        summary_only = {key: clean[key] for key in (audit_log.READ_KEY,) + audit_log.SUMMARY_KEYS}
+        cases = {"list": [{"error": "x"}], "none-entry": {"removed": None}, "stranger": {"other": clean}, "nan-entry": {"removed": {**clean, "entries": float("nan")}}, "short": {"removed": {"read": "removed"}}, "summary-only": {"removed": summary_only}, "callers-int": {"removed": {**clean, "callers": 3}}, "caller-int": {"removed": {**clean, "callers": [3]}}, "caller-short": {"removed": {**clean, "callers": [{"principal": "ops@example.com"}]}}, "caller-count-str": {"removed": {**clean, "callers": [{**caller, "count": "9"}]}}}
         for name, value in cases.items():
             ctx = context()
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module(name, evaluate=writing(value)), fine])
@@ -632,14 +634,14 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
         self.assertEqual(sorted(audit_log.summaries(inherited)), ["removed"])
         # The same holds one level in and one level out. An inherited entry the probe faults for
-        # a reason `read`'s own test did not see (every summary key missing) is read afresh, never
+        # a reason `read`'s own test did not see (every stored key but `read` missing) is read afresh, never
         # handed to a rule as the read; over `cache: None` the first reader's result is cached
         # for the second and summarised; and a cache of another class, whose `get` raises, is
         # replaced before the first rule, so no snapshot, probe or summary runs its methods.
         def reading_callers(cluster, member, read, target, ctx):
             log = audit_log.read_removed(ctx)
             out = shared.new_result()
-            out["risks"].append({"what": len(log["callers"])})
+            out["risks"].append({"what": sum(caller["count"] for caller in log["callers"])})
             return out
 
         short = context()
@@ -647,6 +649,16 @@ class ExtraRulesTest(unittest.TestCase):
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, short, rules=[rule_module("reader", evaluate=reading_callers), rule_module("second", evaluate=reading_callers)])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
         self.assertEqual(sorted(audit_log.summaries(short)), ["removed"])
+        # An entry of the summary's shape alone (`read` and the seven summary keys, no `callers`),
+        # which a probe requiring the summary keys alone passed, and a caller record of another
+        # shape are read afresh too: the `callers` a rule is handed is a list of records whatever
+        # the inherited entry held, and the summary carries what `read` stored.
+        for name, entry in {"summary-only": summary_only, "caller-short": {**clean, "callers": [{"principal": "ops@example.com"}]}}.items():
+            inherited_shape = context()
+            inherited_shape[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = {"removed": entry}
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, inherited_shape, rules=[rule_module("reader", evaluate=reading_callers), rule_module("second", evaluate=reading_callers)])
+            self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]), name)
+            self.assertEqual(sorted(audit_log.summaries(inherited_shape)), ["removed"], name)
         none_read = context()
         none_read[shared.CONTEXT_CACHE] = None
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, none_read, rules=[rule_module("reader", evaluate=reading_callers), rule_module("second", evaluate=reading_callers)])
