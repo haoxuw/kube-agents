@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for upgrade_readiness.py: the PDB, webhook, maintenance and skew rules on canned objects."""
 
+import collections
 import json
 import os
 import sys
@@ -614,21 +615,55 @@ class ExtraRulesTest(unittest.TestCase):
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, inherited, rules=[rule_module("reader", evaluate=reading_removed), rule_module("second", evaluate=reading_removed)])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
         self.assertEqual(sorted(audit_log.summaries(inherited)), ["removed"])
-        # A mapping of a rule's own class whose `items()` raises, inherited under the key, is
-        # uncopyable, not the first rule's: no snapshot, probe or summary raises on it, nothing is
-        # charged, and a rule that reads replaces it with the plain dict `read` keeps.
+        # A mapping of a rule's own class whose `items()` raises, inherited under the key, is a
+        # defect named by its class and not the first rule's: no snapshot, probe or summary runs
+        # its methods, nothing is charged, and a rule that reads replaces it with the plain dict
+        # `read` keeps.
         class Unlistable(dict):
             def items(self):
                 raise OSError("no items")
 
         poisoned = {shared.CONTEXT_CACHE: {audit_log.CACHE_KEY: Unlistable(removed=1)}}
-        self.assertEqual(audit_log.cache_snapshot(poisoned)[1], audit_log.UNCOPYABLE)
-        self.assertIn("cannot be copied", audit_log.cache_defect(poisoned))
+        self.assertIsInstance(audit_log.cache_snapshot(poisoned)[1], audit_log.ForeignMapping)  # named by its class before its methods run
+        self.assertEqual(audit_log.cache_defect(poisoned), "cache['audit_log'] is Unlistable, not a dict of read results")
         self.assertEqual(audit_log.summaries(poisoned), {})
         unlistable = context()
         unlistable[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = Unlistable(removed=1)
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, unlistable, rules=[rule_module("reader", evaluate=reading_removed), fine])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "fine"]))
+        # A mapping of another class whose methods behave (an OrderedDict holding a sound read)
+        # is a defect named by its class, not a cache: `read` keeps a plain dict, so the snapshot
+        # agrees with it. Inherited, it is nobody's, and the rule that reads is not charged for
+        # the plain dict `read` put in its place; written by a rule, it is that rule's, and the
+        # reader after it starts from the cache as it stood before the writer.
+        def reading_deprecated_log(cluster, member, read, target, ctx):
+            audit_log.read_deprecated(ctx)
+            out = shared.new_result()
+            out["risks"].append({"what": "d"})
+            return out
+
+        ordered = context()
+        audit_log.read_removed(ordered)
+        ordered[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = collections.OrderedDict(ordered[shared.CONTEXT_CACHE][audit_log.CACHE_KEY])
+        self.assertEqual(audit_log.cache_defect(ordered), "cache['audit_log'] is OrderedDict, not a dict of read results")
+        self.assertEqual(audit_log.summaries(ordered), {})
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ordered, rules=[rule_module("reader", evaluate=reading_deprecated_log), fine])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "fine"]))
+        self.assertEqual(sorted(audit_log.summaries(ordered)), ["deprecated"])
+
+        def reading_then_reordering(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = collections.OrderedDict(ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY])
+            out = shared.new_result()
+            out["risks"].append({"what": "w"})
+            return out
+
+        reordered = context()
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, reordered, rules=[rule_module("writer", evaluate=reading_then_reordering), rule_module("reader", evaluate=reading_deprecated_log)])
+        self.assertEqual([u["rule"] for u in folded["unknown"]], ["writer"])
+        self.assertIn("cache['audit_log'] is OrderedDict, not a dict of read results", folded["unknown"][0]["reason"])
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["reader"])
+        self.assertEqual(sorted(audit_log.summaries(reordered)), ["deprecated"])
         self.assertEqual((audit_log.summaries(ctx), audit_log.summaries({}), audit_log.summaries({shared.CONTEXT_CACHE: None}), audit_log.cache_defect({})), ({}, {}, {}, None))
         self.assertIsNotNone(audit_log.cache_defect({shared.CONTEXT_CACHE: None}))
         # A rule's damage is put back before the next rule runs: the next rule's read works

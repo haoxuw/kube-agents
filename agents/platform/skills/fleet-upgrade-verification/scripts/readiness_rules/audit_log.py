@@ -571,6 +571,8 @@ def _log_defects(logs) -> list[str]:
         return []
     if logs is UNCOPYABLE:
         return [LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=UNCOPYABLE_TYPE)]
+    if isinstance(logs, ForeignMapping):
+        return [LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=logs.type_name)]
     if not isinstance(logs, dict):
         return [LOGS_NOT_A_DICT.format(key=CACHE_KEY, type=type(logs).__name__)]
     return [defect for which, log in logs.items() if (defect := _read_result_defect(which, log)) is not None]
@@ -614,13 +616,26 @@ def _read_result_shape_defect(which, log) -> str | None:
 
 
 UNCOPYABLE = object()  # a snapshot's stand-in for an entry that cannot be deep-copied
+
+
+class ForeignMapping:
+    """A snapshot's stand-in for an `audit_log` entry that is a mapping of another class than
+    `dict` (an OrderedDict, a defaultdict, a rule's own subclass): `read` stores a plain dict
+    and keeps one, so the class is a rule's write, named as such by the defect probe, never
+    iterated by the snapshot, and dropped by the restore like an entry it could not copy."""
+
+    __slots__ = ("type_name",)
+
+    def __init__(self, type_name: str):
+        self.type_name = type_name
 CACHE_ABSENT = object()  # a snapshot's stand-in for a context with no cache key at all, which a key holding None is not
 
 
 def _copy_logs(logs):
     """A deep copy of the cache's `audit_log` entry, entry by entry; an entry a rule filled
-    with something that cannot be copied (a generator, a lock, a handle) is UNCOPYABLE, so a
-    snapshot never raises and a restore can drop what it cannot put back."""
+    with something that cannot be copied (a generator, a lock, a handle) is UNCOPYABLE, and a
+    mapping of another class than `dict` is a ForeignMapping, so a snapshot never raises, a
+    defect is named where it was made, and a restore can drop what it cannot put back."""
     if not isinstance(logs, dict):
         try:
             return copy.deepcopy(logs)
@@ -628,8 +643,10 @@ def _copy_logs(logs):
             raise
         except BaseException:  # noqa: BLE001 - whatever the object refuses with, SystemExit included, the snapshot still stands
             return UNCOPYABLE
+    if type(logs) is not dict:  # a mapping of another class is a rule's write, whatever it holds: a defect named by its class, as `read` reads it
+        return ForeignMapping(type(logs).__name__)
     try:
-        pairs = list(logs.items())  # a mapping of a rule's own class: its `items()` may raise, and then the whole entry is uncopyable
+        pairs = list(logs.items())
     except NOT_A_RULE_DEFECT:
         raise
     except BaseException:  # noqa: BLE001
@@ -705,7 +722,7 @@ def cache_restore(context, snapshot) -> None:
     else:
         context[CONTEXT_CACHE] = cache  # a key holding None is put back holding None: as found, not popped
     if isinstance(cache, dict):
-        if logs is None or logs is UNCOPYABLE:
+        if logs is None or logs is UNCOPYABLE or isinstance(logs, ForeignMapping):
             cache.pop(CACHE_KEY, None)
         else:
             cache[CACHE_KEY] = {which: log for which, log in logs.items() if log is not UNCOPYABLE} if isinstance(logs, dict) else logs
@@ -718,7 +735,7 @@ def summaries(context) -> dict[str, dict]:
     Never raises."""
     cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
     logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
-    if not isinstance(logs, dict):
+    if type(logs) is not dict:  # a mapping of another class is a rule's write the fold named; the writer shows what `read` stored
         return {}
     try:
         pairs = list(logs.items())
