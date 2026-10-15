@@ -1,6 +1,6 @@
 ---
 name: review-address-feedback
-description: "Address review feedback on an open pull request: triage and fix findings, reply in every thread, resolve the addressed ones, and request one re-read. Use after an automated or human reviewer reviews a pull request."
+description: "Address review feedback on an open pull request: triage each finding, fix it or push back with a reason, reply in every thread, resolve the addressed ones, and request one re-read. Use after an automated or human reviewer reviews a pull request."
 ---
 
 # Task
@@ -12,6 +12,12 @@ Work a review round until every thread has a reply and the last re-read settles:
 1. **Collect** every unresolved thread, review-body finding and red check. Read each against the current head and current `main`, not your checkout: a finding that reads wrong is often a stale checkout, and an outdated thread is not an addressed one.
 2. **Cross-check the Self-Review.** A finding it recorded without a disposition, or claimed fixed when it is not, gets settled this round; one it rejected with a reason gets that reason as the reply.
 3. **Triage** each: fix; push back with a reason about this change and its evidence; or defer with a filed issue ([`pre_pr_review.md`](../../rules/pre_pr_review.md)), or with an expected-fail eval case for an agent-behaviour gap you will not fix ([`eval_driven_development.md`](../../rules/eval_driven_development.md)). A finding that correctly applies a rule with no exemption is a fix, never a push-back. Read a red check's log before acting: a red your change caused is a fix; one it did not gets one retest if transient, otherwise a report to the check's owners.
+   - Weigh each fix against its cost before making it: the lines, the tests, the review time and the risk of a new defect. A finding is a request, not an order; the pull request's intent and the evidence decide.
+   - Answer a minor nitpick from the bigger picture: name what the pull request is for and what the line's reader needs, and leave the line when the edit moves neither. Not changing is often the better change; say so with the reason.
+   - Refuse a complex change for a small gain: a second code path, a cache, a new abstraction or a guard for a case nothing reaches today costs more than it returns. Keep the simple form and say what the complexity would cost.
+   - Weigh code quality and simplicity against a theoretical performance gain, and measure before conceding one: time the operation on a realistic input beside the cost that dominates the run. Most such gains are negligible; decline a negligible one with the number.
+   - Keep the exceptions: a correctness defect, a security finding or a rule with no exemption is a fix whatever its size.
+   - Push back in the thread with what the reviewer can check (the measurement, the contract the change would trade away, the rule or the design choice the user made), as step 9 asks; a push-back without a checkable reason is a dropped finding.
 4. **Drive toward merge.** A standing instruction from the user to address findings and move the pull request to merge is their decision: act on it, deciding each finding from that direction and the pull request's stated intent, and summarise each finding and its disposition to the user. Ask only without such an instruction or when neither settles a finding, and then with concrete options and a recommendation, never an open-ended question.
 5. **Bracket each fix with evidence**, red before and green after: the eval loop for agent behaviour, live validation for runtime behaviour, or the one-line exemption those rules allow. Take the live-test lease before touching a shared install.
 6. **Fix the class:** every site of the same shape, scoped by the rule behind the finding: a correctness shape across the functions this pull request touches, a convention shape only in the lines it writes. Add a test that fails on the shape where one can exist.
