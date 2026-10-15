@@ -506,6 +506,10 @@ class ExtraRulesTest(unittest.TestCase):
         # would print one note per character. A dict, a list for the whole result, a finding
         # that is not a dict, a finding whose text is not a string and a note that is not a
         # string are the same defect: one unknown naming it, the other rules untouched.
+        class Unlistable(dict):
+            def items(self):
+                raise OSError("no items")
+
         cases = {
             "string-unknown": (lambda *a: {"unknown": "no target to grade against"}, "unknown is str, not a list"),
             "dict-notes": (lambda *a: {**shared.new_result(), "notes": {"a": 1}}, "notes is dict, not a list"),
@@ -523,6 +527,13 @@ class ExtraRulesTest(unittest.TestCase):
             # An empty or whitespace-only string is named as such, not as "str, not a string".
             "unknown-empty": (lambda *a: {**shared.new_result(), "unknown": [""]}, "an unknown entry is an empty string"),
             "unknown-blank": (lambda *a: {**shared.new_result(), "unknown": ["   "]}, "an unknown entry is an empty string"),
+            # A blank finding text or note passes "is a string" and prints as nothing: named as blank.
+            "blank-text": (lambda *a: {**shared.new_result(), "risks": [{"what": "x", "text": ""}]}, "a risks finding's text is blank"),
+            "spaced-text": (lambda *a: {**shared.new_result(), "blocking": [{"what": "x", "text": " \t"}]}, "a blocking finding's text is blank"),
+            "blank-note": (lambda *a: {**shared.new_result(), "notes": ["  "]}, "a note is blank"),
+            # A value whose encoding raises something other than TypeError or ValueError is the
+            # result's JSON defect, named as such rather than as the rule raising.
+            "unlistable-value": (lambda *a: {**shared.new_result(), "risks": [{"what": Unlistable(a=1)}]}, "the result is not JSON-serialisable: OSError('no items')"),
         }
         fine = rule_module("fine", evaluate=returning(risks=[{"what": "ok"}]))
         for name, (evaluate, reason) in cases.items():
@@ -532,6 +543,9 @@ class ExtraRulesTest(unittest.TestCase):
             self.assertEqual(folded["rules"][name], {"entry": 0, "can_block": True, "blocking": 0, "risks": 0, "unknown": 1, "notes": 0}, name)
             self.assertEqual([f["rule"] for f in folded["risks"]], ["fine"], name)
             self.assertEqual(folded["notes"], [], name)
+        # A `describe` that renders empty is the same blank text.
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[rule_module("mute", evaluate=returning(risks=[{"what": "x"}]), describe=lambda finding: ""), fine])
+        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("mute", "rule raised TypeError(\"a risks finding's text is blank\"); not evaluated")])
 
     def test_a_finding_json_cannot_carry_is_the_rules_defect_not_the_writers(self):
         # The findings go to `--output` as they are; a set, a datetime or a tuple-keyed dict
@@ -664,6 +678,43 @@ class ExtraRulesTest(unittest.TestCase):
         self.assertIn("cache['audit_log'] is OrderedDict, not a dict of read results", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["reader"])
         self.assertEqual(sorted(audit_log.summaries(reordered)), ["deprecated"])
+        # A value of a JSON type's subclass a writer leaves inside a read it created (its own
+        # snapshot held no read to compare), and a stored entry of a dict subclass whose `get`
+        # raises: both are named at the writer's own check by the exact-type walk, so no
+        # comparison, snapshot or later read runs the object's methods, the rules after the
+        # writer are not charged, and a reader after it reads afresh.
+        class EvilInt(int):
+            def __eq__(self, other):
+                raise ValueError("cmp")
+
+            __hash__ = int.__hash__
+
+        class SubGet(dict):
+            def get(self, *args):
+                raise OSError("no get")
+
+        def reading_then_poisoning_value(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["entries"] = EvilInt(2)
+            out = shared.new_result()
+            out["risks"].append({"what": "w"})
+            return out
+
+        def reading_then_subclassing_entry(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            logs = ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]
+            logs["removed"] = SubGet(logs["removed"])
+            out = shared.new_result()
+            out["risks"].append({"what": "w"})
+            return out
+
+        for name, writer, detail in (("evil-value", reading_then_poisoning_value, "the 'removed' entry holds a value of class EvilInt at the entry['entries'], not a JSON value"), ("subclass-entry", reading_then_subclassing_entry, "the 'removed' entry holds a value of class SubGet at the entry, not a JSON value")):
+            poisoned_ctx = context()
+            folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, poisoned_ctx, rules=[rule_module(name, evaluate=writer), fine, rule_module("reader", evaluate=reading_removed)])
+            self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
+            self.assertIn(detail, folded["unknown"][0]["reason"], name)
+            self.assertEqual([f["rule"] for f in folded["risks"]], ["fine", "reader"], name)
+            self.assertEqual(sorted(audit_log.summaries(poisoned_ctx)), ["removed"], name)
         self.assertEqual((audit_log.summaries(ctx), audit_log.summaries({}), audit_log.summaries({shared.CONTEXT_CACHE: None}), audit_log.cache_defect({})), ({}, {}, {}, None))
         self.assertIsNotNone(audit_log.cache_defect({shared.CONTEXT_CACHE: None}))
         # A rule's damage is put back before the next rule runs: the next rule's read works
@@ -746,7 +797,7 @@ class ExtraRulesTest(unittest.TestCase):
             ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["callers"].append((e for e in [1]))
             return shared.new_result()
 
-        for name, offender, reason in (("generator", storing_generator, "cache['audit_log'] carries 'scratch', which is not one of the reads"), ("poisoning", poisoning_callers, "the 'removed' entry holds an object that cannot be copied")):
+        for name, offender, reason in (("generator", storing_generator, "cache['audit_log'] carries 'scratch', which is not one of the reads"), ("poisoning", poisoning_callers, "the 'removed' entry holds a value of class generator at the entry['callers']")):
             ctx = context()
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
             self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
@@ -773,7 +824,7 @@ class ExtraRulesTest(unittest.TestCase):
         ctx = context()
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module("evil", evaluate=poisoning_compare), rule_module("second", evaluate=reading_deprecated)])
         self.assertEqual([u["rule"] for u in folded["unknown"]], ["evil"])
-        self.assertIn("the cache could not be compared with the snapshot: ValueError", folded["unknown"][0]["reason"])
+        self.assertIn("the 'removed' entry holds a value of class Evil at the entry['page_limit'], not a JSON value", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["reader", "second"])
         self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated", "removed"])
         # The same guards hold when what a rule stored exits instead of raising: an object
@@ -797,7 +848,7 @@ class ExtraRulesTest(unittest.TestCase):
             ctx[shared.CONTEXT_CACHE][audit_log.CACHE_KEY]["removed"]["page_limit"] = ExitingCompare(1000)
             return shared.new_result()
 
-        for name, offender, reason in (("exiting-copy", storing_exiting_copy, "the 'removed' entry holds an object that cannot be copied"), ("exiting-compare", storing_exiting_compare, "the cache could not be compared with the snapshot: SystemExit(5)")):
+        for name, offender, reason in (("exiting-copy", storing_exiting_copy, "the 'removed' entry holds a value of class ExitingCopy at the entry['callers']"), ("exiting-compare", storing_exiting_compare, "the 'removed' entry holds a value of class ExitingCompare at the entry['page_limit'], not a JSON value")):
             ctx = context()
             folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("reader", evaluate=reading_with_risk), rule_module(name, evaluate=offender), rule_module("second", evaluate=reading_deprecated)])
             self.assertEqual([u["rule"] for u in folded["unknown"]], [name], name)
@@ -819,7 +870,7 @@ class ExtraRulesTest(unittest.TestCase):
         ctx = context()
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, ctx, rules=[rule_module("writer", evaluate=reading_then_storing_plain), rule_module("second", evaluate=reading_deprecated)])
         self.assertEqual([u["rule"] for u in folded["unknown"]], ["writer"])
-        self.assertIn("is not JSON serializable", folded["unknown"][0]["reason"])
+        self.assertIn("the 'removed' entry holds a value of class Plain at the entry['callers']", folded["unknown"][0]["reason"])
         self.assertEqual([f["rule"] for f in folded["risks"]], ["second"])
         self.assertEqual(sorted(audit_log.summaries(ctx)), ["deprecated"])
         # A generator in the cache before the fold ran is nobody's: the snapshot stands, the
@@ -933,6 +984,9 @@ class ExtraRulesTest(unittest.TestCase):
             "loud_entry": (dict(RULE_ID="loud", ENTRY={11}, CAN_BLOCK=True), returning(blocking=[{"what": "b"}]), "ENTRY is set, not a JSON value; not evaluated"),
             "stringly": (dict(RULE_ID="stringly", ENTRY=5, CAN_BLOCK="False"), None, "CAN_BLOCK is str, not a bool; not evaluated"),
             "nan_entry": (dict(RULE_ID="nan", ENTRY=float("nan"), CAN_BLOCK=True), None, "ENTRY is float, not a JSON value; not evaluated"),
+            # A blank id passes "is a string" and would key `rules` and print as nothing.
+            "blank_id": (dict(RULE_ID="", ENTRY=2, CAN_BLOCK=True), None, "RULE_ID is blank; not evaluated"),
+            "spaced_id": (dict(RULE_ID="  ", ENTRY=2, CAN_BLOCK=True), None, "RULE_ID is blank; not evaluated"),
         }
         for name, (attributes, evaluate, reason) in cases.items():
             broken = bare_module(name, evaluate=evaluate, **attributes)

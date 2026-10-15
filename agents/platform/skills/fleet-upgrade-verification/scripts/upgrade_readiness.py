@@ -450,6 +450,12 @@ RESULT_KEY_NOT_A_LIST = "{key} is {type}, not a list"
 FINDING_NOT_A_DICT = "a {kind} finding is {type}, not a dict"
 FINDING_TEXT_NOT_TEXT = "a {kind} finding's text is {type}, not a string"
 NOTE_NOT_TEXT = "a note is {type}, not a string"
+# A blank string passes an "is a string" check and prints as nothing: an unnamed rule in the
+# table and the JSON, a finding with no content in its column, an empty note. Each is named
+# as what it is, like a blank unknown entry.
+FINDING_TEXT_BLANK = "a {kind} finding's text is blank"
+NOTE_BLANK = "a note is blank"
+RULE_ID_BLANK_REASON = "RULE_ID is blank; not evaluated"
 # The findings go to `--output` as they are, so a value JSON cannot carry (a set, a
 # datetime, a tuple-keyed dict, a NaN or infinite float, which `json.dumps` would write as
 # a bare token no JSON parser reads) would fail the writer after every member was read; the
@@ -1419,6 +1425,8 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
                 finding[TEXT_KEY] = rule.describe(finding)
             if not isinstance(finding[TEXT_KEY], str):
                 raise TypeError(FINDING_TEXT_NOT_TEXT.format(kind=kind, type=type(finding[TEXT_KEY]).__name__))
+            if not finding[TEXT_KEY].strip():
+                raise TypeError(FINDING_TEXT_BLANK.format(kind=kind))
             finding[TEXT_KEY] = readiness_rules.one_line(finding[TEXT_KEY])
             finding[RULE_KEY] = rule_id
             finding[ENTRY_KEY] = entry
@@ -1427,6 +1435,8 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
     for note in out["notes"]:
         if not isinstance(note, str):
             raise TypeError(NOTE_NOT_TEXT.format(type=type(note).__name__))
+        if not note.strip():
+            raise TypeError(NOTE_BLANK)
     if not can_block and out["blocking"]:
         for demoted in out["blocking"]:  # re-graded under whichever word it carries, so the JSON never carries a risk that says it blocks
             if GRADE_KEY in demoted:
@@ -1442,6 +1452,10 @@ def _rule_result(rule, rule_id: str, entry, can_block: bool, cluster: dict, memb
         json.dumps(out, allow_nan=False)
     except (TypeError, ValueError) as e:
         raise TypeError(RESULT_NOT_JSON.format(error=e)) from e
+    except readiness_rules.NOT_A_RULE_DEFECT:
+        raise
+    except BaseException as e:  # noqa: BLE001 - a value nested past the recursion limit, or one whose encoding raises otherwise, is not JSON either: named as the value's defect, not as the rule raising
+        raise TypeError(RESULT_NOT_JSON.format(error=readiness_rules.exception_text(e))) from e
     return out
 
 
@@ -1485,6 +1499,8 @@ def _rule_attributes(rule) -> tuple[str, object, bool, str | None]:
     for attribute, value, expected, holds in checks:
         if not holds:
             return name, None, True, RULE_ATTRIBUTE_REASON.format(attribute=attribute, type=type(value).__name__, expected=expected)
+    if not rule_id.strip():  # a blank id would key `rules` and print as nothing in every cell and note
+        return name, None, True, RULE_ID_BLANK_REASON
     # A plain `str`, whatever subclass the module declared: the id keys `rules` and formats the
     # notes after the fold's guard closes, so a subclass whose `__hash__` raises would leave
     # the fold there. `str()` runs the subclass's `__str__`, inside the guard; one that raises

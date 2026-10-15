@@ -50,6 +50,7 @@ it kept.
 
 import copy
 import json
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -181,6 +182,16 @@ CACHE_REPLACED = "the readiness context's cache was replaced"
 READ_LOST = "the {read!r} read stored before the rule is gone or changed"
 READ_UNCOPYABLE = "the {read!r} entry holds an object that cannot be copied (a generator, a lock, a handle)"
 UNCOPYABLE_TYPE = "an object that cannot be copied"
+# What a stored read may hold, decided by class and not by what encodes: `read` stores exact
+# dicts with string keys, lists, strings, ints, finite floats, bools and None, so a value of
+# any other class, a JSON type's subclass included, is a rule's write, named at that rule's
+# own check by this walk, and never compared, copied or read through its own methods.
+READ_FOREIGN_VALUE = "the {read!r} entry holds {detail}"
+FOREIGN_VALUE_DETAIL = "a value of class {type} at {path}, not a JSON value"
+FOREIGN_KEY_DETAIL = "a key of class {type} at {path}, not a string"
+NON_FINITE_DETAIL = "a non-finite float at {path}, not a JSON value"
+ENTRY_PATH = "the entry"
+PLAIN_JSON_SCALARS = (str, int, bool)
 CACHE_UNREADABLE = "the cache could not be compared with the snapshot: {error}"
 UNKNOWN_READ_CALL = "audit_log.read({which!r}): not one of the reads {reads}"
 STDERR_EXCERPT_CHARS = 300
@@ -443,7 +454,7 @@ def read(context: dict, which: str) -> dict:
     if type(logs) is not dict:  # a context built by hand, or a mapping of a rule's own class: `read` keeps a plain dict of its own; the fold puts a rule's damage back before the next rule
         logs = cache[CACHE_KEY] = {}
     cached = logs.get(which)
-    if isinstance(cached, dict) and cached.get(READ_KEY) == which:
+    if type(cached) is dict and cached.get(READ_KEY) == which:  # by class, as the fold's checks read it: an entry of another class is not a cached read
         return copy.deepcopy(cached)
     result = {
         "read": which,
@@ -594,28 +605,64 @@ def _read_result_shape_defect(which, log) -> str | None:
         return LOG_UNKNOWN_READ.format(key=CACHE_KEY, read=which)
     if log is UNCOPYABLE:
         return READ_UNCOPYABLE.format(read=which)
-    if not isinstance(log, dict):
+    if isinstance(log, ForeignValue):
+        return READ_FOREIGN_VALUE.format(read=which, detail=log.detail)
+    if type(log) is not dict:  # by class, before any method of it runs: a dict subclass is not a read result
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_TYPE.format(type=type(log).__name__))
     if log.get(READ_KEY) != which:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_WRONG_READ.format(read=which))
     missing = [key for key in SUMMARY_KEYS if key not in log]
     if missing:
         return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=LOG_MISSING_KEYS.format(keys=missing))
-    try:
-        # The whole result, `callers` included: `read` stores JSON values alone, so an object a
-        # rule left anywhere in it is that rule's defect at its own cache check, not a changed
-        # read charged to the rule after it, whose copies of the object compare by identity.
-        json.dumps(log, allow_nan=False)
-    except (TypeError, ValueError) as e:
-        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=str(e))
-    except NOT_A_RULE_DEFECT:
-        raise
-    except BaseException as e:  # noqa: BLE001 - a value nested past the recursion limit, or one whose encoding raises otherwise, is not a JSON value either
-        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=exception_text(e))
+    # The whole result, `callers` included, by class: `read` stores plain JSON values alone, so
+    # a value of any other class a rule left anywhere in it, a JSON type's subclass included,
+    # is that rule's defect at its own cache check, never a changed read charged to the rule
+    # after it, and nothing here or in the comparison runs the object's own methods.
+    detail = _plain_json_defect(log)
+    if detail is not None:
+        return READ_FOREIGN_VALUE.format(read=which, detail=detail)
     return None
 
 
 UNCOPYABLE = object()  # a snapshot's stand-in for an entry that cannot be deep-copied
+
+
+class ForeignValue:
+    """A snapshot's stand-in for a stored read that holds a value of a class `read` never
+    stores (`_plain_json_defect`), carrying the walk's detail: named as the writer's defect,
+    never compared, and dropped by the restore like an entry the snapshot could not copy."""
+
+    __slots__ = ("detail",)
+
+    def __init__(self, detail: str):
+        self.detail = detail
+
+
+def _plain_json_defect(value, path: str = ENTRY_PATH) -> str | None:
+    """Why `value` is not a plain JSON value, or None: every node must be an exact `dict` with
+    string keys, an exact `list`, `str`, `int`, `bool`, a finite `float`, or None, the classes
+    `read` stores. The walk tests each node's class before it looks inside, so the methods of a
+    class a rule authored are never run; a dict subclass is a defect at its own node."""
+    kind = type(value)
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                return FOREIGN_KEY_DETAIL.format(type=type(key).__name__, path=path)
+            defect = _plain_json_defect(item, f"{path}[{key!r}]")
+            if defect is not None:
+                return defect
+        return None
+    if kind is list:
+        for index, item in enumerate(value):
+            defect = _plain_json_defect(item, f"{path}[{index}]")
+            if defect is not None:
+                return defect
+        return None
+    if kind is float:
+        return None if math.isfinite(value) else NON_FINITE_DETAIL.format(path=path)
+    if kind in PLAIN_JSON_SCALARS or value is None:
+        return None
+    return FOREIGN_VALUE_DETAIL.format(type=kind.__name__, path=path)
 
 
 class ForeignMapping:
@@ -632,10 +679,11 @@ CACHE_ABSENT = object()  # a snapshot's stand-in for a context with no cache key
 
 
 def _copy_logs(logs):
-    """A deep copy of the cache's `audit_log` entry, entry by entry; an entry a rule filled
-    with something that cannot be copied (a generator, a lock, a handle) is UNCOPYABLE, and a
-    mapping of another class than `dict` is a ForeignMapping, so a snapshot never raises, a
-    defect is named where it was made, and a restore can drop what it cannot put back."""
+    """A deep copy of the cache's `audit_log` entry, entry by entry, each a plain JSON value or
+    a marker: an entry holding a value of a class `read` never stores is a ForeignValue carrying
+    the walk's detail, one whose walk or copy raises is UNCOPYABLE, and a mapping of another
+    class than `dict` is a ForeignMapping, so a snapshot never raises or runs a rule's methods,
+    a defect is named where it was made, and a restore can drop what it cannot put back."""
     if not isinstance(logs, dict):
         try:
             return copy.deepcopy(logs)
@@ -654,11 +702,11 @@ def _copy_logs(logs):
     out = {}
     for which, log in pairs:
         try:
-            copied = copy.deepcopy(log)
-            out[which] = dict(copied) if isinstance(copied, dict) else copied  # a plain dict, so a subclass's own `get` or `items` never runs on the copy
+            detail = _plain_json_defect(log)  # by class, before anything is copied: a snapshot holds plain JSON values or a marker, never an object of a rule's class
+            out[which] = copy.deepcopy(log) if detail is None else ForeignValue(detail)
         except NOT_A_RULE_DEFECT:
             raise
-        except BaseException:  # noqa: BLE001
+        except BaseException:  # noqa: BLE001 - a walk or a copy that raises (a nest past the recursion limit) leaves the entry uncopyable
             out[which] = UNCOPYABLE
     return out
 
@@ -725,7 +773,7 @@ def cache_restore(context, snapshot) -> None:
         if logs is None or logs is UNCOPYABLE or isinstance(logs, ForeignMapping):
             cache.pop(CACHE_KEY, None)
         else:
-            cache[CACHE_KEY] = {which: log for which, log in logs.items() if log is not UNCOPYABLE} if isinstance(logs, dict) else logs
+            cache[CACHE_KEY] = {which: log for which, log in logs.items() if log is not UNCOPYABLE and not isinstance(log, ForeignValue)} if isinstance(logs, dict) else logs
 
 
 def summaries(context) -> dict[str, dict]:
