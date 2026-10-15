@@ -20,6 +20,12 @@ from readiness_rules import finding, zonal_control_plane  # noqa: E402
 
 CATALOGUE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5), "docs", "designs", "upgrade-failure-catalogue.md")
 CATALOGUE_HEADING_RE = re.compile(r"^### (\d+)\. ", re.MULTILINE)
+ZONAL_CASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5), "bench", "tasks", "upgrades-readiness-zonal-control-plane", "task.yaml")
+ZONAL_CASE_CELL_OBJECTIVE = "the-declared-lines-quote-the-reports-cell"
+# The case grades a declared line of this shape; the verifier lowercases the report and expands
+# `{cluster:any}` to a recorded cluster name before matching.
+ZONAL_CASE_LINE_FORMAT = "{cluster}: kind Cluster; control plane: zonal; readiness rule: {rule}; graded as: risk; cell: {cell}"
+ZONAL_CASE_CLUSTER_PLACEHOLDER = "{cluster:any}"
 TARGET = parse_version("1.35.1-gke.1000")
 AT = datetime(2026, 9, 14, 15, 0, tzinfo=timezone.utc)
 LAGGING = "1.34.11-gke.1000"
@@ -343,6 +349,29 @@ class ZonalControlPlaneRuleTest(unittest.TestCase):
         odd = zonal_control_plane.evaluate(cluster(location="everywhere"), {}, None, None, {})
         self.assertIn("neither a zone nor a region", odd["unknown"][0])
         self.assertFalse(zonal_control_plane.CAN_BLOCK)
+
+    def test_the_cases_cell_pattern_matches_the_cell_the_report_prints(self):
+        # The bench case grades the cell the risks column prints for this rule, so its pattern,
+        # the rule's finding text and the column's prefix are one fact: a reword of either side
+        # fails here, not the first nightly after it merges. The objective's two patterns are
+        # read from the case file as it ships (single-quoted YAML scalars, `''` an escaped quote).
+        with open(ZONAL_CASE_PATH, encoding="utf-8") as f:
+            case = f.read()
+        block = case.split(f"- name: {ZONAL_CASE_CELL_OBJECTIVE}", 1)[1].split("- name: ", 1)[0]
+        patterns = {kind: re.search(rf"{kind}:\n\s+- '((?:[^']|'')*)'", block).group(1).replace("''", "'") for kind in ("any_of_patterns", "forbidden_patterns")}
+        risk = zonal_control_plane.evaluate(cluster(location="us-central1-a"), {}, None, None, {})["risks"][0]
+        cell = r.RULE_PREFIX_FORMAT.format(rule=zonal_control_plane.RULE_ID, text=zonal_control_plane.describe(risk))
+        self.assertTrue(cell.startswith("zonal-control-plane: control plane is zonal (us-central1-a): "), cell)
+        for name in ("seeded-a", "seeded-d"):
+            accepted = patterns["any_of_patterns"].replace(ZONAL_CASE_CLUSTER_PLACEHOLDER, re.escape(name))
+            refused = patterns["forbidden_patterns"].replace(ZONAL_CASE_CLUSTER_PLACEHOLDER, re.escape(name))
+            for quoted in (cell, cell.split(": ", 1)[1]):  # the column's cell, and the bare text `report.json` carries
+                line = ZONAL_CASE_LINE_FORMAT.format(cluster=name, rule=zonal_control_plane.RULE_ID, cell=quoted).lower()
+                self.assertIsNotNone(re.search(accepted, line), line)
+                self.assertIsNone(re.search(refused, line), line)
+            reworded = ZONAL_CASE_LINE_FORMAT.format(cluster=name, rule=zonal_control_plane.RULE_ID, cell=cell.replace("unavailable for minutes", "down for a while")).lower()
+            self.assertIsNone(re.search(accepted, reworded), reworded)
+            self.assertIsNotNone(re.search(refused, reworded), reworded)
         self.assertEqual((zonal_control_plane.RULE_ID, zonal_control_plane.ENTRY), ("zonal-control-plane", 11))
 
     def test_multi_zonal_reads_as_zonal_and_the_zone_key_is_a_fallback(self):

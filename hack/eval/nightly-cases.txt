@@ -361,15 +361,15 @@
 # manage-cluster-exclusion-installer-route-probe below. Counted over every
 # entry below on 2026-10-15, after the merge of `6377575a`: seventy-eight
 # cases (234 units) here, of a ninety-two-case, 276-unit matrix with the
-# presubmit file's fourteen (the 2026-10-09 paragraph below counted ninety
-# before the two entries that joined after it).
+# presubmit file's fourteen.
 # No stack, so the infra lock is untouched.
 # 2026-10-09 adds stop-on-permission-refusal: one case, three units at a
 # 1200s hint (one front-door turn and one delegated card; noop, no infra
 # lock; 13-28 minutes a repetition on the dev install while main runs the
 # worker to its retries). It is the last entry below. Counted from the
-# lists: seventy-eight cases (234 units) here, of a ninety-case, 270-unit
-# matrix, the paragraphs above included.
+# lists on 2026-10-15, after the merge of `6377575a`: seventy-eight cases
+# (234 units) here, of a ninety-two-case, 276-unit matrix, the paragraphs
+# above included.
 
 # ── The four full audits recast out of the presubmit on 2026-08-26 ──────────
 # Spec-ready, each domain covered in the presubmit by its probe:
