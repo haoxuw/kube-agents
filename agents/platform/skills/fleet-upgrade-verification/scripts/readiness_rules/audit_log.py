@@ -603,6 +603,7 @@ def _read_result_defect(which, log) -> str | None:
 
 
 UNCOPYABLE = object()  # a snapshot's stand-in for an entry that cannot be deep-copied
+CACHE_ABSENT = object()  # a snapshot's stand-in for a context with no cache key at all, which a key holding None is not
 
 
 def _copy_logs(logs):
@@ -629,10 +630,10 @@ def _copy_logs(logs):
 
 def cache_snapshot(context) -> tuple:
     """The audit-log cache as it stands, for `cache_damage` and `cache_restore` around a
-    rule: the context's cache object (None when the context has none) and a copy of its
-    `audit_log` entry (None when absent; an entry that cannot be copied is UNCOPYABLE).
-    Never raises."""
-    cache = context.get(CONTEXT_CACHE) if isinstance(context, dict) else None
+    rule: the context's cache object (CACHE_ABSENT when the context has no cache key; None
+    when the key holds None, a defect the rule inherits) and a copy of its `audit_log`
+    entry (None when absent; an entry that cannot be copied is UNCOPYABLE). Never raises."""
+    cache = context.get(CONTEXT_CACHE, CACHE_ABSENT) if isinstance(context, dict) else CACHE_ABSENT
     logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
     return cache, _copy_logs(logs)
 
@@ -646,12 +647,20 @@ def cache_damage(context, snapshot) -> str | None:
         cache, logs = snapshot
         now_cache, now_logs = cache_snapshot(context)
         # A defect the rule inherited and left as it was is not the rule's; one it added is,
-        # whatever else sits in the cache before it.
-        before_defects = [CACHE_NOT_A_DICT.format(type=type(cache).__name__)] if cache is not None and not isinstance(cache, dict) else _log_defects(logs)
+        # whatever else sits in the cache before it. The inherited defects are what
+        # `cache_defects` would have said of the snapshot: none for a context with no cache
+        # key, the type for a key holding anything but a dict (None included), the log
+        # defects for a dict.
+        if cache is CACHE_ABSENT:
+            before_defects = []
+        elif not isinstance(cache, dict):
+            before_defects = [CACHE_NOT_A_DICT.format(type=type(cache).__name__)]
+        else:
+            before_defects = _log_defects(logs)
         new_defects = [defect for defect in cache_defects(context) if defect not in before_defects]
         if new_defects:
             return new_defects[0]
-        if cache is not None and now_cache is not cache:
+        if cache is not CACHE_ABSENT and cache is not None and now_cache is not cache:
             return CACHE_REPLACED
         for which, log in (logs.items() if isinstance(logs, dict) else ()):
             if log is UNCOPYABLE:  # inherited; a rule that replaced it with a read is not charged
@@ -673,10 +682,10 @@ def cache_restore(context, snapshot) -> None:
     cache, logs = snapshot
     if not isinstance(context, dict):
         return
-    if cache is None:
+    if cache is CACHE_ABSENT:
         context.pop(CONTEXT_CACHE, None)
     else:
-        context[CONTEXT_CACHE] = cache
+        context[CONTEXT_CACHE] = cache  # a key holding None is put back holding None: as found, not popped
     if isinstance(cache, dict):
         if logs is None or logs is UNCOPYABLE:
             cache.pop(CACHE_KEY, None)
