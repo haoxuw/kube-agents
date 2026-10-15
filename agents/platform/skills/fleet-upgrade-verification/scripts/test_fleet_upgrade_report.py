@@ -1325,18 +1325,31 @@ class FakeReadinessCommands(FakeGcloud):
         return super().__call__(cmd)
 
 
+# The node fields in the order the report's template asks for them, parsed out of the template
+# itself (`{.a.b}` expressions; the range, the separators and the end are not fields), so the
+# fake renders whatever order the template declares and the parser is held against the template
+# through the round trip, not against a copy of the order kept here.
+NODE_TEMPLATE_PATHS = [path.split(".") for path in re.findall(r"\{\.([A-Za-z0-9_.]+)\}", report.KUBECTL_NODE_JSONPATH)]
+
+
 def node_line(node):
-    """One node as kubectl's jsonpath renders the report's template: tab-separated fields, maps, lists and booleans as JSON, an absent field empty."""
-    meta, spec, status = node.get("metadata") or {}, node.get("spec") or {}, node.get("status") or {}
-    fields = [meta.get("name", ""), meta.get("labels"), spec.get("taints"), spec.get("unschedulable"), status.get("nodeInfo"), status.get("allocatable"), status.get("conditions")]
-    return "\t".join([fields[0]] + [json.dumps(f) if f is not None else "" for f in fields[1:]]) + "\n"
+    """One node as kubectl's jsonpath renders the report's template, field by field in the template's own order: a string raw, maps, lists and booleans as JSON, an absent field empty."""
+    values = []
+    for path in NODE_TEMPLATE_PATHS:
+        value = node
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        values.append("" if value is None else value if isinstance(value, str) else json.dumps(value))
+    return "\t".join(values) + "\n"
 
 
+# Literal resource lists and the literal node template, not the constants: a list that drops a
+# kind, or a template that moves, drops or renames a field, must fail here.
 PDB_READ_CMD = ["kubectl", "get", "pdb,deploy,statefulset", "-A", "-o", "json"]
 WEBHOOK_READ_CMD = ["kubectl", "get", "validatingwebhookconfigurations,mutatingwebhookconfigurations,services,endpointslices,namespaces", "-A", "-o", "json"]
 NAMESPACED_READ_CMD = ["kubectl", "get", "daemonset,cronjob,pvc,networkpolicy,namespace", "-A", "-o", "json"]
 POD_READ_CMD = ["kubectl", "get", "pods", "-A", "-o", "json"]
-NODE_READ_CMD = ["kubectl", "get", "node", "-o", f"jsonpath={report.KUBECTL_NODE_JSONPATH}"]
+NODE_READ_CMD = ["kubectl", "get", "node", "-o", 'jsonpath={range .items[*]}{.metadata.name}{"\\t"}{.metadata.labels}{"\\t"}{.spec.taints}{"\\t"}{.spec.unschedulable}{"\\t"}{.status.nodeInfo}{"\\t"}{.status.allocatable}{"\\t"}{.status.conditions}{"\\n"}{end}']
 CLUSTER_READ_CMD = ["kubectl", "get", "storageclass,pv", "-o", "json"]
 MEMBER_READS = [PDB_READ_CMD, WEBHOOK_READ_CMD, NAMESPACED_READ_CMD, POD_READ_CMD, NODE_READ_CMD, CLUSTER_READ_CMD]
 CUT_AT_CAP = "output was cut at the credential proxy's output cap"
@@ -1991,9 +2004,13 @@ class ReadinessTest(unittest.TestCase):
         self.assertEqual(nodes[0]["metadata"]["labels"], {"note": "a\u0085b"})
         self.assertEqual(report.KUBECTL_NODE_JSONPATH.count('{"\\t"}'), report.NODE_FIELD_COUNT - 1)
         self.assertIn("{.spec.unschedulable}", report.KUBECTL_NODE_JSONPATH)
-        # The fake renders a node the way the template does, and the report reads it back whole;
+        # The template declares as many fields as the parser reads, name first; the fake renders
+        # a node in the template's own field order and the report reads it back whole, so a
+        # template or parser that moved a field fails here on a node whose every field differs;
         # a cordoned node's `spec.unschedulable` survives the projection, so the helper that
         # reads it answers from the report's own data.
+        self.assertEqual(len(NODE_TEMPLATE_PATHS), report.NODE_FIELD_COUNT)
+        self.assertEqual(NODE_TEMPLATE_PATHS[0], ["metadata", "name"])
         node = {"kind": "Node", "metadata": {"name": "n1", "labels": {"cloud.google.com/gke-nodepool": "default-pool"}}, "spec": {"taints": [{"key": "k", "effect": "NoSchedule"}], "unschedulable": False}, "status": {"nodeInfo": {"containerRuntimeVersion": "containerd://2.0.10"}, "allocatable": {"cpu": "940m", "memory": "2Gi"}, "conditions": [{"type": "Ready", "status": "True"}]}}
         self.assertEqual(report.parse_node_lines(node_line(node)), ([node], None))
         self.assertTrue(readiness_rules.node_schedulable(report.parse_node_lines(node_line(node))[0][0]))
