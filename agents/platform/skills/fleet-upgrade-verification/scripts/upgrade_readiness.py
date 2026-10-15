@@ -1469,9 +1469,10 @@ def _failed_result(reason: str, rule_id: str, entry, can_block: bool) -> dict:
 
 def _rule_attributes(rule) -> tuple[str, object, bool, str | None]:
     """The module's `RULE_ID`, `ENTRY` and `CAN_BLOCK`, read and checked before anything is
-    derived from them: the id a string, the entry a JSON value, `CAN_BLOCK` a bool. The
-    fourth value is None, or the reason the module is not evaluated; then the id is the
-    module's name, the entry None and `can_block` True, the conservative reading."""
+    derived from them: the id a string (returned as a plain `str`), the entry a JSON value,
+    `CAN_BLOCK` a bool. The fourth value is None, or the reason the module is not evaluated;
+    then the id is the module's name, the entry None and `can_block` True, the conservative
+    reading."""
     name = str(getattr(rule, MODULE_NAME_ATTRIBUTE, rule))
     rule_id = getattr(rule, RULE_ID_ATTRIBUTE, name)
     entry = getattr(rule, ENTRY_ATTRIBUTE, None)
@@ -1484,7 +1485,11 @@ def _rule_attributes(rule) -> tuple[str, object, bool, str | None]:
     for attribute, value, expected, holds in checks:
         if not holds:
             return name, None, True, RULE_ATTRIBUTE_REASON.format(attribute=attribute, type=type(value).__name__, expected=expected)
-    return rule_id, entry, can_block, None
+    # A plain `str`, whatever subclass the module declared: the id keys `rules` and formats the
+    # notes after the fold's guard closes, so a subclass whose `__hash__` raises would leave
+    # the fold there. `str()` runs the subclass's `__str__`, inside the guard; one that raises
+    # is the module's defect like any other attribute read.
+    return str(rule_id), entry, can_block, None
 
 
 def _is_json(value) -> bool:

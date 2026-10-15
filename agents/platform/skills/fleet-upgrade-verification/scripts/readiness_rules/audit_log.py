@@ -440,7 +440,7 @@ def read(context: dict, which: str) -> dict:
     if not isinstance(cache, dict):  # a context built by hand; the fold puts a rule's damage back before the next rule
         cache = context[CONTEXT_CACHE] = {}
     logs = cache.get(CACHE_KEY)
-    if not isinstance(logs, dict):
+    if type(logs) is not dict:  # a context built by hand, or a mapping of a rule's own class: `read` keeps a plain dict of its own; the fold puts a rule's damage back before the next rule
         logs = cache[CACHE_KEY] = {}
     cached = logs.get(which)
     if isinstance(cached, dict) and cached.get(READ_KEY) == which:
@@ -543,7 +543,7 @@ def _unseen(page: list, seen: set) -> list:
 
 def cache_defect(context) -> str | None:
     """Why the audit-log cache cannot be read as the reads left it, or None. The context's
-    cache must be a dict, its `audit_log` entry a dict keyed by read name, and each value a
+    cache must be a dict, its `audit_log` entry a plain dict keyed by read name, and each value a
     read result: a dict whose `read` is that name, carrying every summary key, a JSON value
     throughout (`callers` included) with no NaN or infinity. A rule writes the cache; the fold takes `cache_snapshot` before
     a rule runs, and damage the rule left (`cache_damage`: this, or a stored read gone or
@@ -577,6 +577,17 @@ def _log_defects(logs) -> list[str]:
 
 
 def _read_result_defect(which, log) -> str | None:
+    """Why `log`, stored under the read name `which`, is not a read result, or None. Never
+    raises: an entry of a rule's own class whose methods raise is named by what it raised."""
+    try:
+        return _read_result_shape_defect(which, log)
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException as e:  # noqa: BLE001 - a mapping whose `get` or `__contains__` raises is not a read result either
+        return LOG_NOT_A_READ.format(key=CACHE_KEY, read=which, detail=exception_text(e))
+
+
+def _read_result_shape_defect(which, log) -> str | None:
     if which not in READS:
         return LOG_UNKNOWN_READ.format(key=CACHE_KEY, read=which)
     if log is UNCOPYABLE:
@@ -617,10 +628,17 @@ def _copy_logs(logs):
             raise
         except BaseException:  # noqa: BLE001 - whatever the object refuses with, SystemExit included, the snapshot still stands
             return UNCOPYABLE
+    try:
+        pairs = list(logs.items())  # a mapping of a rule's own class: its `items()` may raise, and then the whole entry is uncopyable
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException:  # noqa: BLE001
+        return UNCOPYABLE
     out = {}
-    for which, log in logs.items():
+    for which, log in pairs:
         try:
-            out[which] = copy.deepcopy(log)
+            copied = copy.deepcopy(log)
+            out[which] = dict(copied) if isinstance(copied, dict) else copied  # a plain dict, so a subclass's own `get` or `items` never runs on the copy
         except NOT_A_RULE_DEFECT:
             raise
         except BaseException:  # noqa: BLE001
@@ -663,7 +681,7 @@ def cache_damage(context, snapshot) -> str | None:
         if cache is not CACHE_ABSENT and cache is not None and now_cache is not cache:
             return CACHE_REPLACED
         for which, log in (logs.items() if isinstance(logs, dict) else ()):
-            if log is UNCOPYABLE:  # inherited; a rule that replaced it with a read is not charged
+            if log is UNCOPYABLE or _read_result_defect(which, log) is not None:  # an inherited defect, not a stored read: a rule that replaced it through `read` is not charged
                 continue
             if not isinstance(now_logs, dict) or which not in now_logs or now_logs[which] != log:
                 return READ_LOST.format(read=which)
@@ -702,7 +720,22 @@ def summaries(context) -> dict[str, dict]:
     logs = cache.get(CACHE_KEY) if isinstance(cache, dict) else None
     if not isinstance(logs, dict):
         return {}
-    return {which: {key: log[key] for key in SUMMARY_KEYS} for which, log in logs.items() if _read_result_defect(which, log) is None}
+    try:
+        pairs = list(logs.items())
+    except NOT_A_RULE_DEFECT:
+        raise
+    except BaseException:  # noqa: BLE001 - a mapping of a rule's own class whose `items()` raises holds no read the writer can show
+        return {}
+    out = {}
+    for which, log in pairs:
+        try:
+            if _read_result_defect(which, log) is None:
+                out[which] = {key: log[key] for key in SUMMARY_KEYS}
+        except NOT_A_RULE_DEFECT:
+            raise
+        except BaseException:  # noqa: BLE001 - an entry whose `__getitem__` raises is left out, like one of another shape
+            continue
+    return out
 
 
 def read_removed(context: dict) -> dict:

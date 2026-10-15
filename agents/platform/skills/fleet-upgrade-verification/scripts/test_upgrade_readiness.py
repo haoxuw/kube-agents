@@ -600,6 +600,35 @@ class ExtraRulesTest(unittest.TestCase):
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, none_cache, rules=[fine, rule_module("second", evaluate=returning(risks=[{"what": "s"}]))])
         self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["fine", "second"]))
         self.assertEqual(none_cache, {shared.CONTEXT_CACHE: None})
+        # A defective entry under a read name (`None` here) is not a stored read: a rule that
+        # replaces it through `read` is not charged with a lost read, so no restore runs and the
+        # read stays for the rule after it, which reads it from the cache, and for the summary.
+        def reading_removed(cluster, member, read, target, ctx):
+            audit_log.read_removed(ctx)
+            out = shared.new_result()
+            out["risks"].append({"what": "rr"})
+            return out
+
+        inherited = context()
+        inherited[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = {"removed": None}
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, inherited, rules=[rule_module("reader", evaluate=reading_removed), rule_module("second", evaluate=reading_removed)])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "second"]))
+        self.assertEqual(sorted(audit_log.summaries(inherited)), ["removed"])
+        # A mapping of a rule's own class whose `items()` raises, inherited under the key, is
+        # uncopyable, not the first rule's: no snapshot, probe or summary raises on it, nothing is
+        # charged, and a rule that reads replaces it with the plain dict `read` keeps.
+        class Unlistable(dict):
+            def items(self):
+                raise OSError("no items")
+
+        poisoned = {shared.CONTEXT_CACHE: {audit_log.CACHE_KEY: Unlistable(removed=1)}}
+        self.assertEqual(audit_log.cache_snapshot(poisoned)[1], audit_log.UNCOPYABLE)
+        self.assertIn("cannot be copied", audit_log.cache_defect(poisoned))
+        self.assertEqual(audit_log.summaries(poisoned), {})
+        unlistable = context()
+        unlistable[shared.CONTEXT_CACHE][audit_log.CACHE_KEY] = Unlistable(removed=1)
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, unlistable, rules=[rule_module("reader", evaluate=reading_removed), fine])
+        self.assertEqual((folded["unknown"], [f["rule"] for f in folded["risks"]]), ([], ["reader", "fine"]))
         self.assertEqual((audit_log.summaries(ctx), audit_log.summaries({}), audit_log.summaries({shared.CONTEXT_CACHE: None}), audit_log.cache_defect({})), ({}, {}, {}, None))
         self.assertIsNotNone(audit_log.cache_defect({shared.CONTEXT_CACHE: None}))
         # A rule's damage is put back before the next rule runs: the next rule's read works
@@ -921,6 +950,26 @@ class ExtraRulesTest(unittest.TestCase):
         interrupted.__getattr__ = interrupting
         with self.assertRaises(KeyboardInterrupt):
             r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[interrupted, fine])
+        # A `RULE_ID` that is a `str` subclass is keyed and printed as the plain string it spells,
+        # since the id keys `rules` and formats the notes after the guard closes: one whose
+        # `__hash__` raises is evaluated under that string; one whose `__str__` raises is the
+        # module's defect under its module name.
+        class Hashless(str):
+            def __hash__(self):
+                raise TypeError("no hash")
+
+        class Strless(str):
+            def __str__(self):
+                raise RuntimeError("no str")
+
+        hashless = bare_module("hashless", evaluate=returning(risks=[{"what": "h"}]), RULE_ID=Hashless("hash-less"), ENTRY=7, CAN_BLOCK=True)
+        strless = bare_module("strless", evaluate=None, RULE_ID=Strless("str-less"), ENTRY=8, CAN_BLOCK=True)
+        folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[hashless, strless, fine])
+        self.assertEqual(sorted(folded["rules"]), ["fine", "hash-less", "strless"])
+        self.assertTrue(all(type(key) is str for key in folded["rules"]))
+        self.assertEqual([f["rule"] for f in folded["risks"]], ["hash-less", "fine"])
+        self.assertEqual([(u["rule"], u["reason"]) for u in folded["unknown"]], [("strless", "reading the module's attributes raised RuntimeError('no str'); not evaluated")])
+        json.dumps(folded)
         # A module with no RULE_ID at all is keyed by its module name and evaluated as usual.
         nameless = bare_module("nameless", evaluate=returning(risks=[{"what": "n"}]), ENTRY=3, CAN_BLOCK=False)
         folded = r.evaluate_extra_rules({}, {}, self.READ, TARGET, {}, rules=[nameless])
